@@ -65,8 +65,12 @@ function getOrBuildIndex(memories) {
 }
 
 export function onRequest(body, ctx) {
+  if (!body) return body;
+  ctx = ctx || {};
   var opts = ctx.options || {};
   if (opts.disabled) return body;
+
+  ctx.state = ctx.state || {};
 
   var messages = body.messages;
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
@@ -172,6 +176,10 @@ export function onRequest(body, ctx) {
 }
 
 export function onResponse(body, ctx) {
+  if (!body) return body;
+  ctx = ctx || {};
+  ctx.state = ctx.state || {};
+
   var assistantText = "";
   if (body.choices && body.choices.length > 0) {
     var choice = body.choices[0];
@@ -193,3 +201,4 @@ export function onResponse(body, ctx) {
 
   return body;
 }
+
