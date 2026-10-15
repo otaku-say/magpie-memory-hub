@@ -1,6 +1,6 @@
 {
   "name": "magpie-memory-hub",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Magpie Long-term Memory & Engineering Pitfall Gateway Middleware powered by NoCodeBackend",
   "type": "module",
   "main": "./memory.middleware.js",
@@ -22,6 +22,10 @@
       "file": "./settings.html",
       "icon": "./icon.svg"
     },
+    "permissions": [
+      "usage:summary",
+      "providers:list"
+    ],
     "options": {
       "disabled": false,
       "inject_pitfalls": true,

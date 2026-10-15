@@ -4,7 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>记忆中枢与 MCP 控制台</title>
+  <!-- Magpie 官方通信桥接 (必须由外部引入，严禁内联) -->
   <script src="_magpie/bridge.js"></script>
+  <!-- 业务逻辑脚本 (独立文件，彻底满足 CSP 零内联脚本安全规范) -->
+  <script src="settings.js" defer></script>
   <style>
     :root {
       --bg: #0b1120;
@@ -177,17 +180,22 @@
       display: none;
       z-index: 999;
     }
+    .hint-text {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <div>
-        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.4.0</span></h1>
-        <p class="desc">网关前置注入控制、Clef 提炼模型配置、NoCodeBackend 存储凭据与 MCP 一键配置导出。</p>
+        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.5.0</span></h1>
+        <p class="desc">网关前置注入控制、动态模型提炼流水线、NoCodeBackend 存储与一键 MCP 导出。</p>
       </div>
       <div>
-        <button class="btn" onclick="saveAllOptions()">💾 保存全部配置</button>
+        <button id="btn_save_all" class="btn">💾 保存全部配置</button>
       </div>
     </header>
 
@@ -217,6 +225,17 @@
         </label>
       </div>
 
+      <div class="toggle-row">
+        <div>
+          <div style="font-weight: 600;">版本更替淘汰 (Auto Supersede)</div>
+          <div style="font-size: 12px; color: var(--text-muted);">当写入同一主题的新经验时，自动将旧记录标记为 superseded 淘汰</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="opt_auto_supersede" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
       <div class="grid-2">
         <div>
           <label>最大注入条数 (Max Injected Count)</label>
@@ -239,33 +258,39 @@
       </div>
     </div>
 
-    <!-- 2. 模型提炼流水线与 Clef 判定 -->
+    <!-- 2. 动态模型配置 (支持下拉与任意自定义输入) -->
     <div class="card">
       <h2>2. 记忆提炼与 Clef 仲裁模型 (Learner & Clef Pipeline)</h2>
       <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
-        在后台对话收尾后，通过极速小模型提取候选事实，并调用 Clef 模型进行质量评估，防止无效噪声入库。
+        后台对话收尾后自动提炼事实并由 Clef 进行质量裁决。支持从下方下拉建议中点选，也可直接输入你在网关配置的任意模型名称。
       </p>
 
       <div class="grid-2">
         <div>
           <label>事实提取模型 (Extractor Model)</label>
-          <select id="opt_extractor_model">
-            <option value="deepseek-chat" selected>deepseek-chat (极速且成本低)</option>
-            <option value="gpt-4o-mini">gpt-4o-mini</option>
-            <option value="qwen-turbo">qwen-turbo</option>
-            <option value="claude-3-5-haiku">claude-3-5-haiku</option>
-          </select>
+          <!-- 采用 input + datalist 实现自由输入与下拉建议双重支持 -->
+          <input type="text" id="opt_extractor_model" list="suggested_models" placeholder="输入或选择模型名，如 deepseek-chat">
+          <div class="hint-text">建议使用成本低、响应极快的小模型</div>
         </div>
         <div>
           <label>质量仲裁模型 (Clef Judge Model)</label>
-          <select id="opt_clef_model">
-            <option value="clef" selected>clef (Magpie 聚合 Clef 模型)</option>
-            <option value="deepseek-reasoner">deepseek-reasoner (R1 深度推理)</option>
-            <option value="gpt-4o">gpt-4o</option>
-            <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
-          </select>
+          <input type="text" id="opt_clef_model" list="suggested_models" placeholder="输入或选择模型名，如 clef 或 deepseek-reasoner">
+          <div class="hint-text">负责甄别高价值经验、过滤临时废话</div>
         </div>
       </div>
+
+      <!-- 动态数据列表 datalist (由 JS 从网关已用模型与供应商列表自动填充) -->
+      <datalist id="suggested_models">
+        <option value="clef">
+        <option value="deepseek-chat">
+        <option value="deepseek-reasoner">
+        <option value="gpt-4o-mini">
+        <option value="gpt-4o">
+        <option value="claude-3-5-haiku">
+        <option value="claude-3-5-sonnet">
+        <option value="qwen-turbo">
+        <option value="qwen-plus">
+      </datalist>
 
       <div class="grid-2">
         <div>
@@ -276,18 +301,6 @@
             <option value="0.85">0.85 (严格筛选)</option>
             <option value="0.90">0.90 (仅收录顶级事实)</option>
           </select>
-        </div>
-        <div style="padding-top: 12px;">
-          <div class="toggle-row" style="border: none; padding: 0;">
-            <div>
-              <div style="font-weight: 600; font-size: 13px;">自动覆盖淘汰 (Auto Supersede)</div>
-              <div style="font-size: 11px; color: var(--text-muted);">当 Clef 判定新结论推翻旧经验时，自动置旧记录为 superseded</div>
-            </div>
-            <label class="switch">
-              <input type="checkbox" id="opt_auto_supersede" checked>
-              <span class="slider"></span>
-            </label>
-          </div>
         </div>
       </div>
     </div>
@@ -300,13 +313,13 @@
       </p>
 
       <div class="mcp-box">
-        <button class="copy-btn" onclick="copyMcpJson()">📋 一键复制配置</button>
+        <button id="btn_copy_json" class="copy-btn">📋 一键复制配置</button>
         <textarea id="mcp_config_display" class="mcp-textarea" readonly spellcheck="false"></textarea>
       </div>
 
       <div style="margin-top: 14px; display: flex; gap: 10px;">
-        <button class="btn btn-secondary" onclick="copyMcpCommand()">📋 复制启动命令</button>
-        <button class="btn btn-secondary" onclick="selectAllText()">🔍 全选配置文本</button>
+        <button id="btn_copy_cmd" class="btn btn-secondary">📋 复制启动命令</button>
+        <button id="btn_select_all" class="btn btn-secondary">🔍 全选配置文本</button>
       </div>
 
       <table class="param-table">
@@ -368,165 +381,5 @@
   </div>
 
   <div id="toast" class="toast"></div>
-
-  <script>
-    function showToast(msg) {
-      const t = document.getElementById('toast');
-      t.innerText = msg;
-      t.style.display = 'block';
-      setTimeout(() => { t.style.display = 'none'; }, 3000);
-    }
-
-    let currentOptions = {};
-
-    function updateMcpBox() {
-      const instEl = document.getElementById('opt_ncb_instance');
-      const secEl = document.getElementById('opt_ncb_secret');
-      const instance = (instEl && instEl.value) ? instEl.value : '41694_agent_core_hub';
-      const secret = (secEl && secEl.value) ? secEl.value : 'sk_live_qcmki2ntz9epoz9r91';
-
-      const mcpConfig = {
-        "mcpServers": {
-          "magpie-memory-hub": {
-            "command": "python3",
-            "args": ["/var/minis/workspace/magpie-memory-hub/daemon.py", "--mcp"],
-            "env": {
-              "NCB_INSTANCE": instance,
-              "NCB_SECRET_KEY": secret
-            }
-          }
-        }
-      };
-
-      const ta = document.getElementById('mcp_config_display');
-      if (ta) {
-        ta.value = JSON.stringify(mcpConfig, null, 2);
-      }
-      const maskEl = document.getElementById('display_secret_masked');
-      if (maskEl) {
-        maskEl.innerText = secret.slice(0, 10) + '...';
-      }
-    }
-
-    function selectAllText() {
-      const ta = document.getElementById('mcp_config_display');
-      if (ta) {
-        ta.focus();
-        ta.select();
-        showToast("已全选配置内容，可直接按 Ctrl+C / Cmd+C 复制！");
-      }
-    }
-
-    function copyToClipboard(text, successMsg) {
-      const ta = document.getElementById('mcp_config_display');
-      if (ta) {
-        ta.focus();
-        ta.select();
-      }
-
-      let copied = false;
-      try {
-        copied = document.execCommand("copy");
-      } catch (e) {
-        copied = false;
-      }
-
-      if (!copied && navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(() => {
-          showToast(successMsg);
-        }).catch(() => {
-          showToast("已自动为您全选，请按 Ctrl+C / Cmd+C 复制！");
-        });
-      } else {
-        showToast(copied ? successMsg : "已自动为您全选，请按 Ctrl+C / Cmd+C 复制！");
-      }
-    }
-
-    function copyMcpJson() {
-      const ta = document.getElementById('mcp_config_display');
-      const text = ta ? ta.value : '';
-      copyToClipboard(text, "✅ MCP 配置 JSON 已成功复制到剪贴板！");
-    }
-
-    function copyMcpCommand() {
-      const cmd = "python3 /var/minis/workspace/magpie-memory-hub/daemon.py --mcp";
-      copyToClipboard(cmd, "✅ 启动命令已复制：python3 daemon.py --mcp");
-    }
-
-    function applyOptionsToUI(opts) {
-      currentOptions = opts || {};
-      if (opts.disabled !== undefined) document.getElementById('opt_auto_inject').checked = !opts.disabled;
-      if (opts.inject_pitfalls !== undefined) document.getElementById('opt_inject_pitfalls').checked = !!opts.inject_pitfalls;
-      if (opts.auto_supersede !== undefined) document.getElementById('opt_auto_supersede').checked = !!opts.auto_supersede;
-      if (opts.max_inject_count) document.getElementById('opt_max_inject_count').value = String(opts.max_inject_count);
-      if (opts.max_budget_chars) document.getElementById('opt_max_budget_chars').value = String(opts.max_budget_chars);
-      if (opts.extractor_model) document.getElementById('opt_extractor_model').value = opts.extractor_model;
-      if (opts.clef_model) document.getElementById('opt_clef_model').value = opts.clef_model;
-      if (opts.min_confidence) document.getElementById('opt_min_confidence').value = String(opts.min_confidence);
-      if (opts.ncb_instance) document.getElementById('opt_ncb_instance').value = opts.ncb_instance;
-      if (opts.r2_domain) document.getElementById('opt_r2_domain').value = opts.r2_domain;
-      updateMcpBox();
-    }
-
-    async function saveAllOptions() {
-      const newOpts = {
-        ...currentOptions,
-        disabled: !document.getElementById('opt_auto_inject').checked,
-        inject_pitfalls: document.getElementById('opt_inject_pitfalls').checked,
-        auto_supersede: document.getElementById('opt_auto_supersede').checked,
-        max_inject_count: parseInt(document.getElementById('opt_max_inject_count').value, 10),
-        max_budget_chars: parseInt(document.getElementById('opt_max_budget_chars').value, 10),
-        extractor_model: document.getElementById('opt_extractor_model').value,
-        clef_model: document.getElementById('opt_clef_model').value,
-        min_confidence: parseFloat(document.getElementById('opt_min_confidence').value),
-        ncb_instance: document.getElementById('opt_ncb_instance').value,
-        r2_domain: document.getElementById('opt_r2_domain').value
-      };
-
-      try {
-        if (window.magpie && window.magpie.options && window.magpie.options.set) {
-          await window.magpie.options.set(newOpts);
-        } else {
-          window.parent.postMessage({ magpie: 1, id: Date.now(), method: "options.set", params: { options: newOpts } }, "*");
-        }
-        showToast("✅ 全部配置已保存，网关中间件已热重载！");
-      } catch (err) {
-        showToast("保存失败: " + err.message);
-      }
-    }
-
-    async function initPage() {
-      updateMcpBox();
-      try {
-        if (window.magpie && window.magpie.ready) {
-          await window.magpie.ready;
-          const opts = await window.magpie.options.get();
-          applyOptionsToUI(opts);
-        } else {
-          window.parent.postMessage({ magpie: 1, id: 1, method: "hello" }, "*");
-          window.parent.postMessage({ magpie: 1, id: 2, method: "options.get" }, "*");
-        }
-      } catch (e) {
-        console.warn("Init fallback:", e);
-      }
-    }
-
-    window.addEventListener("message", (ev) => {
-      const m = ev.data;
-      if (!m || m.magpie !== 1) return;
-      if (m.result && m.result.options) {
-        applyOptionsToUI(m.result.options);
-      }
-    });
-
-    const instInput = document.getElementById('opt_ncb_instance');
-    const secInput = document.getElementById('opt_ncb_secret');
-    if (instInput) instInput.addEventListener('input', updateMcpBox);
-    if (secInput) secInput.addEventListener('input', updateMcpBox);
-
-    // Initial fill immediately so it never shows empty
-    updateMcpBox();
-    initPage();
-  </script>
 </body>
 </html>
