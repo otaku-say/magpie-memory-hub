@@ -1,204 +1,176 @@
 /**
- * memory.middleware.js - High-Performance Magpie Gateway Middleware
+ * memory.middleware.js — Magpie Gateway Middleware v2.0
  *
- * Engine: Go moejs (Microsecond-level synchronous execution)
- * Absorbed from Top Projects:
- * 1. Context-Mode: Noise cleaning - strips runtime tags (<system-reminder>, <task-notification>, etc.)
- * 2. Headroom: Token Budget Guard + Failure-Pattern heuristics
- * 3. Mem0: Multi-factor scoring (confidence * access weight) + temporal freshness
- * 4. Microsecond Inverted Index: O(1) keyword lookup for zero gateway latency
+ * 运行环境: Go moejs（纯同步，禁止 fetch/timer/async）
+ * 职责:
+ *   onRequest  — 从 ctx.options.memories 中匹配相关记忆，注入到 system prompt
+ *   onResponse — 提取对话 payload，通过 console.log 输出给外部 harvester 消费
  */
 
 var _cachedIndex = null;
-var _cachedMemoriesRef = null;
+var _cachedRef = null;
 
-// Context-Mode pattern: clean runtime tags and system noise
-function cleanUserText(text) {
+// ---- 噪声清洗（Context-Mode pattern）----
+function clean(text) {
   if (!text || typeof text !== "string") return "";
-  var cleaned = text
+  return text
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
     .replace(/<task-notification>[\s\S]*?<\/task-notification>/gi, "")
     .replace(/<context_guidance>[\s\S]*?<\/context_guidance>/gi, "")
     .replace(/\[system-reminder\][\s\S]*?\[\/system-reminder\]/gi, "")
-    .replace(/\[Relevant Long-term Context\][\s\S]*?(?=\n\n|\n[A-Z]|$)/gi, "")
-    .replace(/\[Persistent Long-term Context[\s\S]*?(?=\n\n|\n[A-Z]|$)/gi, "");
-  return cleaned.trim();
+    .replace(/\[Persistent Memory Context[\s\S]*?(?=\n\n|\n[A-Z]|$)/gi, "")
+    .trim();
 }
 
-/**
- * Build inverted index from raw memories array.
- * Rebuilt ONLY when ctx.options.memories reference changes.
- */
-function getOrBuildIndex(memories) {
+// ---- 倒排索引构建 ----
+function buildIndex(memories) {
   if (!memories || !memories.length) return null;
-  if (_cachedIndex && _cachedMemoriesRef === memories) {
-    return _cachedIndex;
-  }
+  if (_cachedIndex && _cachedRef === memories) return _cachedIndex;
 
-  var index = {};
+  var idx = {};
   for (var i = 0; i < memories.length; i++) {
-    var item = memories[i];
-    if (!item || item.status === "superseded") continue;
-
-    var itemKeys = {};
-    if (item.project_name) itemKeys[item.project_name.toLowerCase()] = true;
-    if (item.component) itemKeys[item.component.toLowerCase()] = true;
-    if (item.tags) {
-      var tags = item.tags.toLowerCase().split(",");
-      for (var t = 0; t < tags.length; t++) {
-        var tag = tags[t].trim();
-        if (tag.length >= 2) itemKeys[tag] = true;
+    var m = memories[i];
+    if (!m || m.status === "superseded") continue;
+    var keys = {};
+    if (m.project) keys[m.project.toLowerCase()] = 1;
+    if (m.category) keys[m.category.toLowerCase()] = 1;
+    if (m.tags) {
+      var ts = m.tags.toLowerCase().split(",");
+      for (var t = 0; t < ts.length; t++) {
+        var tag = ts[t].trim();
+        if (tag.length >= 2) keys[tag] = 1;
       }
     }
-
-    var keys = Object.keys(itemKeys);
-    for (var k = 0; k < keys.length; k++) {
-      var kw = keys[k];
-      if (!index[kw]) index[kw] = [];
-      index[kw].push(item);
+    // 标题分词
+    if (m.title) {
+      var words = m.title.toLowerCase().match(/[a-z0-9\u4e00-\u9fff_-]{2,}/g) || [];
+      for (var w = 0; w < words.length; w++) keys[words[w]] = 1;
+    }
+    var ks = Object.keys(keys);
+    for (var k = 0; k < ks.length; k++) {
+      if (!idx[ks[k]]) idx[ks[k]] = [];
+      idx[ks[k]].push(m);
     }
   }
-
-  _cachedIndex = index;
-  _cachedMemoriesRef = memories;
-  return index;
+  _cachedIndex = idx;
+  _cachedRef = memories;
+  return idx;
 }
 
+// ---- 提取最后一条用户消息 ----
+function lastUserText(messages) {
+  for (var i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      var c = messages[i].content;
+      if (typeof c === "string") return clean(c);
+      if (Array.isArray(c)) {
+        var out = "";
+        for (var j = 0; j < c.length; j++) {
+          if (c[j].type === "text") out += " " + clean(c[j].text);
+        }
+        return out.trim();
+      }
+    }
+  }
+  return "";
+}
+
+// ==== onRequest: 注入相关记忆到 system prompt ====
 export function onRequest(body, ctx) {
   if (!body) return body;
   ctx = ctx || {};
   var opts = ctx.options || {};
   if (opts.disabled) return body;
-
   ctx.state = ctx.state || {};
 
   var messages = body.messages;
-  if (!messages || !Array.isArray(messages) || messages.length === 0) {
-    return body;
-  }
+  if (!messages || !Array.isArray(messages) || !messages.length) return body;
 
-  // 1. Extract and clean latest user query text (Context-Mode Heuristic)
-  var promptText = "";
-  for (var i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "user") {
-      var c = messages[i].content;
-      if (typeof c === "string") {
-        promptText = cleanUserText(c);
-      } else if (Array.isArray(c)) {
-        for (var j = 0; j < c.length; j++) {
-          if (c[j].type === "text") promptText += " " + cleanUserText(c[j].text);
-        }
-      }
-      break;
-    }
-  }
-
-  ctx.state.promptText = promptText;
+  var prompt = lastUserText(messages);
+  ctx.state.prompt = prompt;
   ctx.state.model = body.model;
+  if (!prompt) return body;
 
-  if (!promptText) return body;
-
-  // 2. Query Inverted Index
-  var index = getOrBuildIndex(opts.memories);
+  // 查倒排索引
+  var index = buildIndex(opts.memories);
   if (!index) return body;
 
-  var tokens = promptText.toLowerCase().match(/[a-z0-9_-]{2,}/g) || [];
+  var tokens = prompt.toLowerCase().match(/[a-z0-9\u4e00-\u9fff_-]{2,}/g) || [];
   if (!tokens.length) return body;
 
-  var matchedMap = {};
-  var matchedItems = [];
-
+  var seen = {};
+  var hits = [];
   for (var w = 0; w < tokens.length; w++) {
-    var hits = index[tokens[w]];
-    if (hits) {
-      for (var h = 0; h < hits.length; h++) {
-        var item = hits[h];
-        var uid = item.id || (item.project_name + ":" + item.title);
-        if (!matchedMap[uid]) {
-          matchedMap[uid] = true;
-          // Mem0 Ranking Score = confidence * (1 + 0.1 * access_count)
-          var conf = parseFloat(item.confidence_score) || 1.0;
-          var accesses = parseInt(item.access_count) || 0;
-          item._rankingScore = conf * (1.0 + 0.1 * Math.min(accesses, 10));
-          matchedItems.push(item);
-        }
-      }
+    var bucket = index[tokens[w]];
+    if (!bucket) continue;
+    for (var h = 0; h < bucket.length; h++) {
+      var item = bucket[h];
+      var uid = item.id || (item.project + ":" + item.title);
+      if (seen[uid]) continue;
+      seen[uid] = 1;
+      // Mem0 排名分 = confidence * (1 + 0.1 * min(access_count, 10))
+      var score = (parseFloat(item.confidence_score) || 1) * (1 + 0.1 * Math.min(parseInt(item.access_count) || 0, 10));
+      item._score = score;
+      hits.push(item);
     }
   }
+  if (!hits.length) return body;
 
-  if (matchedItems.length === 0) return body;
+  hits.sort(function(a, b) { return (b._score || 0) - (a._score || 0); });
 
-  // Sort by Mem0 ranking score descending
-  matchedItems.sort(function(a, b) {
-    return (b._rankingScore || 0) - (a._rankingScore || 0);
-  });
-
-  // 3. Render Memory Context Block with Headroom Budget Cap
-  var maxItems = opts.max_inject_count || 5;
-  var budgetChars = opts.max_budget_chars || 2048;
-  var memoryBlock = "\n\n[Persistent Long-term Context & Engineering Knowledge]\n";
-
-  var injectedCount = 0;
-  for (var m = 0; m < matchedItems.length && injectedCount < maxItems; m++) {
-    var it = matchedItems[m];
-    var line = "- [" + (it.category || "RULE") + "] " + it.title + ": " + it.content + "\n";
-    if (memoryBlock.length + line.length > budgetChars) break;
-    memoryBlock += line;
-    injectedCount++;
+  var max = opts.max_inject_count || 5;
+  var budget = opts.max_budget_chars || 2048;
+  var block = "\n\n[Persistent Memory Context]\n";
+  var count = 0;
+  for (var m = 0; m < hits.length && count < max; m++) {
+    var it = hits[m];
+    var line = "- [" + (it.category || "fact") + "] " + it.title + ": " + it.content + "\n";
+    if (block.length + line.length > budget) break;
+    block += line;
+    count++;
   }
 
-  // 4. Inject based on protocol (OpenAI / Anthropic)
+  // 注入 system prompt
   var protocol = ctx.protocol || "chat";
   if (protocol === "anthropic") {
-    if (typeof body.system === "string") {
-      body.system += memoryBlock;
-    } else {
-      body.system = "You are a senior technical assistant." + memoryBlock;
-    }
+    body.system = (typeof body.system === "string" ? body.system : "") + block;
   } else {
     var injected = false;
     for (var s = 0; s < messages.length; s++) {
       if (messages[s].role === "system") {
-        messages[s].content += memoryBlock;
+        messages[s].content += block;
         injected = true;
         break;
       }
     }
     if (!injected) {
-      messages.unshift({
-        role: "system",
-        content: "You are a senior technical assistant with persistent memory." + memoryBlock
-      });
+      messages.unshift({ role: "system", content: block.trim() });
     }
   }
-
   return body;
 }
 
+// ==== onResponse: 输出对话 payload 给外部 harvester ====
 export function onResponse(body, ctx) {
   if (!body) return body;
   ctx = ctx || {};
   ctx.state = ctx.state || {};
 
-  var assistantText = "";
+  var assistant = "";
   if (body.choices && body.choices.length > 0) {
-    var choice = body.choices[0];
-    if (choice.message && choice.message.content) {
-      assistantText = choice.message.content;
-    }
+    var c = body.choices[0];
+    if (c.message && c.message.content) assistant = c.message.content;
   }
 
-  // Headroom Failure-Pattern detection: tool/code error followed by correction
-  if (ctx.state.promptText && assistantText && assistantText.length > 40) {
+  // 只处理有实质内容的对话
+  if (ctx.state.prompt && assistant && assistant.length > 50) {
     var payload = {
-      model: ctx.state.model,
-      prompt: ctx.state.promptText.slice(0, 1000),
-      response: assistantText.slice(0, 2000),
+      model: ctx.state.model || "",
+      prompt: ctx.state.prompt.slice(0, 2000),
+      response: assistant.slice(0, 4000),
       ts: Date.now()
     };
     console.log("[MEMORY_HARVEST]" + JSON.stringify(payload));
   }
-
   return body;
 }
-

@@ -1,417 +1,88 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>记忆中枢与 MCP 控制台</title>
-  <script src="_magpie/bridge.js"></script>
-  <script src="settings.js" defer></script>
-  <style>
-    :root {
-      --bg: #0b1120;
-      --card-bg: #1e293b;
-      --border: #334155;
-      --primary: #38bdf8;
-      --primary-hover: #0284c7;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
-      --success: #4ade80;
-      --code-bg: #030712;
-      --accent: #a855f7;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background-color: var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      padding: 24px;
-      line-height: 1.5;
-    }
-    .container { max-width: 860px; margin: 0 auto; }
-    header {
-      margin-bottom: 24px;
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 16px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    h1 { font-size: 22px; color: var(--primary); display: flex; align-items: center; gap: 8px; }
-    p.desc { color: var(--text-muted); font-size: 13px; margin-top: 4px; }
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 20px;
-      margin-bottom: 20px;
-    }
-    .card h2 { font-size: 15px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
-    .toggle-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 10px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-    }
-    .toggle-row:last-child { border-bottom: none; }
-    .switch {
-      position: relative;
-      display: inline-block;
-      width: 44px;
-      height: 24px;
-      flex-shrink: 0;
-    }
-    .switch input { opacity: 0; width: 0; height: 0; }
-    .slider {
-      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-      background-color: var(--border);
-      border-radius: 24px;
-      transition: .3s;
-    }
-    .slider:before {
-      position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px;
-      background-color: white;
-      border-radius: 50%;
-      transition: .3s;
-    }
-    input:checked + .slider { background-color: var(--primary); }
-    input:checked + .slider:before { transform: translateX(20px); }
-    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 14px; }
-    label { display: block; font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; }
-    select, input[type="text"], input[type="number"], input[type="password"] {
-      width: 100%;
-      background: var(--code-bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 9px 12px;
-      color: #fff;
-      font-size: 13px;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-    select:focus, input:focus, textarea:focus { border-color: var(--primary); }
-    .btn {
-      background: var(--primary);
-      color: #0b1120;
-      font-weight: 600;
-      padding: 8px 16px;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 13px;
-      transition: background 0.2s;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .btn:hover { background: var(--primary-hover); }
-    .btn-lg {
-      padding: 12px 28px;
-      font-size: 14px;
-      font-weight: 700;
-      border-radius: 8px;
-    }
-    .mcp-box {
-      background: var(--code-bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 14px;
-      margin-top: 12px;
-      position: relative;
-    }
-    .mcp-textarea {
-      width: 100%;
-      height: 220px;
-      background: transparent;
-      border: none;
-      color: #38bdf8;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 12px;
-      line-height: 1.6;
-      resize: vertical;
-      outline: none;
-      white-space: pre;
-    }
-    .copy-btn {
-      position: absolute;
-      top: 10px;
-      right: 10px;
-      background: #1e293b;
-      border: 1px solid var(--border);
-      color: #f8fafc;
-      padding: 6px 12px;
-      border-radius: 4px;
-      font-size: 12px;
-      font-weight: 600;
-      cursor: pointer;
-      z-index: 10;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.4);
-    }
-    .copy-btn:hover { background: var(--primary); color: #0b1120; border-color: var(--primary); }
-    .badge {
-      display: inline-block;
-      font-size: 11px;
-      padding: 2px 6px;
-      border-radius: 4px;
-      background: rgba(56, 189, 248, 0.15);
-      color: var(--primary);
-      margin-left: 6px;
-    }
-    .param-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 12px;
-      font-size: 12px;
-    }
-    .param-table th, .param-table td {
-      border: 1px solid var(--border);
-      padding: 8px 10px;
-      text-align: left;
-    }
-    .param-table th { background: rgba(255,255,255,0.03); color: var(--text-muted); }
-    .toast {
-      position: fixed;
-      bottom: 24px;
-      right: 24px;
-      background: #0284c7;
-      color: #fff;
-      padding: 10px 18px;
-      border-radius: 8px;
-      font-size: 13px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-      display: none;
-      z-index: 999;
-    }
-    .hint-text {
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-top: 4px;
-    }
-    .auth-banner {
-      background: rgba(234, 179, 8, 0.1);
-      border: 1px solid rgba(234, 179, 8, 0.3);
-      border-radius: 6px;
-      padding: 10px 14px;
-      margin-top: 10px;
-      font-size: 12px;
-      color: #fde047;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .tag-manual {
-      background: rgba(56, 189, 248, 0.15);
-      color: #38bdf8;
-      font-size: 10px;
-      padding: 2px 6px;
-      border-radius: 3px;
-    }
-    .footer-actions {
-      margin-top: 24px;
-      padding-top: 16px;
-      border-top: 1px solid var(--border);
-      display: flex;
-      justify-content: flex-end;
-    }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>记忆中枢设置</title>
+<style>
+  :root { --bg: #1a1a2e; --card: #16213e; --border: #0f3460; --accent: #e94560; --text: #eee; --dim: #aaa; --green: #4ecca3; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 16px; line-height: 1.6; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .card h2 { color: var(--accent); font-size: 16px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  label { display: block; font-size: 13px; color: var(--dim); margin-bottom: 4px; margin-top: 12px; }
+  input[type="text"], input[type="number"] { width: 100%; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px; }
+  input:focus { outline: none; border-color: var(--accent); }
+  .hint { font-size: 11px; color: var(--dim); margin-top: 2px; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  .toggle-row { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; }
+  .toggle-row label { margin: 0; }
+  .status { padding: 12px; border-radius: 8px; font-size: 13px; display: none; margin-top: 12px; }
+  .status.ok { display: block; background: rgba(78,204,163,0.15); color: var(--green); border: 1px solid rgba(78,204,163,0.3); }
+  .status.err { display: block; background: rgba(233,69,96,0.15); color: var(--accent); border: 1px solid rgba(233,69,96,0.3); }
+  .btn { display: block; width: 100%; padding: 14px; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 16px; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:active { opacity: 0.8; }
+  .btn-copy { background: var(--border); color: var(--text); font-size: 13px; padding: 10px; margin-top: 8px; }
+  textarea { width: 100%; padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--green); font-family: "SF Mono", Menlo, monospace; font-size: 12px; resize: vertical; min-height: 120px; }
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .stat-item { background: var(--bg); padding: 10px; border-radius: 6px; text-align: center; }
+  .stat-item .num { font-size: 24px; font-weight: 700; color: var(--green); }
+  .stat-item .label { font-size: 11px; color: var(--dim); }
+</style>
 </head>
 <body>
-  <div class="container">
-    <header>
-      <div>
-        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.7.2</span></h1>
-        <p class="desc">网关前置无感注入、自定义提炼模型/分组路由、NoCodeBackend 数据库专属 API Key 鉴权与远程 MCP 导出。</p>
-      </div>
-      <div>
-        <button id="btn_save_all_top" class="btn">💾 保存全部配置</button>
-      </div>
-    </header>
 
-    <!-- 1. 网关前置注入控制 -->
-    <div class="card">
-      <h2>1. 网关前置无感注入 (Gateway Interception)</h2>
-      
-      <div class="toggle-row">
-        <div>
-          <div style="font-weight: 600;">启用记忆自动注入 (Auto-Injection)</div>
-          <div style="font-size: 12px; color: var(--text-muted);">拦截用户 Prompt 并在路由前自动注入匹配的架构经验与开发规范</div>
-        </div>
-        <label class="switch">
-          <input type="checkbox" id="opt_auto_inject" checked>
-          <span class="slider"></span>
-        </label>
-      </div>
+<!-- 卡片 1: 数据库状态 -->
+<div class="card">
+  <h2>📊 数据库状态</h2>
+  <div class="stat-grid">
+    <div class="stat-item"><div class="num" id="stat_memories">-</div><div class="label">活跃记忆</div></div>
+    <div class="stat-item"><div class="num" id="stat_pitfalls">-</div><div class="label">踩坑记录</div></div>
+  </div>
+  <div id="db_status" class="status"></div>
+</div>
 
-      <div class="toggle-row">
-        <div>
-          <div style="font-weight: 600;">注入避坑警示 (Engineering Pitfalls)</div>
-          <div style="font-size: 12px; color: var(--text-muted);">当识别到匹配的技术栈时，自动前置注入历史上记录的故障根因与修复解</div>
-        </div>
-        <label class="switch">
-          <input type="checkbox" id="opt_inject_pitfalls" checked>
-          <span class="slider"></span>
-        </label>
-      </div>
+<!-- 卡片 2: 核心配置 -->
+<div class="card">
+  <h2>⚙️ 核心配置</h2>
+  <label>NCB 数据库实例名</label>
+  <input type="text" id="opt_ncb_instance" value="41694_agent_memory">
 
-      <div class="toggle-row">
-        <div>
-          <div style="font-weight: 600;">版本更替淘汰 (Auto Supersede)</div>
-          <div style="font-size: 12px; color: var(--text-muted);">当写入同一主题的新经验时，自动将旧记录标记为 superseded 淘汰</div>
-        </div>
-        <label class="switch">
-          <input type="checkbox" id="opt_auto_supersede" checked>
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="grid-2">
-        <div>
-          <label>最大注入条数 (Max Injected Count)</label>
-          <select id="opt_max_inject_count">
-            <option value="3">3 条 (极简省 Token)</option>
-            <option value="5" selected>5 条 (推荐默认)</option>
-            <option value="8">8 条</option>
-            <option value="12">12 条 (高密度上下文)</option>
-          </select>
-        </div>
-        <div>
-          <label>字符预算硬顶 (Token Budget Guard)</label>
-          <select id="opt_max_budget_chars">
-            <option value="1024">1024 字符 (~250 Tokens)</option>
-            <option value="2048" selected>2048 字符 (~500 Tokens - 推荐)</option>
-            <option value="4096">4096 字符 (~1000 Tokens)</option>
-            <option value="8192">8192 字符 (长窗口模型)</option>
-          </select>
-        </div>
-      </div>
+  <div class="row">
+    <div>
+      <label>最大注入条数</label>
+      <input type="number" id="opt_max_inject" value="5" min="1" max="20">
     </div>
-
-    <!-- 2. 手动填写提炼与仲裁模型 (彻底告别下拉写死) -->
-    <div class="card">
-      <h2>2. 记忆提炼与 Clef 仲裁模型 (Learner & Clef Pipeline) <span class="tag-manual">纯手动输入</span></h2>
-      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
-        对话收尾后自动提炼事实并由判断模型进行质量裁决。支持直接输入<strong>单个具体模型 ID</strong> 或你在网关路由中配置的<strong>组合模型/路由分组别名</strong>。
-      </p>
-
-      <div class="grid-2">
-        <div>
-          <label>事实提取模型 (Extractor Model / Group ID)</label>
-          <input type="text" id="opt_extractor_model" placeholder="输入模型ID或分组，例如 deepseek-chat 或 fast">
-          <div class="hint-text">负责从长对话中提取关键知识，推荐填写响应极快的小模型或极速分组</div>
-        </div>
-        <div>
-          <label>质量仲裁模型 (Clef Judge Model / Group ID)</label>
-          <input type="text" id="opt_clef_model" placeholder="输入仲裁模型或组合分组，例如 group/clef 或 clef">
-          <div class="hint-text">负责裁决事实价值并去重淘汰，如由多个 CF 账号组合成的 <code>group/clef</code></div>
-        </div>
-      </div>
-
-      <div class="grid-2">
-        <div>
-          <label>最低入库置信度评分 (Min Confidence Floor)</label>
-          <select id="opt_min_confidence">
-            <option value="0.70">0.70 (宽松收录)</option>
-            <option value="0.75" selected>0.75 (推荐标准)</option>
-            <option value="0.85">0.85 (严格筛选)</option>
-            <option value="0.90">0.90 (仅收录顶级事实)</option>
-          </select>
-        </div>
-      </div>
-    </div>
-
-    <!-- 3. MCP 客户端动态远程端点与一键配置 -->
-    <div class="card">
-      <h2>3. 动态远程 MCP 服务挂载 (Model Context Protocol)</h2>
-      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">
-        对外暴露标准远程 MCP 端点。支持挂载到 Cursor、Claude Desktop、Cline 或 Minis，Agent 可通过此接口主动检索与沉淀记忆。
-      </p>
-
-      <div class="grid-2" style="margin-bottom: 12px;">
-        <div>
-          <label>网关对外服务域名 (Gateway Host)</label>
-          <input type="text" id="opt_mcp_host" placeholder="自动探测当前访问域名...">
-          <div class="hint-text">动态检测当前访问域名，亦可自定义修改</div>
-        </div>
-        <div>
-          <label>挂载路径与实例 (MCP Endpoint Path)</label>
-          <input type="text" id="opt_mcp_path" placeholder="输入任意自定义路径，如 /test 或 /41694_agent_core_hub">
-          <div class="hint-text">支持填写任意自定义前缀，系统将自动规范化并在结尾追加 <code>/mcp</code></div>
-        </div>
-      </div>
-
-      <div class="auth-banner">
-        <div>🔐 <strong>安全鉴权提示：</strong>此端点需要携带 <code>Authorization: Bearer $MAGPIE_API_KEY</code> 请求头（复用 Magpie 网关统一密钥）。</div>
-      </div>
-
-      <div class="mcp-box">
-        <button id="btn_copy_json" class="copy-btn">📋 一键复制完整配置</button>
-        <textarea id="mcp_config_display" class="mcp-textarea" readonly spellcheck="false"></textarea>
-      </div>
-
-      <table class="param-table">
-        <thead>
-          <tr>
-            <th>关键参数名</th>
-            <th>当前配置值</th>
-            <th>说明</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><code>server_name</code></td>
-            <td><strong>magpie-memory-hub</strong></td>
-            <td>MCP 服务注册唯一标识</td>
-          </tr>
-          <tr>
-            <td><code>mcp_url</code></td>
-            <td><code id="display_mcp_url">https://.../mcp</code></td>
-            <td>动态检测生成的外网远程端点</td>
-          </tr>
-          <tr>
-            <td><code>headers</code></td>
-            <td><code>{"Authorization": "Bearer $MAGPIE_API_KEY"}</code></td>
-            <td>复用 Magpie 网关访问密钥鉴权</td>
-          </tr>
-          <tr>
-            <td><code>NCB_INSTANCE</code></td>
-            <td><strong>41694_agent_core_hub</strong></td>
-            <td>NoCodeBackend 终态核心数据库实例</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- 4. NoCodeBackend 云端持久层凭据 -->
-    <div class="card">
-      <h2>4. NoCodeBackend 云端持久层凭据</h2>
-      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
-        Magpie 记忆插件与后台引擎通过专属 Secret Key / API Key 直接与 NoCodeBackend 数据库建立安全通信。
-      </p>
-      <div class="grid-2">
-        <div>
-          <label>数据库实例 (NCB Instance)</label>
-          <input type="text" id="opt_ncb_instance" value="41694_agent_core_hub">
-          <div class="hint-text">NoCodeBackend 上的唯一数据库标识</div>
-        </div>
-        <div>
-          <label>Cloudflare R2 公开域名</label>
-          <input type="text" id="opt_r2_domain" value="https://agent-core-hub.4a8a.com">
-          <div class="hint-text">大文件、架构图与产物 CDN 加速域名</div>
-        </div>
-      </div>
-      <div style="margin-top: 14px;">
-        <label>记忆数据库 Secret Key / API Key</label>
-        <input type="password" id="opt_ncb_secret" placeholder="填入你在 NoCodeBackend 生成的专属 API Key，例如 ncb_sec_...">
-        <div class="hint-text">在 NoCodeBackend 数据库菜单中生成的独立 Secret Key，用于插件与数据库专属通信</div>
-      </div>
-    </div>
-
-    <!-- 底部保存全部配置按钮 (调整完下方设置后无需返回顶部) -->
-    <div class="footer-actions">
-      <button id="btn_save_all_bottom" class="btn btn-lg">💾 保存全部配置</button>
+    <div>
+      <label>注入预算 (字符)</label>
+      <input type="number" id="opt_max_budget" value="2048" min="256" max="8192">
     </div>
   </div>
 
-  <div id="toast" class="toast"></div>
+  <label>提取模型 (留空=不自动提取)</label>
+  <input type="text" id="opt_extractor_model" placeholder="如 group/clef 或 deepseek-chat">
+  <div class="hint">用于从对话中自动提取记忆的 LLM 模型。留空则仅通过 MCP 手动写入。</div>
+</div>
+
+<!-- 卡片 3: MCP 配置 -->
+<div class="card">
+  <h2>🔌 MCP 端点配置</h2>
+  <label>挂载路径</label>
+  <input type="text" id="opt_mcp_path" placeholder="输入任意自定义路径，如 /agent_memory">
+  <div class="hint">自动在结尾追加 <code>/mcp</code>，例如输入 <code>/test</code> → 实际路径 <code>域名/test/mcp</code></div>
+
+  <label>MCP 配置 (给 AI 客户端用)</label>
+  <textarea id="mcp_config" readonly></textarea>
+  <button class="btn btn-copy" id="btn_copy_config">📋 复制 MCP 配置</button>
+</div>
+
+<!-- 底部保存按钮 -->
+<button class="btn btn-primary" id="btn_save">💾 保存全部配置</button>
+<div id="save_status" class="status"></div>
+
+<script src="_magpie/bridge.js"></script>
+<script src="settings.js" defer></script>
 </body>
 </html>

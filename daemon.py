@@ -1,338 +1,305 @@
 #!/usr/bin/env python3
 """
-Magpie Memory Daemon & Unified MCP Server (Production Edition v1.2)
--------------------------------------------------------------------
-Integrated State-of-the-Art Patterns:
-1. Mem0 Life-cycle: ADD / UPDATE / DELETE / NOOP incremental state machine.
-2. Multi-tier Scope: Global vs Project vs Session scope isolation.
-3. Headroom Heuristics: Failure-to-Success rule pair mining & Error-type categorization.
-4. Recurrence & Decay: Dynamic weight boosting based on usage, recency and recurrence.
-5. NoCodeBackend Persistence: High-speed B-Tree indexed CRUD over REST API on `41694_agent_core_hub`.
-6. Standard MCP Server: JSON-RPC over Stdio for seamless integration with AI coding agents.
+daemon.py — Magpie Memory MCP Server v2.0
+==========================================
+标准 MCP JSON-RPC over Stdio 服务端。
+数据通道: 通过 minis-mcp-cli 子进程调用 NoCodeBackend MCP 的 execute_sql，
+         彻底绕过 REST API 认证问题。
+
+工具清单:
+  - search_memories   搜索记忆（关键词/项目/分类）
+  - record_memory     写入记忆（自动 ADD/UPDATE/NOOP 去重）
+  - query_pitfalls    查询工程踩坑记录
+  - record_pitfall    写入踩坑记录（自动去重 + recurrence 计数）
+  - list_all          列出全部活跃记忆
 """
 
 import os
 import sys
 import json
-import time
-import re
 import hashlib
-import urllib.request
-import urllib.error
-import urllib.parse
+import subprocess
 from datetime import datetime, timezone
 
-NCB_BASE_URL = os.environ.get("NCB_API_URL", "https://api.nocodebackend.com")
-NCB_INSTANCE = os.environ.get("NCB_INSTANCE", "41694_agent_core_hub")
-# 优先从环境变量读取用户生成的独立 API Key，若未传则使用默认 key
-NCB_SECRET_KEY = os.environ.get("NCB_SECRET_KEY") or os.environ.get("NCB_API_KEY") or "sk_live_qcmki2ntz9epoz9r91"
+NCB_DB = os.environ.get("NCB_INSTANCE", "41694_agent_memory")
+MCP_CLI = "minis-mcp-cli"
 
-MAGPIE_BASE_URL = os.environ.get("MAGPIE_BASE_URL", "http://127.0.0.1:8000/v1")
-MAGPIE_API_KEY = os.environ.get("MAGPIE_API_KEY", "dummy-key")
-EXTRACTOR_MODEL = os.environ.get("EXTRACTOR_MODEL", "deepseek-chat")
-CLEF_JUDGE_MODEL = os.environ.get("CLEF_JUDGE_MODEL", "clef")
 
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-def ncb_request(method, path, query_params=None, data=None):
-    params = dict(query_params or {})
-    params["Instance"] = NCB_INSTANCE
-    qs = urllib.parse.urlencode(params)
-    url = f"{NCB_BASE_URL}{path}?{qs}"
-    headers = {
-        "Authorization": f"Bearer {NCB_SECRET_KEY}",
-        "Content-Type": "application/json"
-    }
-    body = json.dumps(data).encode('utf-8') if data else None
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+
+def fingerprint(text):
+    return hashlib.sha256(text.strip().lower().encode()).hexdigest()[:32]
+
+
+def exec_sql(sql):
+    """通过 minis-mcp-cli 调 NCB MCP 的 execute_sql，返回解析后的结果"""
+    args = json.dumps({"database": NCB_DB, "sql": sql})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            res_text = resp.read().decode('utf-8')
-            return json.loads(res_text) if res_text else {"ok": True}
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode('utf-8', errors='ignore')
-        return {"error": f"HTTP {e.code}: {err_body}"}
+        proc = subprocess.run(
+            [MCP_CLI, "call", "NoCodeBackend MCP", "execute_sql", args],
+            capture_output=True, text=True, timeout=30
+        )
+        if proc.returncode != 0:
+            return {"error": proc.stderr.strip() or "execute_sql failed"}
+        raw = json.loads(proc.stdout)
+        # 从 MCP 响应中提取实际结果
+        content = raw.get("result", {}).get("content", [{}])
+        text = content[0].get("text", "{}") if content else "{}"
+        return json.loads(text)
+    except subprocess.TimeoutExpired:
+        return {"error": "execute_sql timeout"}
     except Exception as e:
         return {"error": str(e)}
 
-def compute_fingerprint(text):
-    return hashlib.sha256(text.strip().lower().encode('utf-8')).hexdigest()
 
-# ----------------- Mem0-style Incremental State Machine -----------------
+def sql_escape(val):
+    """简单 SQL 字符串转义"""
+    if val is None:
+        return "NULL"
+    s = str(val).replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
+    return f"'{s}'"
 
-def record_memory_incremental(project_name, category, title, content, tags="", scope="project", related_entities=""):
-    """
-    Mem0 Life-cycle Decision:
-    - Compare candidate with existing memories in the same project/scope.
-    - If identical fingerprint -> NOOP (update access_count + last_accessed_at)
-    - If same project + title but different content -> UPDATE (supersede old version)
-    - Else -> ADD
-    """
-    fp = compute_fingerprint(f"{project_name}:{category}:{title}:{content}")
 
-    # 1. Check exact fingerprint match -> NOOP
-    check = ncb_request("GET", "/read/knowledge_memories", query_params={"fingerprint": fp})
-    if check.get("data") and len(check["data"]) > 0:
-        row = check["data"][0]
-        ncb_request("PUT", f"/update/knowledge_memories/{row['id']}", data={
-            "access_count": int(row.get("access_count", 0)) + 1,
-            "last_accessed_at": now_iso()
-        })
-        return {"action": "NOOP", "id": row["id"], "message": "Identical memory already exists; boosted access count"}
+# ==================== 业务逻辑 ====================
 
-    # 2. Check title collision -> UPDATE (supersede old version)
-    title_check = ncb_request("GET", "/read/knowledge_memories", query_params={
-        "project_name": project_name,
-        "category": category,
-        "status": "active"
-    })
+def search_memories(query=None, project=None, category=None, limit=20):
+    conditions = ["status='active'"]
+    if project:
+        conditions.append(f"project={sql_escape(project)}")
+    if category:
+        conditions.append(f"category={sql_escape(category)}")
+    if query:
+        kw = f"%{query}%"
+        conditions.append(f"(title LIKE {sql_escape(kw)} OR content LIKE {sql_escape(kw)} OR tags LIKE {sql_escape(kw)})")
+    where = " AND ".join(conditions)
+    sql = f"SELECT * FROM memories WHERE {where} ORDER BY access_count DESC LIMIT {int(limit)}"
+    res = exec_sql(sql)
+    if "error" in res:
+        return res
+    results = res.get("results", [{}])
+    return results[0].get("rows", []) if results else []
 
-    old_row_id = None
-    if title_check.get("data"):
-        for r in title_check["data"]:
-            if r.get("title", "").strip().lower() == title.strip().lower():
-                old_row_id = r.get("id")
-                break
 
-    # 3. Create new record
-    new_payload = {
-        "project_name": project_name,
-        "category": category,
-        "title": title,
-        "content": content,
-        "tags": tags.lower(),
-        "scope": scope,
-        "related_entities": related_entities,
-        "fingerprint": fp,
-        "confidence_score": 1.0,
-        "status": "active",
-        "superseded_by_id": 0,
-        "access_count": 1,
-        "last_accessed_at": now_iso()
-    }
-    create_res = ncb_request("POST", "/create/knowledge_memories", data=new_payload)
-    new_id = create_res.get("id")
+def record_memory(project="global", category="fact", title="", content="", tags=""):
+    fp = fingerprint(f"{project}:{category}:{title}:{content}")
 
-    # If updating an old record, mark old as superseded (Headroom & Mem0 pattern)
-    if old_row_id and new_id:
-        ncb_request("PUT", f"/update/knowledge_memories/{old_row_id}", data={
-            "status": "superseded",
-            "superseded_by_id": new_id
-        })
-        return {"action": "UPDATE", "id": new_id, "superseded_id": old_row_id}
+    # 1. 指纹去重 → NOOP
+    check = exec_sql(f"SELECT id, access_count FROM memories WHERE fingerprint={sql_escape(fp)} LIMIT 1")
+    rows = check.get("results", [{}])
+    rows = rows[0].get("rows", []) if rows else []
+    if rows:
+        rid = rows[0]["id"]
+        ac = int(rows[0].get("access_count", 1)) + 1
+        exec_sql(f"UPDATE memories SET access_count={ac} WHERE id={rid}")
+        return {"action": "NOOP", "id": rid, "access_count": ac}
+
+    # 2. 标题去重 → UPDATE（软删旧版）
+    old_check = exec_sql(
+        f"SELECT id FROM memories WHERE project={sql_escape(project)} AND category={sql_escape(category)} "
+        f"AND title={sql_escape(title)} AND status='active' LIMIT 1"
+    )
+    old_rows = old_check.get("results", [{}])
+    old_rows = old_rows[0].get("rows", []) if old_rows else []
+
+    # 3. 写入新记录
+    sql_insert = (
+        f"INSERT INTO memories (project, category, title, content, tags, fingerprint) "
+        f"VALUES ({sql_escape(project)}, {sql_escape(category)}, {sql_escape(title)}, "
+        f"{sql_escape(content)}, {sql_escape(tags)}, {sql_escape(fp)})"
+    )
+    insert_res = exec_sql(sql_insert)
+    new_id = insert_res.get("results", [{}])
+    new_id = new_id[0].get("insertId") if new_id else None
+
+    # 如果有旧版本，标记为 superseded
+    if old_rows and new_id:
+        old_id = old_rows[0]["id"]
+        exec_sql(f"UPDATE memories SET status='superseded' WHERE id={old_id}")
+        return {"action": "UPDATE", "new_id": new_id, "superseded_id": old_id}
 
     return {"action": "ADD", "id": new_id}
 
-def search_memories(query=None, project_name=None, scope=None, limit=10):
-    params = {"status": "active"}
-    if project_name:
-        params["project_name"] = project_name
-    if scope:
-        params["scope"] = scope
-    if query:
-        params["tags[like]"] = query
-    res = ncb_request("GET", "/read/knowledge_memories", query_params=params)
-    items = res.get("data", [])
 
-    # Mem0 Ranking formula: confidence * (1 + 0.1 * access_count)
-    for it in items:
-        conf = float(it.get("confidence_score", 1.0))
-        acc = int(it.get("access_count", 0))
-        it["_rank_score"] = conf * (1.0 + 0.1 * min(acc, 10))
-    items.sort(key=lambda x: x["_rank_score"], reverse=True)
-    return items[:limit]
+def list_all_memories(limit=50):
+    sql = f"SELECT * FROM memories WHERE status='active' ORDER BY access_count DESC LIMIT {int(limit)}"
+    res = exec_sql(sql)
+    rows = res.get("results", [{}])
+    return rows[0].get("rows", []) if rows else []
 
-# ----------------- Headroom-style Failure Pattern Learning -----------------
 
-def record_pitfall(project_name, component, symptom, root_cause, solution, severity="medium", error_type="general", tags=""):
-    fp = compute_fingerprint(f"{project_name}:{component}:{symptom}")
-    check = ncb_request("GET", "/read/engineering_pitfalls", query_params={"project_name": project_name, "component": component})
-    if check.get("data") and len(check["data"]) > 0:
-        for row in check["data"]:
-            if row.get("fingerprint") == fp:
-                new_rec = int(row.get("recurrence_count", 1)) + 1
-                ncb_request("PUT", f"/update/engineering_pitfalls/{row['id']}", data={
-                    "recurrence_count": new_rec,
-                    "last_occurred_at": now_iso()
-                })
-                return {"ok": True, "action": "NOOP", "id": row["id"], "recurrence_count": new_rec}
-
-    payload = {
-        "project_name": project_name,
-        "component": component,
-        "symptom": symptom,
-        "root_cause": root_cause,
-        "solution": solution,
-        "severity": severity,
-        "error_type": error_type,
-        "recurrence_count": 1,
-        "last_occurred_at": now_iso(),
-        "fingerprint": fp,
-        "tags": tags.lower()
-    }
-    return ncb_request("POST", "/create/engineering_pitfalls", data=payload)
-
-def query_pitfalls(component=None, query=None, error_type=None, limit=10):
-    params = {}
+def query_pitfalls(component=None, query=None, limit=10):
+    conditions = []
     if component:
-        params["component"] = component
-    if error_type:
-        params["error_type"] = error_type
+        conditions.append(f"component={sql_escape(component)}")
     if query:
-        params["symptom[like]"] = query
-    res = ncb_request("GET", "/read/engineering_pitfalls", query_params=params)
-    return res.get("data", [])[:limit]
+        kw = f"%{query}%"
+        conditions.append(f"(symptom LIKE {sql_escape(kw)} OR solution LIKE {sql_escape(kw)})")
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    sql = f"SELECT * FROM pitfalls {where} ORDER BY recurrence DESC LIMIT {int(limit)}"
+    res = exec_sql(sql)
+    rows = res.get("results", [{}])
+    return rows[0].get("rows", []) if rows else []
 
-# ----------------- MCP Server Standard Protocol -----------------
 
-def handle_mcp_call(method, params, req_id):
-    if method == "initialize":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "magpie-memory-hub", "version": "1.2.0"}
+def record_pitfall(project="global", component="", symptom="", root_cause="", solution="", severity="medium"):
+    fp = fingerprint(f"{project}:{component}:{symptom}")
+
+    # 指纹去重 → 递增 recurrence
+    check = exec_sql(f"SELECT id, recurrence FROM pitfalls WHERE fingerprint={sql_escape(fp)} LIMIT 1")
+    rows = check.get("results", [{}])
+    rows = rows[0].get("rows", []) if rows else []
+    if rows:
+        rid = rows[0]["id"]
+        rc = int(rows[0].get("recurrence", 1)) + 1
+        exec_sql(f"UPDATE pitfalls SET recurrence={rc} WHERE id={rid}")
+        return {"action": "NOOP", "id": rid, "recurrence": rc}
+
+    sql_insert = (
+        f"INSERT INTO pitfalls (project, component, symptom, root_cause, solution, severity, fingerprint) "
+        f"VALUES ({sql_escape(project)}, {sql_escape(component)}, {sql_escape(symptom)}, "
+        f"{sql_escape(root_cause)}, {sql_escape(solution)}, {sql_escape(severity)}, {sql_escape(fp)})"
+    )
+    res = exec_sql(sql_insert)
+    new_id = res.get("results", [{}])
+    new_id = new_id[0].get("insertId") if new_id else None
+    return {"action": "ADD", "id": new_id}
+
+
+# ==================== MCP 协议层 ====================
+
+TOOLS = [
+    {
+        "name": "search_memories",
+        "description": "搜索活跃的长期记忆。支持关键词、项目名、分类过滤。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词（匹配标题/内容/标签）"},
+                "project": {"type": "string", "description": "按项目名过滤"},
+                "category": {"type": "string", "description": "按分类过滤 (fact/rule/preference/architecture)"},
+                "limit": {"type": "integer", "description": "最大返回条数，默认20"}
             }
         }
-    elif method == "tools/list":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "tools": [
-                    {
-                        "name": "search_memories",
-                        "description": "Search active long-term memories using Mem0-style weighted ranking and scope filtering.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "Keyword or tag to search"},
-                                "project_name": {"type": "string", "description": "Filter by project name (optional)"},
-                                "scope": {"type": "string", "enum": ["global", "project", "session"], "description": "Scope level"},
-                                "limit": {"type": "integer", "description": "Max results to return (default: 10)"}
-                            }
-                        }
-                    },
-                    {
-                        "name": "record_memory",
-                        "description": "Store or update an engineering memory with automatic incremental state machine (ADD/UPDATE/NOOP).",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "project_name": {"type": "string", "description": "Project or repository name"},
-                                "category": {"type": "string", "description": "architecture, rule, or preference"},
-                                "title": {"type": "string", "description": "Short concise summary title"},
-                                "content": {"type": "string", "description": "Detailed factual guideline or rule"},
-                                "tags": {"type": "string", "description": "Comma-separated keywords for indexing"},
-                                "scope": {"type": "string", "enum": ["global", "project", "session"], "description": "Scope tier"},
-                                "related_entities": {"type": "string", "description": "Comma-separated related tech or components"}
-                            },
-                            "required": ["project_name", "category", "title", "content"]
-                        }
-                    },
-                    {
-                        "name": "query_pitfalls",
-                        "description": "Look up known engineering pitfalls, bug symptoms, error types and verified fixes.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "component": {"type": "string", "description": "Component or tool name"},
-                                "error_type": {"type": "string", "description": "Specific error category"},
-                                "query": {"type": "string", "description": "Error symptom keyword"}
-                            }
-                        }
-                    },
-                    {
-                        "name": "record_pitfall",
-                        "description": "Record an engineering bug, root cause and verified solution with auto-recurrence tracking.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "project_name": {"type": "string", "description": "Project name"},
-                                "component": {"type": "string", "description": "Component that failed"},
-                                "symptom": {"type": "string", "description": "Error message or behavior"},
-                                "root_cause": {"type": "string", "description": "Technical root cause"},
-                                "solution": {"type": "string", "description": "Verified fix or workaround"},
-                                "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
-                                "error_type": {"type": "string", "description": "Error type tag"},
-                                "tags": {"type": "string", "description": "Keywords for indexing"}
-                            },
-                            "required": ["project_name", "component", "symptom", "root_cause", "solution"]
-                        }
-                    }
-                ]
+    },
+    {
+        "name": "record_memory",
+        "description": "写入一条长期记忆。自动去重：指纹相同→NOOP(计数+1)，标题相同内容不同→UPDATE(新增版本)，全新→ADD。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "项目名，默认 global"},
+                "category": {"type": "string", "description": "分类: fact/rule/preference/architecture"},
+                "title": {"type": "string", "description": "简明标题"},
+                "content": {"type": "string", "description": "详细内容"},
+                "tags": {"type": "string", "description": "逗号分隔的标签"}
+            },
+            "required": ["title", "content"]
+        }
+    },
+    {
+        "name": "query_pitfalls",
+        "description": "查询工程踩坑记录。按组件/症状关键词搜索。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string", "description": "组件名"},
+                "query": {"type": "string", "description": "症状关键词"}
             }
         }
-    elif method == "tools/call":
-        tool_name = params.get("name")
-        args = params.get("arguments", {})
-        res_data = None
-        if tool_name == "search_memories":
-            res_data = search_memories(args.get("query"), args.get("project_name"), args.get("scope"), args.get("limit", 10))
-        elif tool_name == "record_memory":
-            res_data = record_memory_incremental(
-                args.get("project_name"), args.get("category"),
-                args.get("title"), args.get("content"), args.get("tags", ""),
-                args.get("scope", "project"), args.get("related_entities", "")
-            )
-        elif tool_name == "query_pitfalls":
-            res_data = query_pitfalls(args.get("component"), args.get("query"), args.get("error_type"), args.get("limit", 10))
-        elif tool_name == "record_pitfall":
-            res_data = record_pitfall(
-                args.get("project_name"), args.get("component"),
-                args.get("symptom"), args.get("root_cause"),
-                args.get("solution"), args.get("severity", "medium"),
-                args.get("error_type", "general"), args.get("tags", "")
-            )
-        else:
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32601, "message": f"Method {tool_name} not found"}
-            }
-
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "content": [{"type": "text", "text": json.dumps(res_data, ensure_ascii=False, indent=2)}]
+    },
+    {
+        "name": "record_pitfall",
+        "description": "记录一个工程踩坑。自动去重：相同指纹→递增 recurrence 计数。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "项目名"},
+                "component": {"type": "string", "description": "出问题的组件"},
+                "symptom": {"type": "string", "description": "错误现象/报错信息"},
+                "root_cause": {"type": "string", "description": "根因"},
+                "solution": {"type": "string", "description": "已验证的解决方案"},
+                "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]}
+            },
+            "required": ["component", "symptom", "root_cause", "solution"]
+        }
+    },
+    {
+        "name": "list_all",
+        "description": "列出全部活跃记忆，按访问次数排序。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "最大返回条数，默认50"}
             }
         }
-
-    return {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "error": {"code": -32600, "message": f"Unhandled method {method}"}
     }
+]
 
-def run_stdio_mcp():
+
+def handle(method, params, req_id):
+    if method == "initialize":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "magpie-memory-hub", "version": "2.0.0"}
+        }}
+    if method == "notifications/initialized":
+        return None  # notification, no response
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+    if method == "tools/call":
+        name = params.get("name", "")
+        args = params.get("arguments", {})
+        dispatch = {
+            "search_memories": lambda: search_memories(args.get("query"), args.get("project"), args.get("category"), args.get("limit", 20)),
+            "record_memory": lambda: record_memory(args.get("project", "global"), args.get("category", "fact"), args.get("title", ""), args.get("content", ""), args.get("tags", "")),
+            "query_pitfalls": lambda: query_pitfalls(args.get("component"), args.get("query"), args.get("limit", 10)),
+            "record_pitfall": lambda: record_pitfall(args.get("project", "global"), args.get("component", ""), args.get("symptom", ""), args.get("root_cause", ""), args.get("solution", ""), args.get("severity", "medium")),
+            "list_all": lambda: list_all_memories(args.get("limit", 50)),
+        }
+        fn = dispatch.get(name)
+        if not fn:
+            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Unknown tool: {name}"}}
+        try:
+            result = fn()
+            return {"jsonrpc": "2.0", "id": req_id, "result": {
+                "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]
+            }}
+        except Exception as e:
+            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": str(e)}}
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32600, "message": f"Unknown method: {method}"}}
+
+
+def main():
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         try:
             req = json.loads(line)
-            resp = handle_mcp_call(req.get("method"), req.get("params"), req.get("id"))
-            sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+            resp = handle(req.get("method"), req.get("params", {}), req.get("id"))
+            if resp is not None:
+                sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+                sys.stdout.flush()
         except Exception as e:
             err = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(e)}}
             sys.stdout.write(json.dumps(err) + "\n")
             sys.stdout.flush()
 
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--mcp":
-        run_stdio_mcp()
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+        print("=== Self-test ===")
+        r1 = record_memory("test-proj", "fact", "测试标题", "测试内容", "test,demo")
+        print("record_memory:", json.dumps(r1, ensure_ascii=False))
+        r2 = search_memories(query="测试")
+        print("search_memories:", json.dumps(r2, ensure_ascii=False, indent=2))
+        r3 = record_memory("test-proj", "fact", "测试标题", "测试内容", "test,demo")
+        print("duplicate (NOOP):", json.dumps(r3, ensure_ascii=False))
+        # cleanup
+        exec_sql("DELETE FROM memories WHERE project='test-proj'")
+        print("cleanup done")
     else:
-        print("Self-testing database tier 1.2 with scope & recurrence...")
-        r1 = record_memory_incremental("bench-test", "rule", "Scope Rule", "Use global scope", "scope", scope="global")
-        print("Record memory with scope:", r1)
-        p1 = record_pitfall("bench-test", "docker", "Port collision 8080", "Address already in use", "kill old container", severity="high", error_type="port_conflict")
-        print("Record pitfall with error_type:", p1)
-        p2 = record_pitfall("bench-test", "docker", "Port collision 8080", "Address already in use", "kill old container", severity="high", error_type="port_conflict")
-        print("Duplicate pitfall (recurrence boosted):", p2)
-        res = search_memories(project_name="bench-test", scope="global")
-        print("Active memories matching scope:", len(res))
+        main()
