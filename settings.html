@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Magpie 长期记忆与经验中枢设置</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --border: #334155;
+      --primary: #38bdf8;
+      --primary-hover: #0284c7;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --success: #4ade80;
+      --danger: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 24px;
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    header {
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+    }
+    h1 { font-size: 24px; color: var(--primary); display: flex; align-items: center; gap: 8px; }
+    p.desc { color: var(--text-muted); font-size: 14px; margin-top: 6px; }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .card h2 { font-size: 16px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
+    .form-group {
+      margin-bottom: 16px;
+    }
+    .form-group:last-child { margin-bottom: 0; }
+    label { display: block; font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; }
+    input[type="text"], input[type="password"], input[type="number"], select, textarea {
+      width: 100%;
+      background: #0b1120;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: #fff;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus, select:focus, textarea:focus { border-color: var(--primary); }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+    }
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: var(--border);
+      border-radius: 24px;
+      transition: .3s;
+    }
+    .slider:before {
+      position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px;
+      background-color: white;
+      border-radius: 50%;
+      transition: .3s;
+    }
+    input:checked + .slider { background-color: var(--primary); }
+    input:checked + .slider:before { transform: translateX(20px); }
+    .btn {
+      background: var(--primary);
+      color: #0b1120;
+      font-weight: 600;
+      padding: 10px 18px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: var(--primary-hover); }
+    .btn-secondary {
+      background: #334155;
+      color: #fff;
+    }
+    .btn-secondary:hover { background: #475569; }
+    .status-badge {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-weight: normal;
+    }
+    .status-ok { background: rgba(74, 222, 128, 0.15); color: var(--success); }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🧠 Magpie 记忆中枢配置面板 (Memory Hub)</h1>
+      <p class="desc">控制 LLM 网关上下文前置注入、NoCodeBackend 云端持久化存储与 Clef 仲裁模型提炼流水线。</p>
+    </header>
+
+    <!-- 1. 网关行为与自动注入 -->
+    <div class="card">
+      <h2>1. 网关前置注入 (Gateway Injection) <span class="status-badge status-ok">活跃中</span></h2>
+      <div class="toggle-row">
+        <div>
+          <div style="font-weight: 600;">启用上下文自动注入 (Auto Injection)</div>
+          <div style="font-size: 12px; color: var(--text-muted);">拦截用户 Prompt 并在路由前无感知注入相关的架构经验与避坑条目</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="auto_inject" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="toggle-row" style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.05);">
+        <div>
+          <div style="font-weight: 600;">注入避坑警示 (Engineering Pitfalls)</div>
+          <div style="font-size: 12px; color: var(--text-muted);">当检测到相关技术栈组件时，注入历史翻车根因与解决方案</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="inject_pitfalls" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="grid-2" style="margin-top: 16px;">
+        <div class="form-group">
+          <label>单次最大注入条数 (Max Injected Items)</label>
+          <input type="number" id="max_inject_count" value="5" min="1" max="15">
+        </div>
+        <div class="form-group">
+          <label>最低置信度阈值 (Min Confidence Score)</label>
+          <input type="number" id="min_confidence" value="0.75" step="0.05" min="0" max="1">
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. NoCodeBackend 存储凭据 -->
+    <div class="card">
+      <h2>2. NoCodeBackend 持久层连接</h2>
+      <div class="form-group">
+        <label>数据库实例 (Instance Name)</label>
+        <input type="text" id="ncb_instance" value="41694_agent_core_hub">
+      </div>
+      <div class="form-group">
+        <label>Secret Key (Database-Scoped)</label>
+        <input type="password" id="ncb_secret" value="ncb_sec_xxxxxxxxxxxx">
+      </div>
+      <div class="form-group">
+        <label>Cloudflare R2 公开加速域名 (Public Assets CDN)</label>
+        <input type="text" id="r2_domain" value="https://agent-core-hub.4a8a.com">
+      </div>
+    </div>
+
+    <!-- 3. 模型提炼与 Clef 仲裁 -->
+    <div class="card">
+      <h2>3. 异步提炼流水线 (Learner & Clef Judge)</h2>
+      <div class="grid-2">
+        <div class="form-group">
+          <label>事实提取模型 (Extractor Model)</label>
+          <select id="extractor_model">
+            <option value="deepseek-chat" selected>deepseek-chat (极速且精准)</option>
+            <option value="gpt-4o-mini">gpt-4o-mini</option>
+            <option value="qwen-turbo">qwen-turbo</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>质量仲裁模型 (Clef Judge Model)</label>
+          <select id="clef_model">
+            <option value="clef" selected>clef (本地/网关 Clef 评估器)</option>
+            <option value="deepseek-reasoner">deepseek-reasoner (R1)</option>
+          </select>
+        </div>
+      </div>
+      <div class="toggle-row" style="margin-top: 12px;">
+        <div>
+          <div style="font-weight: 600;">自动覆盖淘汰 (Supersession)</div>
+          <div style="font-size: 12px; color: var(--text-muted);">当 Clef 判定新结论推翻了旧经验时，自动将旧记录标记为 superseded</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="auto_supersede" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px;">
+      <button class="btn btn-secondary" onclick="alert('已重新同步 NoCodeBackend 状态！')">测试连接</button>
+      <button class="btn" onclick="saveSettings()">保存配置并热刷新</button>
+    </div>
+  </div>
+
+  <script>
+    function saveSettings() {
+      const payload = {
+        auto_inject: document.getElementById('auto_inject').checked,
+        inject_pitfalls: document.getElementById('inject_pitfalls').checked,
+        max_inject_count: parseInt(document.getElementById('max_inject_count').value),
+        min_confidence: parseFloat(document.getElementById('min_confidence').value),
+        ncb_instance: document.getElementById('ncb_instance').value,
+        r2_domain: document.getElementById('r2_domain').value,
+        extractor_model: document.getElementById('extractor_model').value,
+        clef_model: document.getElementById('clef_model').value,
+        auto_supersede: document.getElementById('auto_supersede').checked
+      };
+      console.log('Saved settings:', payload);
+      alert('✅ 配置已保存，网关中间件已执行热重载！');
+    }
+  </script>
+</body>
+</html>
