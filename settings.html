@@ -3,8 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>记忆中枢设置与 MCP 控制台</title>
-  <!-- Magpie 官方官方桥接脚本 (在 Magpie 内嵌沙箱中必须加载以响应 hello 握手) -->
+  <title>记忆中枢与 MCP 控制台</title>
   <script src="_magpie/bridge.js"></script>
   <style>
     :root {
@@ -89,7 +88,7 @@
       outline: none;
       transition: border-color 0.2s;
     }
-    select:focus, input:focus { border-color: var(--primary); }
+    select:focus, input:focus, textarea:focus { border-color: var(--primary); }
     .btn {
       background: var(--primary);
       color: #0b1120;
@@ -115,13 +114,18 @@
       margin-top: 12px;
       position: relative;
     }
-    pre {
+    .mcp-textarea {
+      width: 100%;
+      height: 180px;
+      background: transparent;
+      border: none;
+      color: #38bdf8;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 12px;
-      color: #38bdf8;
-      overflow-x: auto;
-      white-space: pre-wrap;
-      word-break: break-all;
+      line-height: 1.6;
+      resize: vertical;
+      outline: none;
+      white-space: pre;
     }
     .copy-btn {
       position: absolute;
@@ -130,12 +134,15 @@
       background: #1e293b;
       border: 1px solid var(--border);
       color: #f8fafc;
-      padding: 4px 10px;
+      padding: 6px 12px;
       border-radius: 4px;
       font-size: 12px;
+      font-weight: 600;
       cursor: pointer;
+      z-index: 10;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.4);
     }
-    .copy-btn:hover { background: #334155; border-color: var(--primary); }
+    .copy-btn:hover { background: var(--primary); color: #0b1120; border-color: var(--primary); }
     .badge {
       display: inline-block;
       font-size: 11px;
@@ -176,15 +183,15 @@
   <div class="container">
     <header>
       <div>
-        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.3.1</span></h1>
-        <p class="desc">网关前置注入控制、NoCodeBackend 存储凭据与 MCP 一键配置导出。</p>
+        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.4.0</span></h1>
+        <p class="desc">网关前置注入控制、Clef 提炼模型配置、NoCodeBackend 存储凭据与 MCP 一键配置导出。</p>
       </div>
       <div>
         <button class="btn" onclick="saveAllOptions()">💾 保存全部配置</button>
       </div>
     </header>
 
-    <!-- 1. 网关前置注入控制 (全图形化开关与下拉) -->
+    <!-- 1. 网关前置注入控制 -->
     <div class="card">
       <h2>1. 网关前置无感注入 (Gateway Interception)</h2>
       
@@ -206,17 +213,6 @@
         </div>
         <label class="switch">
           <input type="checkbox" id="opt_inject_pitfalls" checked>
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="toggle-row">
-        <div>
-          <div style="font-weight: 600;">版本更替淘汰 (Auto Supersede)</div>
-          <div style="font-size: 12px; color: var(--text-muted);">当写入同一主题的新经验时，自动将旧记录标记为 superseded 淘汰</div>
-        </div>
-        <label class="switch">
-          <input type="checkbox" id="opt_auto_supersede" checked>
           <span class="slider"></span>
         </label>
       </div>
@@ -243,20 +239,74 @@
       </div>
     </div>
 
-    <!-- 2. MCP 客户端一键配置 -->
+    <!-- 2. 模型提炼流水线与 Clef 判定 -->
     <div class="card">
-      <h2>2. MCP 服务一键挂载 (Model Context Protocol)</h2>
+      <h2>2. 记忆提炼与 Clef 仲裁模型 (Learner & Clef Pipeline)</h2>
+      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
+        在后台对话收尾后，通过极速小模型提取候选事实，并调用 Clef 模型进行质量评估，防止无效噪声入库。
+      </p>
+
+      <div class="grid-2">
+        <div>
+          <label>事实提取模型 (Extractor Model)</label>
+          <select id="opt_extractor_model">
+            <option value="deepseek-chat" selected>deepseek-chat (极速且成本低)</option>
+            <option value="gpt-4o-mini">gpt-4o-mini</option>
+            <option value="qwen-turbo">qwen-turbo</option>
+            <option value="claude-3-5-haiku">claude-3-5-haiku</option>
+          </select>
+        </div>
+        <div>
+          <label>质量仲裁模型 (Clef Judge Model)</label>
+          <select id="opt_clef_model">
+            <option value="clef" selected>clef (Magpie 聚合 Clef 模型)</option>
+            <option value="deepseek-reasoner">deepseek-reasoner (R1 深度推理)</option>
+            <option value="gpt-4o">gpt-4o</option>
+            <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div>
+          <label>最低入库置信度评分 (Min Confidence Floor)</label>
+          <select id="opt_min_confidence">
+            <option value="0.70">0.70 (宽松收录)</option>
+            <option value="0.75" selected>0.75 (推荐标准)</option>
+            <option value="0.85">0.85 (严格筛选)</option>
+            <option value="0.90">0.90 (仅收录顶级事实)</option>
+          </select>
+        </div>
+        <div style="padding-top: 12px;">
+          <div class="toggle-row" style="border: none; padding: 0;">
+            <div>
+              <div style="font-weight: 600; font-size: 13px;">自动覆盖淘汰 (Auto Supersede)</div>
+              <div style="font-size: 11px; color: var(--text-muted);">当 Clef 判定新结论推翻旧经验时，自动置旧记录为 superseded</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="opt_auto_supersede" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. MCP 客户端一键配置 -->
+    <div class="card">
+      <h2>3. MCP 服务一键挂载 (Model Context Protocol)</h2>
       <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">
-        复制此配置即可一键挂载到 Cursor、Claude Desktop、Cline 或 Minis，使 Agent 具备主动调取与沉淀记忆的能力。
+        复制此配置即可一键挂载到 Cursor、Claude Desktop、Cline 或 Minis，使外部 Agent 具备主动调取与沉淀记忆的能力。
       </p>
 
       <div class="mcp-box">
-        <button class="copy-btn" onclick="copyMcpJson()">📋 一键复制完整配置</button>
-        <pre id="mcp_config_display"></pre>
+        <button class="copy-btn" onclick="copyMcpJson()">📋 一键复制配置</button>
+        <textarea id="mcp_config_display" class="mcp-textarea" readonly spellcheck="false"></textarea>
       </div>
 
       <div style="margin-top: 14px; display: flex; gap: 10px;">
-        <button class="btn btn-secondary" onclick="copyMcpCommand()">📋 仅复制启动命令</button>
+        <button class="btn btn-secondary" onclick="copyMcpCommand()">📋 复制启动命令</button>
+        <button class="btn btn-secondary" onclick="selectAllText()">🔍 全选配置文本</button>
       </div>
 
       <table class="param-table">
@@ -290,16 +340,16 @@
           </tr>
           <tr>
             <td><code>NCB_SECRET_KEY</code></td>
-            <td><code><span id="display_secret_masked">已加密</span></code></td>
+            <td><code><span id="display_secret_masked">已安全加载</span></code></td>
             <td>数据库端点安全凭证 (Server Secret Key)</td>
           </tr>
         </tbody>
       </table>
     </div>
 
-    <!-- 3. 云端存储凭据 -->
+    <!-- 4. 云端存储凭据 -->
     <div class="card">
-      <h2>3. NoCodeBackend 云端持久层凭据</h2>
+      <h2>4. NoCodeBackend 云端持久层凭据</h2>
       <div class="grid-2">
         <div>
           <label>数据库实例 (NCB Instance)</label>
@@ -324,14 +374,17 @@
       const t = document.getElementById('toast');
       t.innerText = msg;
       t.style.display = 'block';
-      setTimeout(() => { t.style.display = 'none'; }, 2500);
+      setTimeout(() => { t.style.display = 'none'; }, 3000);
     }
 
     let currentOptions = {};
 
     function updateMcpBox() {
-      const instance = document.getElementById('opt_ncb_instance').value || '41694_agent_core_hub';
-      const secret = document.getElementById('opt_ncb_secret').value || 'sk_live_qcmki2ntz9epoz9r91';
+      const instEl = document.getElementById('opt_ncb_instance');
+      const secEl = document.getElementById('opt_ncb_secret');
+      const instance = (instEl && instEl.value) ? instEl.value : '41694_agent_core_hub';
+      const secret = (secEl && secEl.value) ? secEl.value : 'sk_live_qcmki2ntz9epoz9r91';
+
       const mcpConfig = {
         "mcpServers": {
           "magpie-memory-hub": {
@@ -344,34 +397,54 @@
           }
         }
       };
-      document.getElementById('mcp_config_display').innerText = JSON.stringify(mcpConfig, null, 2);
-      document.getElementById('display_secret_masked').innerText = secret.slice(0, 10) + '...';
-    }
 
-    function copyToClipboard(text, successMsg) {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(() => {
-          showToast(successMsg);
-        }).catch(() => {
-          fallbackCopy(text, successMsg);
-        });
-      } else {
-        fallbackCopy(text, successMsg);
+      const ta = document.getElementById('mcp_config_display');
+      if (ta) {
+        ta.value = JSON.stringify(mcpConfig, null, 2);
+      }
+      const maskEl = document.getElementById('display_secret_masked');
+      if (maskEl) {
+        maskEl.innerText = secret.slice(0, 10) + '...';
       }
     }
 
-    function fallbackCopy(text, successMsg) {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-      showToast(successMsg);
+    function selectAllText() {
+      const ta = document.getElementById('mcp_config_display');
+      if (ta) {
+        ta.focus();
+        ta.select();
+        showToast("已全选配置内容，可直接按 Ctrl+C / Cmd+C 复制！");
+      }
+    }
+
+    function copyToClipboard(text, successMsg) {
+      const ta = document.getElementById('mcp_config_display');
+      if (ta) {
+        ta.focus();
+        ta.select();
+      }
+
+      let copied = false;
+      try {
+        copied = document.execCommand("copy");
+      } catch (e) {
+        copied = false;
+      }
+
+      if (!copied && navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          showToast(successMsg);
+        }).catch(() => {
+          showToast("已自动为您全选，请按 Ctrl+C / Cmd+C 复制！");
+        });
+      } else {
+        showToast(copied ? successMsg : "已自动为您全选，请按 Ctrl+C / Cmd+C 复制！");
+      }
     }
 
     function copyMcpJson() {
-      const text = document.getElementById('mcp_config_display').innerText;
+      const ta = document.getElementById('mcp_config_display');
+      const text = ta ? ta.value : '';
       copyToClipboard(text, "✅ MCP 配置 JSON 已成功复制到剪贴板！");
     }
 
@@ -387,6 +460,9 @@
       if (opts.auto_supersede !== undefined) document.getElementById('opt_auto_supersede').checked = !!opts.auto_supersede;
       if (opts.max_inject_count) document.getElementById('opt_max_inject_count').value = String(opts.max_inject_count);
       if (opts.max_budget_chars) document.getElementById('opt_max_budget_chars').value = String(opts.max_budget_chars);
+      if (opts.extractor_model) document.getElementById('opt_extractor_model').value = opts.extractor_model;
+      if (opts.clef_model) document.getElementById('opt_clef_model').value = opts.clef_model;
+      if (opts.min_confidence) document.getElementById('opt_min_confidence').value = String(opts.min_confidence);
       if (opts.ncb_instance) document.getElementById('opt_ncb_instance').value = opts.ncb_instance;
       if (opts.r2_domain) document.getElementById('opt_r2_domain').value = opts.r2_domain;
       updateMcpBox();
@@ -400,6 +476,9 @@
         auto_supersede: document.getElementById('opt_auto_supersede').checked,
         max_inject_count: parseInt(document.getElementById('opt_max_inject_count').value, 10),
         max_budget_chars: parseInt(document.getElementById('opt_max_budget_chars').value, 10),
+        extractor_model: document.getElementById('opt_extractor_model').value,
+        clef_model: document.getElementById('opt_clef_model').value,
+        min_confidence: parseFloat(document.getElementById('opt_min_confidence').value),
         ncb_instance: document.getElementById('opt_ncb_instance').value,
         r2_domain: document.getElementById('opt_r2_domain').value
       };
@@ -410,21 +489,20 @@
         } else {
           window.parent.postMessage({ magpie: 1, id: Date.now(), method: "options.set", params: { options: newOpts } }, "*");
         }
-        showToast("✅ 配置已保存，网关中间件已执行热重载！");
+        showToast("✅ 全部配置已保存，网关中间件已热重载！");
       } catch (err) {
         showToast("保存失败: " + err.message);
       }
     }
 
-    // 握手生命周期与初始化：必须在 10s 内响应以避免 Magpie 报页面超时
     async function initPage() {
+      updateMcpBox();
       try {
         if (window.magpie && window.magpie.ready) {
           await window.magpie.ready;
           const opts = await window.magpie.options.get();
           applyOptionsToUI(opts);
         } else {
-          // 独立浏览器测试兼容模式
           window.parent.postMessage({ magpie: 1, id: 1, method: "hello" }, "*");
           window.parent.postMessage({ magpie: 1, id: 2, method: "options.get" }, "*");
         }
@@ -441,8 +519,12 @@
       }
     });
 
-    document.getElementById('opt_ncb_instance').addEventListener('input', updateMcpBox);
-    document.getElementById('opt_ncb_secret').addEventListener('input', updateMcpBox);
+    const instInput = document.getElementById('opt_ncb_instance');
+    const secInput = document.getElementById('opt_ncb_secret');
+    if (instInput) instInput.addEventListener('input', updateMcpBox);
+    if (secInput) secInput.addEventListener('input', updateMcpBox);
+
+    // Initial fill immediately so it never shows empty
     updateMcpBox();
     initPage();
   </script>
