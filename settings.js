@@ -48,9 +48,7 @@ function normalizeMcpPath(input) {
   if (!val) {
     val = "/41694_agent_core_hub";
   }
-  // 去除首尾空白与斜杠
   val = val.replace(/^\/+/, '').replace(/\/+$/, '');
-  // 如果用户已经手动输入了 mcp 结尾，去除它以统一规范
   if (val.toLowerCase().endsWith('/mcp')) {
     val = val.slice(0, -4).replace(/\/+$/, '');
   } else if (val.toLowerCase() === 'mcp') {
@@ -93,16 +91,6 @@ function updateMcpBox() {
   }
 }
 
-
-function selectAllText() {
-  const ta = document.getElementById('mcp_config_display');
-  if (ta) {
-    ta.focus();
-    ta.select();
-    showToast("已全选配置内容，可直接按 Ctrl+C / Cmd+C 复制！");
-  }
-}
-
 function copyToClipboard(text, successMsg) {
   const ta = document.getElementById('mcp_config_display');
   if (ta) {
@@ -132,20 +120,6 @@ function copyMcpJson() {
   const ta = document.getElementById('mcp_config_display');
   const text = ta ? ta.value : '';
   copyToClipboard(text, "✅ 远程 MCP 配置已成功复制到剪贴板！");
-}
-
-function copyMcpUrl() {
-  const host = getEffectiveGatewayHost();
-  const pathInput = document.getElementById('opt_mcp_path');
-  const mcpPath = normalizeMcpPath(pathInput ? pathInput.value : '');
-  const fullUrl = host + mcpPath;
-  copyToClipboard(fullUrl, "✅ 远程端点已复制：" + fullUrl);
-}
-
-
-function copyLocalCommand() {
-  const cmd = `python3 /var/minis/workspace/magpie-memory-hub/daemon.py --mcp`;
-  copyToClipboard(cmd, "✅ 本地 Stdio 启动命令已复制！");
 }
 
 function applyOptionsToUI(opts) {
@@ -260,20 +234,15 @@ window.addEventListener("message", (ev) => {
 });
 
 document.addEventListener("DOMContentLoaded", () => {
-  const btnSave = document.getElementById('btn_save_all');
-  if (btnSave) btnSave.addEventListener('click', saveAllOptions);
+  // 顶部与底部保存按钮均绑定 saveAllOptions
+  const btnSaveTop = document.getElementById('btn_save_all_top');
+  if (btnSaveTop) btnSaveTop.addEventListener('click', saveAllOptions);
+
+  const btnSaveBottom = document.getElementById('btn_save_all_bottom');
+  if (btnSaveBottom) btnSaveBottom.addEventListener('click', saveAllOptions);
 
   const btnCopyJson = document.getElementById('btn_copy_json');
   if (btnCopyJson) btnCopyJson.addEventListener('click', copyMcpJson);
-
-  const btnCopyUrl = document.getElementById('btn_copy_url');
-  if (btnCopyUrl) btnCopyUrl.addEventListener('click', copyMcpUrl);
-
-  const btnCopyLocal = document.getElementById('btn_copy_local_cmd');
-  if (btnCopyLocal) btnCopyLocal.addEventListener('click', copyLocalCommand);
-
-  const btnSelectAll = document.getElementById('btn_select_all');
-  if (btnSelectAll) btnSelectAll.addEventListener('click', selectAllText);
 
   const hostInput = document.getElementById('opt_mcp_host');
   const pathInput = document.getElementById('opt_mcp_path');

@@ -105,8 +105,12 @@
       gap: 6px;
     }
     .btn:hover { background: var(--primary-hover); }
-    .btn-secondary { background: #334155; color: #fff; }
-    .btn-secondary:hover { background: #475569; }
+    .btn-lg {
+      padding: 12px 28px;
+      font-size: 14px;
+      font-weight: 700;
+      border-radius: 8px;
+    }
     .mcp-box {
       background: var(--code-bg);
       border: 1px solid var(--border);
@@ -202,17 +206,24 @@
       padding: 2px 6px;
       border-radius: 3px;
     }
+    .footer-actions {
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: flex-end;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <div>
-        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.7.0</span></h1>
+        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.7.2</span></h1>
         <p class="desc">网关前置无感注入、自定义提炼模型/分组路由、NoCodeBackend 数据库专属 API Key 鉴权与远程 MCP 导出。</p>
       </div>
       <div>
-        <button id="btn_save_all" class="btn">💾 保存全部配置</button>
+        <button id="btn_save_all_top" class="btn">💾 保存全部配置</button>
       </div>
     </header>
 
@@ -337,12 +348,6 @@
         <textarea id="mcp_config_display" class="mcp-textarea" readonly spellcheck="false"></textarea>
       </div>
 
-      <div style="margin-top: 14px; display: flex; gap: 10px;">
-        <button id="btn_copy_url" class="btn btn-secondary">🔗 仅复制 MCP 远程 URL</button>
-        <button id="btn_copy_local_cmd" class="btn btn-secondary">💻 复制本地启动命令 (Stdio)</button>
-        <button id="btn_select_all" class="btn btn-secondary">🔍 全选配置</button>
-      </div>
-
       <table class="param-table">
         <thead>
           <tr>
@@ -399,6 +404,11 @@
         <input type="password" id="opt_ncb_secret" placeholder="填入你在 NoCodeBackend 生成的专属 API Key，例如 ncb_sec_...">
         <div class="hint-text">在 NoCodeBackend 数据库菜单中生成的独立 Secret Key，用于插件与数据库专属通信</div>
       </div>
+    </div>
+
+    <!-- 底部保存全部配置按钮 (调整完下方设置后无需返回顶部) -->
+    <div class="footer-actions">
+      <button id="btn_save_all_bottom" class="btn btn-lg">💾 保存全部配置</button>
     </div>
   </div>
 
