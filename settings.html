@@ -195,13 +195,12 @@
       align-items: center;
       gap: 8px;
     }
-    .dynamic-tag {
-      background: rgba(168, 85, 247, 0.15);
-      color: #c084fc;
+    .tag-manual {
+      background: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
       font-size: 10px;
-      padding: 1px 5px;
+      padding: 2px 6px;
       border-radius: 3px;
-      margin-left: 4px;
     }
   </style>
 </head>
@@ -209,8 +208,8 @@
   <div class="container">
     <header>
       <div>
-        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.6.0</span></h1>
-        <p class="desc">网关前置无感注入、路由分组提炼模型绑定与动态远程 MCP 鉴权端点。</p>
+        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.7.0</span></h1>
+        <p class="desc">网关前置无感注入、自定义提炼模型/分组路由、NoCodeBackend 数据库专属 API Key 鉴权与远程 MCP 导出。</p>
       </div>
       <div>
         <button id="btn_save_all" class="btn">💾 保存全部配置</button>
@@ -276,36 +275,25 @@
       </div>
     </div>
 
-    <!-- 2. 路由分组模型选择 (动态读取与下拉) -->
+    <!-- 2. 手动填写提炼与仲裁模型 (彻底告别下拉写死) -->
     <div class="card">
-      <h2>2. 记忆提炼与 Clef 仲裁模型 (Learner & Clef Pipeline) <span class="dynamic-tag">路由分组联动</span></h2>
+      <h2>2. 记忆提炼与 Clef 仲裁模型 (Learner & Clef Pipeline) <span class="tag-manual">纯手动输入</span></h2>
       <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
-        后台自动提炼事实并由 Clef 进行质量裁决。下拉菜单优先展示你在网关<strong>「路由」分组</strong>中配置的组合模型与自建模型，支持自由输入与点选。
+        对话收尾后自动提炼事实并由判断模型进行质量裁决。支持直接输入<strong>单个具体模型 ID</strong> 或你在网关路由中配置的<strong>组合模型/路由分组别名</strong>。
       </p>
 
       <div class="grid-2">
         <div>
-          <label>事实提取模型 (Extractor Model)</label>
-          <input type="text" id="opt_extractor_model" list="suggested_group_models" placeholder="选择或输入路由分组模型，如 fast 或 deepseek-chat">
-          <div class="hint-text">负责从长对话中提取关键知识，推荐使用速度极快的小模型组合</div>
+          <label>事实提取模型 (Extractor Model / Group ID)</label>
+          <input type="text" id="opt_extractor_model" placeholder="输入模型ID或分组，例如 deepseek-chat 或 fast">
+          <div class="hint-text">负责从长对话中提取关键知识，推荐填写响应极快的小模型或极速分组</div>
         </div>
         <div>
-          <label>质量仲裁模型 (Clef Judge Model)</label>
-          <input type="text" id="opt_clef_model" list="suggested_group_models" placeholder="选择或输入质量裁决模型，如 clef 或 smart">
-          <div class="hint-text">负责甄别高价值经验、评估置信度并执行新旧冲突淘汰</div>
+          <label>质量仲裁模型 (Clef Judge Model / Group ID)</label>
+          <input type="text" id="opt_clef_model" placeholder="输入仲裁模型或组合分组，例如 group/clef 或 clef">
+          <div class="hint-text">负责裁决事实价值并去重淘汰，如由多个 CF 账号组合成的 <code>group/clef</code></div>
         </div>
       </div>
-
-      <!-- 动态路由模型列表 (由 JS 读取网关路由配置自动注入) -->
-      <datalist id="suggested_group_models">
-        <option value="clef">
-        <option value="fast">
-        <option value="smart">
-        <option value="deepseek-chat">
-        <option value="deepseek-reasoner">
-        <option value="gpt-4o-mini">
-        <option value="claude-3-5-haiku">
-      </datalist>
 
       <div class="grid-2">
         <div>
@@ -382,28 +370,34 @@
           <tr>
             <td><code>NCB_INSTANCE</code></td>
             <td><strong>41694_agent_core_hub</strong></td>
-            <td>NoCodeBackend 终态数据库实例</td>
+            <td>NoCodeBackend 终态核心数据库实例</td>
           </tr>
         </tbody>
       </table>
     </div>
 
-    <!-- 4. 云端存储凭据 -->
+    <!-- 4. NoCodeBackend 云端持久层凭据 -->
     <div class="card">
       <h2>4. NoCodeBackend 云端持久层凭据</h2>
+      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
+        Magpie 记忆插件与后台引擎通过专属 Secret Key / API Key 直接与 NoCodeBackend 数据库建立安全通信。
+      </p>
       <div class="grid-2">
         <div>
           <label>数据库实例 (NCB Instance)</label>
           <input type="text" id="opt_ncb_instance" value="41694_agent_core_hub">
+          <div class="hint-text">NoCodeBackend 上的唯一数据库标识</div>
         </div>
         <div>
           <label>Cloudflare R2 公开域名</label>
           <input type="text" id="opt_r2_domain" value="https://agent-core-hub.4a8a.com">
+          <div class="hint-text">大文件、架构图与产物 CDN 加速域名</div>
         </div>
       </div>
       <div style="margin-top: 14px;">
-        <label>Secret Key (Database-Scoped)</label>
-        <input type="password" id="opt_ncb_secret" value="sk_live_qcmki2ntz9epoz9r91">
+        <label>记忆数据库 Secret Key / API Key</label>
+        <input type="password" id="opt_ncb_secret" placeholder="填入你在 NoCodeBackend 生成的专属 API Key，例如 ncb_sec_...">
+        <div class="hint-text">在 NoCodeBackend 数据库菜单中生成的独立 Secret Key，用于插件与数据库专属通信</div>
       </div>
     </div>
   </div>

@@ -24,7 +24,8 @@ from datetime import datetime, timezone
 
 NCB_BASE_URL = os.environ.get("NCB_API_URL", "https://api.nocodebackend.com")
 NCB_INSTANCE = os.environ.get("NCB_INSTANCE", "41694_agent_core_hub")
-NCB_SECRET_KEY = os.environ.get("NCB_SECRET_KEY", "sk_live_qcmki2ntz9epoz9r91")
+# 优先从环境变量读取用户生成的独立 API Key，若未传则使用默认 key
+NCB_SECRET_KEY = os.environ.get("NCB_SECRET_KEY") or os.environ.get("NCB_API_KEY") or "sk_live_qcmki2ntz9epoz9r91"
 
 MAGPIE_BASE_URL = os.environ.get("MAGPIE_BASE_URL", "http://127.0.0.1:8000/v1")
 MAGPIE_API_KEY = os.environ.get("MAGPIE_API_KEY", "dummy-key")

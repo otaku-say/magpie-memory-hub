@@ -12,8 +12,8 @@ let currentOptions = {};
  * 动态推测并获取当前 Magpie 网关的外部访问域名
  * 优先顺序：
  * 1. 用户自定义配置的 mcp_host
- * 2. 当前窗口所在的 window.location.origin
- * 3. 常见的 magpie-api.4a8a.com 兜底
+ * 2. 当前窗口所在的 window.location.origin (例如由 magpie-web 自动映射为 magpie-api)
+ * 3. 兜底域名
  */
 function getEffectiveGatewayHost() {
   const customHost = document.getElementById('opt_mcp_host');
@@ -28,7 +28,6 @@ function getEffectiveGatewayHost() {
   try {
     if (window.location && window.location.origin && window.location.origin !== "null") {
       let host = window.location.origin;
-      // 如果当前是 web 域 (例如 magpie-web.4a8a.com)，智能映射推断 api 域名 (例如 magpie-api.4a8a.com)
       if (host.includes('-web.')) {
         return host.replace('-web.', '-api.');
       }
@@ -54,7 +53,7 @@ function updateMcpBox() {
     hostInput.placeholder = host;
   }
 
-  // 1. 远程 HTTP/SSE MCP 配置（标准 MCP 客户端规范）
+  // 1. 远程 HTTP/SSE MCP 配置（标准 MCP 客户端规范，复用 MAGPIE_API_KEY）
   const remoteMcpConfig = {
     "mcpServers": {
       "magpie-memory-hub": {
@@ -123,43 +122,8 @@ function copyMcpUrl() {
 }
 
 function copyLocalCommand() {
-  const instance = document.getElementById('opt_ncb_instance').value || '41694_agent_core_hub';
-  const secret = document.getElementById('opt_ncb_secret').value || 'sk_live_qcmki2ntz9epoz9r91';
   const cmd = `python3 /var/minis/workspace/magpie-memory-hub/daemon.py --mcp`;
   copyToClipboard(cmd, "✅ 本地 Stdio 启动命令已复制！");
-}
-
-/**
- * 动态加载并注入网关中配置的所有路由分组（Routing Groups）与模型组合
- */
-function populateGroupModels(modelItems) {
-  if (!Array.isArray(modelItems) || !modelItems.length) return;
-  const dl = document.getElementById('suggested_group_models');
-  if (!dl) return;
-
-  const existing = new Set(Array.from(dl.options).map(o => o.value));
-
-  // 1. 优先提取路由分组 (例如 fast, smart, clef, auto)
-  const priorityGroups = ["clef", "smart", "fast", "deepseek-chat", "deepseek-reasoner", "gpt-4o-mini"];
-  priorityGroups.forEach(g => {
-    if (!existing.has(g)) {
-      const opt = document.createElement('option');
-      opt.value = g;
-      dl.appendChild(opt);
-      existing.add(g);
-    }
-  });
-
-  // 2. 注入从网关读取到的真实模型
-  for (const item of modelItems) {
-    const val = typeof item === 'string' ? item : (item.id || item.model || item.name);
-    if (val && !existing.has(val)) {
-      const opt = document.createElement('option');
-      opt.value = val;
-      dl.appendChild(opt);
-      existing.add(val);
-    }
-  }
 }
 
 function applyOptionsToUI(opts) {
@@ -208,6 +172,10 @@ function applyOptionsToUI(opts) {
     const el = document.getElementById('opt_ncb_instance');
     if (el) el.value = opts.ncb_instance;
   }
+  if (opts.ncb_secret) {
+    const el = document.getElementById('opt_ncb_secret');
+    if (el) el.value = opts.ncb_secret;
+  }
   if (opts.r2_domain) {
     const el = document.getElementById('opt_r2_domain');
     if (el) el.value = opts.r2_domain;
@@ -223,12 +191,13 @@ async function saveAllOptions() {
     auto_supersede: document.getElementById('opt_auto_supersede').checked,
     max_inject_count: parseInt(document.getElementById('opt_max_inject_count').value, 10),
     max_budget_chars: parseInt(document.getElementById('opt_max_budget_chars').value, 10),
-    extractor_model: document.getElementById('opt_extractor_model').value.trim() || "fast",
-    clef_model: document.getElementById('opt_clef_model').value.trim() || "clef",
+    extractor_model: document.getElementById('opt_extractor_model').value.trim(),
+    clef_model: document.getElementById('opt_clef_model').value.trim(),
     min_confidence: parseFloat(document.getElementById('opt_min_confidence').value),
     mcp_host: document.getElementById('opt_mcp_host').value.trim(),
     mcp_path: document.getElementById('opt_mcp_path').value.trim() || "/41694_agent_core_hub/mcp",
     ncb_instance: document.getElementById('opt_ncb_instance').value.trim(),
+    ncb_secret: document.getElementById('opt_ncb_secret').value.trim(),
     r2_domain: document.getElementById('opt_r2_domain').value.trim()
   };
 
@@ -249,24 +218,8 @@ async function initPage() {
   try {
     if (window.magpie && window.magpie.ready) {
       await window.magpie.ready;
-      // 1. 读取插件选项
       const opts = await window.magpie.options.get();
       applyOptionsToUI(opts);
-
-      // 2. 读取网关真实活跃模型与分组
-      try {
-        const usageData = await window.magpie.read("usage:summary", {});
-        if (usageData && usageData.Models) {
-          populateGroupModels(usageData.Models);
-        }
-      } catch (e) {}
-
-      try {
-        const provData = await window.magpie.read("providers:list", {});
-        if (Array.isArray(provData)) {
-          populateGroupModels(provData);
-        }
-      } catch (e) {}
     } else {
       window.parent.postMessage({ magpie: 1, id: 1, method: "hello" }, "*");
       window.parent.postMessage({ magpie: 1, id: 2, method: "options.get" }, "*");
