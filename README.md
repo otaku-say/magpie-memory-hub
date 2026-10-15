@@ -6,28 +6,31 @@
 
 **magpie-memory-hub** 是专为 [Magpie](https://github.com/yetone/magpie) 设计的高性能企业级长期记忆与工程避坑网关中间件。
 
-它借鉴了 **Headroom** 的 Failure-Learning 启发式提取思想与 **Token-Budget** 严格预算控制，将无感知的上下文注入、云端持久化（NoCodeBackend）以及标准 MCP 服务融为一体。
+它深度融合了 **Mem0**（增量状态机与访问衰减）、**Headroom**（Failure-Learning 启发式提取与 Token 预算保护）、**Context-Mode**（运行时系统噪声清洗）以及 **NoCodeBackend** 云端高并发关系型索引底座。
 
 ---
 
-## 核心特性
+## 核心架构与先进特性
 
-1. **微秒级网关前置注入 (Zero Latency Overhead)**：
+1. **Mem0 风格的增量演化状态机 (Incremental State Machine)**：
+   - 提取新经验时，通过哈希指纹和上下文对比，自动执行四分流：`ADD`（全新入库）、`UPDATE`（新推翻旧，旧方案打上 `superseded` 标记）、`NOOP`（已有完全一致经验，仅递增权重）、`DELETE`。
+   - 杜绝传统记忆系统反复重复插入导致的上下文漂移。
+
+2. **多维作用域隔离 (Multi-tier Scope)**：
+   - 支持 `global`（全局不可逾越的纪律与偏好）、`project`（具体仓库或项目的架构约定）、`session`（当前任务的瞬时上下文）三层作用域。
+
+3. **故障频次与衰减排序 (Recurrence & Decay Policy)**：
+   - 避坑宝典库自动统计同一 Bug 的 `recurrence_count`（复现频次）与 `last_occurred_at`（最近复现时间）；
+   - 动态打分公式：$$\text{Score} = \text{Confidence} \times (1 + 0.1 \times \min(\text{AccessCount}, 10))$$，高频被验证的有效规则自动前置。
+
+4. **微秒级倒排索引与系统降噪 (Inverted Index & Noise Cleaning)**：
    - 中间件运行在 Magpie 的 Go `moejs` 纯内存引擎中；
-   - 采用 **倒排索引（Inverted Index）** 算法匹配关键词，扫描耗时比传统全遍历快 4~5 倍（单次 < 0.1ms）；
-   - 全协议原生适配：完美兼容 OpenAI Chat Completions、Anthropic Messages 与 Google Gemini。
+   - 自动过滤 `<system-reminder>`、`<task-notification>` 等平台内部运行时标签；
+   - 严格的 Token/字符预算硬顶（默认 2048 字符 / 5 条命中），杜绝撑爆上下文窗口。
 
-2. **严格的 Token / 字符预算控制 (Context Budget Guard)**：
-   - 彻底解决传统记忆插件暴击上下文窗口导致扣费翻倍的缺陷；
-   - 默认限制单次注入上限与总字符预算（默认 2048 字符 / 5 条命中记录），超额自动按置信度截断。
-
-3. **云端无限持久化 (NoCodeBackend Tier-2 终身引擎)**：
-   - 结构化存储：长期知识与架构决策 (`knowledge_memories`)、工程避坑宝典 (`engineering_pitfalls`)、多模态产物 (`build_artifacts`) 与任务追踪 (`task_journals`)；
-   - 内容防重指纹（`fingerprint` SHA-256）与版本更替（`superseded_by_id`）机制；
+5. **云端无限持久化 (NoCodeBackend Tier-2 终身底座)**：
+   - 经过 B-Tree 索引优化的 4 张高内聚数据表；
    - 直通 Cloudflare R2 对象存储，支持无限大文件、二进制与架构图托管。
-
-4. **双向互通标准 MCP 服务 (Stdio JSON-RPC)**：
-   - 自带标准 MCP 接口，可直接作为 MCP Server 挂载到 Claude Desktop、Cursor、Cline、Minis 等客户端，供 Agent 主动搜索与沉淀经验。
 
 ---
 
@@ -42,8 +45,7 @@ magpie plugin add github:otaku-say/magpie-memory-hub
 或者在 Magpie 桌面客户端中：
 1. 打开 **设置 → 插件 (Plugins)**；
 2. 点击 **添加插件 (Add Plugin)**；
-3. 输入仓库地址：`otaku-say/magpie-memory-hub`；
-4. 插件将自动被 Bun 下载并加载为网关中间件！
+3. 输入 `otaku-say/magpie-memory-hub` 确认即可自动加载生效！
 
 ### 方式二：作为独立 MCP Server 挂载
 

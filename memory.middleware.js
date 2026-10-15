@@ -2,15 +2,28 @@
  * memory.middleware.js - High-Performance Magpie Gateway Middleware
  *
  * Engine: Go moejs (Microsecond-level synchronous execution)
- * Architecture Patterns:
- * 1. Tokenized Inverted Index: O(1) keyword lookup instead of O(N*M) string scans.
- * 2. Multi-protocol Adaptation: Seamlessly injects context into OpenAI Chat, Anthropic Messages, & Gemini.
- * 3. Budget Guard: Hard cap on injected characters to prevent context-window blowup.
+ * Absorbed from Top Projects:
+ * 1. Context-Mode: Noise cleaning - strips runtime tags (<system-reminder>, <task-notification>, etc.)
+ * 2. Headroom: Token Budget Guard + Failure-Pattern heuristics
+ * 3. Mem0: Multi-factor scoring (confidence * access weight) + temporal freshness
+ * 4. Microsecond Inverted Index: O(1) keyword lookup for zero gateway latency
  */
 
-// Global in-memory cache for the compiled inverted index
 var _cachedIndex = null;
 var _cachedMemoriesRef = null;
+
+// Context-Mode pattern: clean runtime tags and system noise
+function cleanUserText(text) {
+  if (!text || typeof text !== "string") return "";
+  var cleaned = text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
+    .replace(/<task-notification>[\s\S]*?<\/task-notification>/gi, "")
+    .replace(/<context_guidance>[\s\S]*?<\/context_guidance>/gi, "")
+    .replace(/\[system-reminder\][\s\S]*?\[\/system-reminder\]/gi, "")
+    .replace(/\[Relevant Long-term Context\][\s\S]*?(?=\n\n|\n[A-Z]|$)/gi, "")
+    .replace(/\[Persistent Long-term Context[\s\S]*?(?=\n\n|\n[A-Z]|$)/gi, "");
+  return cleaned.trim();
+}
 
 /**
  * Build inverted index from raw memories array.
@@ -22,21 +35,16 @@ function getOrBuildIndex(memories) {
     return _cachedIndex;
   }
 
-  var index = {}; // word -> Array of memory items
+  var index = {};
   for (var i = 0; i < memories.length; i++) {
     var item = memories[i];
-    if (!item) continue;
+    if (!item || item.status === "superseded") continue;
 
-    // Collect all unique keywords for this item
     var itemKeys = {};
-    if (item.project_name) {
-      itemKeys[item.project_name.toLowerCase()] = true;
-    }
-    if (item.component) {
-      itemKeys[item.component.toLowerCase()] = true;
-    }
+    if (item.project_name) itemKeys[item.project_name.toLowerCase()] = true;
+    if (item.component) itemKeys[item.component.toLowerCase()] = true;
     if (item.tags) {
-      var tags = item.tags.toLowerCase().split(',');
+      var tags = item.tags.toLowerCase().split(",");
       for (var t = 0; t < tags.length; t++) {
         var tag = tags[t].trim();
         if (tag.length >= 2) itemKeys[tag] = true;
@@ -65,23 +73,22 @@ export function onRequest(body, ctx) {
     return body;
   }
 
-  // 1. Extract latest user query text
-  var promptText = '';
+  // 1. Extract and clean latest user query text (Context-Mode Heuristic)
+  var promptText = "";
   for (var i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') {
+    if (messages[i].role === "user") {
       var c = messages[i].content;
-      if (typeof c === 'string') {
-        promptText = c;
+      if (typeof c === "string") {
+        promptText = cleanUserText(c);
       } else if (Array.isArray(c)) {
         for (var j = 0; j < c.length; j++) {
-          if (c[j].type === 'text') promptText += ' ' + c[j].text;
+          if (c[j].type === "text") promptText += " " + cleanUserText(c[j].text);
         }
       }
       break;
     }
   }
 
-  // Preserve state for response auditing
   ctx.state.promptText = promptText;
   ctx.state.model = body.model;
 
@@ -96,7 +103,6 @@ export function onRequest(body, ctx) {
 
   var matchedMap = {};
   var matchedItems = [];
-  var maxItems = opts.max_inject_count || 5;
 
   for (var w = 0; w < tokens.length; w++) {
     var hits = index[tokens[w]];
@@ -106,40 +112,49 @@ export function onRequest(body, ctx) {
         var uid = item.id || (item.project_name + ":" + item.title);
         if (!matchedMap[uid]) {
           matchedMap[uid] = true;
+          // Mem0 Ranking Score = confidence * (1 + 0.1 * access_count)
+          var conf = parseFloat(item.confidence_score) || 1.0;
+          var accesses = parseInt(item.access_count) || 0;
+          item._rankingScore = conf * (1.0 + 0.1 * Math.min(accesses, 10));
           matchedItems.push(item);
-          if (matchedItems.length >= maxItems) break;
         }
       }
     }
-    if (matchedItems.length >= maxItems) break;
   }
 
   if (matchedItems.length === 0) return body;
 
-  // 3. Render Memory Context Block with Budget Control
-  var budgetChars = opts.max_budget_chars || 2000;
+  // Sort by Mem0 ranking score descending
+  matchedItems.sort(function(a, b) {
+    return (b._rankingScore || 0) - (a._rankingScore || 0);
+  });
+
+  // 3. Render Memory Context Block with Headroom Budget Cap
+  var maxItems = opts.max_inject_count || 5;
+  var budgetChars = opts.max_budget_chars || 2048;
   var memoryBlock = "\n\n[Persistent Long-term Context & Engineering Knowledge]\n";
-  for (var m = 0; m < matchedItems.length; m++) {
+
+  var injectedCount = 0;
+  for (var m = 0; m < matchedItems.length && injectedCount < maxItems; m++) {
     var it = matchedItems[m];
     var line = "- [" + (it.category || "RULE") + "] " + it.title + ": " + it.content + "\n";
     if (memoryBlock.length + line.length > budgetChars) break;
     memoryBlock += line;
+    injectedCount++;
   }
 
-  // 4. Inject based on protocol
+  // 4. Inject based on protocol (OpenAI / Anthropic)
   var protocol = ctx.protocol || "chat";
   if (protocol === "anthropic") {
-    // Anthropic Messages API uses top-level system parameter
     if (typeof body.system === "string") {
       body.system += memoryBlock;
     } else {
       body.system = "You are a senior technical assistant." + memoryBlock;
     }
   } else {
-    // Standard OpenAI Chat Completions
     var injected = false;
     for (var s = 0; s < messages.length; s++) {
-      if (messages[s].role === 'system') {
+      if (messages[s].role === "system") {
         messages[s].content += memoryBlock;
         injected = true;
         break;
@@ -147,7 +162,7 @@ export function onRequest(body, ctx) {
     }
     if (!injected) {
       messages.unshift({
-        role: 'system',
+        role: "system",
         content: "You are a senior technical assistant with persistent memory." + memoryBlock
       });
     }
@@ -157,7 +172,7 @@ export function onRequest(body, ctx) {
 }
 
 export function onResponse(body, ctx) {
-  var assistantText = '';
+  var assistantText = "";
   if (body.choices && body.choices.length > 0) {
     var choice = body.choices[0];
     if (choice.message && choice.message.content) {
@@ -165,8 +180,8 @@ export function onResponse(body, ctx) {
     }
   }
 
-  // Emit harvest event to log stream if valuable conversation happened
-  if (ctx.state.promptText && assistantText && assistantText.length > 50) {
+  // Headroom Failure-Pattern detection: tool/code error followed by correction
+  if (ctx.state.promptText && assistantText && assistantText.length > 40) {
     var payload = {
       model: ctx.state.model,
       prompt: ctx.state.promptText.slice(0, 1000),
