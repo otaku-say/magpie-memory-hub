@@ -1,6 +1,6 @@
 {
   "name": "magpie-memory-hub",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Magpie Long-term Memory & Engineering Pitfall Gateway Middleware powered by NoCodeBackend",
   "type": "module",
   "main": "./memory.middleware.js",
@@ -32,10 +32,12 @@
       "max_inject_count": 5,
       "max_budget_chars": 2048,
       "min_confidence": 0.75,
+      "extractor_model": "fast",
+      "clef_model": "clef",
+      "mcp_host": "",
+      "mcp_path": "/41694_agent_core_hub/mcp",
       "ncb_instance": "41694_agent_core_hub",
       "r2_domain": "https://agent-core-hub.4a8a.com",
-      "extractor_model": "deepseek-chat",
-      "clef_model": "clef",
       "auto_supersede": true,
       "memories": []
     }

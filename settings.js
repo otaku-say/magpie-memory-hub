@@ -8,32 +8,68 @@ function showToast(msg) {
 
 let currentOptions = {};
 
-function updateMcpBox() {
-  const instEl = document.getElementById('opt_ncb_instance');
-  const secEl = document.getElementById('opt_ncb_secret');
-  const instance = (instEl && instEl.value) ? instEl.value : '41694_agent_core_hub';
-  const secret = (secEl && secEl.value) ? secEl.value : 'sk_live_qcmki2ntz9epoz9r91';
+/**
+ * 动态推测并获取当前 Magpie 网关的外部访问域名
+ * 优先顺序：
+ * 1. 用户自定义配置的 mcp_host
+ * 2. 当前窗口所在的 window.location.origin
+ * 3. 常见的 magpie-api.4a8a.com 兜底
+ */
+function getEffectiveGatewayHost() {
+  const customHost = document.getElementById('opt_mcp_host');
+  if (customHost && customHost.value.trim()) {
+    let h = customHost.value.trim();
+    if (!h.startsWith('http://') && !h.startsWith('https://')) {
+      h = 'https://' + h;
+    }
+    return h.replace(/\/+$/, '');
+  }
 
-  const mcpConfig = {
+  try {
+    if (window.location && window.location.origin && window.location.origin !== "null") {
+      let host = window.location.origin;
+      // 如果当前是 web 域 (例如 magpie-web.4a8a.com)，智能映射推断 api 域名 (例如 magpie-api.4a8a.com)
+      if (host.includes('-web.')) {
+        return host.replace('-web.', '-api.');
+      }
+      return host.replace(/\/+$/, '');
+    }
+  } catch (e) {}
+
+  return "https://magpie-api.4a8a.com";
+}
+
+function updateMcpBox() {
+  const host = getEffectiveGatewayHost();
+  const pathInput = document.getElementById('opt_mcp_path');
+  let mcpPath = (pathInput && pathInput.value.trim()) ? pathInput.value.trim() : '/41694_agent_core_hub/mcp';
+  if (!mcpPath.startsWith('/')) mcpPath = '/' + mcpPath;
+
+  const fullMcpUrl = host + mcpPath;
+  const urlDisplay = document.getElementById('display_mcp_url');
+  if (urlDisplay) urlDisplay.innerText = fullMcpUrl;
+
+  const hostInput = document.getElementById('opt_mcp_host');
+  if (hostInput && !hostInput.value) {
+    hostInput.placeholder = host;
+  }
+
+  // 1. 远程 HTTP/SSE MCP 配置（标准 MCP 客户端规范）
+  const remoteMcpConfig = {
     "mcpServers": {
       "magpie-memory-hub": {
-        "command": "python3",
-        "args": ["/var/minis/workspace/magpie-memory-hub/daemon.py", "--mcp"],
-        "env": {
-          "NCB_INSTANCE": instance,
-          "NCB_SECRET_KEY": secret
-        }
+        "url": fullMcpUrl,
+        "headers": {
+          "Authorization": "Bearer $$MAGPIE_API_KEY"
+        },
+        "note": "Magpie Long-term Memory Hub (Reusing Magpie Gateway API Key)"
       }
     }
   };
 
   const ta = document.getElementById('mcp_config_display');
   if (ta) {
-    ta.value = JSON.stringify(mcpConfig, null, 2);
-  }
-  const maskEl = document.getElementById('display_secret_masked');
-  if (maskEl) {
-    maskEl.innerText = secret.slice(0, 10) + '...';
+    ta.value = JSON.stringify(remoteMcpConfig, null, 2);
   }
 }
 
@@ -74,22 +110,49 @@ function copyToClipboard(text, successMsg) {
 function copyMcpJson() {
   const ta = document.getElementById('mcp_config_display');
   const text = ta ? ta.value : '';
-  copyToClipboard(text, "✅ MCP 配置 JSON 已成功复制到剪贴板！");
+  copyToClipboard(text, "✅ 远程 MCP 配置已成功复制到剪贴板！");
 }
 
-function copyMcpCommand() {
-  const cmd = "python3 /var/minis/workspace/magpie-memory-hub/daemon.py --mcp";
-  copyToClipboard(cmd, "✅ 启动命令已复制：python3 daemon.py --mcp");
+function copyMcpUrl() {
+  const host = getEffectiveGatewayHost();
+  const pathInput = document.getElementById('opt_mcp_path');
+  let mcpPath = (pathInput && pathInput.value.trim()) ? pathInput.value.trim() : '/41694_agent_core_hub/mcp';
+  if (!mcpPath.startsWith('/')) mcpPath = '/' + mcpPath;
+  const fullUrl = host + mcpPath;
+  copyToClipboard(fullUrl, "✅ 远程端点已复制：" + fullUrl);
 }
 
-function populateModelSuggestions(modelList) {
-  if (!Array.isArray(modelList) || !modelList.length) return;
-  const dl = document.getElementById('suggested_models');
+function copyLocalCommand() {
+  const instance = document.getElementById('opt_ncb_instance').value || '41694_agent_core_hub';
+  const secret = document.getElementById('opt_ncb_secret').value || 'sk_live_qcmki2ntz9epoz9r91';
+  const cmd = `python3 /var/minis/workspace/magpie-memory-hub/daemon.py --mcp`;
+  copyToClipboard(cmd, "✅ 本地 Stdio 启动命令已复制！");
+}
+
+/**
+ * 动态加载并注入网关中配置的所有路由分组（Routing Groups）与模型组合
+ */
+function populateGroupModels(modelItems) {
+  if (!Array.isArray(modelItems) || !modelItems.length) return;
+  const dl = document.getElementById('suggested_group_models');
   if (!dl) return;
 
   const existing = new Set(Array.from(dl.options).map(o => o.value));
-  for (const m of modelList) {
-    const val = typeof m === 'string' ? m : (m.id || m.model || m.name);
+
+  // 1. 优先提取路由分组 (例如 fast, smart, clef, auto)
+  const priorityGroups = ["clef", "smart", "fast", "deepseek-chat", "deepseek-reasoner", "gpt-4o-mini"];
+  priorityGroups.forEach(g => {
+    if (!existing.has(g)) {
+      const opt = document.createElement('option');
+      opt.value = g;
+      dl.appendChild(opt);
+      existing.add(g);
+    }
+  });
+
+  // 2. 注入从网关读取到的真实模型
+  for (const item of modelItems) {
+    const val = typeof item === 'string' ? item : (item.id || item.model || item.name);
     if (val && !existing.has(val)) {
       const opt = document.createElement('option');
       opt.value = val;
@@ -133,6 +196,14 @@ function applyOptionsToUI(opts) {
     const el = document.getElementById('opt_min_confidence');
     if (el) el.value = String(opts.min_confidence);
   }
+  if (opts.mcp_host) {
+    const el = document.getElementById('opt_mcp_host');
+    if (el) el.value = opts.mcp_host;
+  }
+  if (opts.mcp_path) {
+    const el = document.getElementById('opt_mcp_path');
+    if (el) el.value = opts.mcp_path;
+  }
   if (opts.ncb_instance) {
     const el = document.getElementById('opt_ncb_instance');
     if (el) el.value = opts.ncb_instance;
@@ -152,9 +223,11 @@ async function saveAllOptions() {
     auto_supersede: document.getElementById('opt_auto_supersede').checked,
     max_inject_count: parseInt(document.getElementById('opt_max_inject_count').value, 10),
     max_budget_chars: parseInt(document.getElementById('opt_max_budget_chars').value, 10),
-    extractor_model: document.getElementById('opt_extractor_model').value.trim() || "deepseek-chat",
+    extractor_model: document.getElementById('opt_extractor_model').value.trim() || "fast",
     clef_model: document.getElementById('opt_clef_model').value.trim() || "clef",
     min_confidence: parseFloat(document.getElementById('opt_min_confidence').value),
+    mcp_host: document.getElementById('opt_mcp_host').value.trim(),
+    mcp_path: document.getElementById('opt_mcp_path').value.trim() || "/41694_agent_core_hub/mcp",
     ncb_instance: document.getElementById('opt_ncb_instance').value.trim(),
     r2_domain: document.getElementById('opt_r2_domain').value.trim()
   };
@@ -180,24 +253,20 @@ async function initPage() {
       const opts = await window.magpie.options.get();
       applyOptionsToUI(opts);
 
-      // 2. 动态读取 Magpie 网关已配置的可用模型列表
+      // 2. 读取网关真实活跃模型与分组
       try {
         const usageData = await window.magpie.read("usage:summary", {});
         if (usageData && usageData.Models) {
-          populateModelSuggestions(usageData.Models);
+          populateGroupModels(usageData.Models);
         }
-      } catch (e) {
-        // Usage summary read optional
-      }
+      } catch (e) {}
 
       try {
         const provData = await window.magpie.read("providers:list", {});
         if (Array.isArray(provData)) {
-          populateModelSuggestions(provData);
+          populateGroupModels(provData);
         }
-      } catch (e) {
-        // Provider list read optional
-      }
+      } catch (e) {}
     } else {
       window.parent.postMessage({ magpie: 1, id: 1, method: "hello" }, "*");
       window.parent.postMessage({ magpie: 1, id: 2, method: "options.get" }, "*");
@@ -215,7 +284,6 @@ window.addEventListener("message", (ev) => {
   }
 });
 
-// 绑定 DOM 事件监听（纯外部监听器，零内联事件）
 document.addEventListener("DOMContentLoaded", () => {
   const btnSave = document.getElementById('btn_save_all');
   if (btnSave) btnSave.addEventListener('click', saveAllOptions);
@@ -223,14 +291,22 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnCopyJson = document.getElementById('btn_copy_json');
   if (btnCopyJson) btnCopyJson.addEventListener('click', copyMcpJson);
 
-  const btnCopyCmd = document.getElementById('btn_copy_cmd');
-  if (btnCopyCmd) btnCopyCmd.addEventListener('click', copyMcpCommand);
+  const btnCopyUrl = document.getElementById('btn_copy_url');
+  if (btnCopyUrl) btnCopyUrl.addEventListener('click', copyMcpUrl);
+
+  const btnCopyLocal = document.getElementById('btn_copy_local_cmd');
+  if (btnCopyLocal) btnCopyLocal.addEventListener('click', copyLocalCommand);
 
   const btnSelectAll = document.getElementById('btn_select_all');
   if (btnSelectAll) btnSelectAll.addEventListener('click', selectAllText);
 
+  const hostInput = document.getElementById('opt_mcp_host');
+  const pathInput = document.getElementById('opt_mcp_path');
   const instInput = document.getElementById('opt_ncb_instance');
   const secInput = document.getElementById('opt_ncb_secret');
+
+  if (hostInput) hostInput.addEventListener('input', updateMcpBox);
+  if (pathInput) pathInput.addEventListener('input', updateMcpBox);
   if (instInput) instInput.addEventListener('input', updateMcpBox);
   if (secInput) secInput.addEventListener('input', updateMcpBox);
 

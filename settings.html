@@ -4,9 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>记忆中枢与 MCP 控制台</title>
-  <!-- Magpie 官方通信桥接 (必须由外部引入，严禁内联) -->
   <script src="_magpie/bridge.js"></script>
-  <!-- 业务逻辑脚本 (独立文件，彻底满足 CSP 零内联脚本安全规范) -->
   <script src="settings.js" defer></script>
   <style>
     :root {
@@ -119,7 +117,7 @@
     }
     .mcp-textarea {
       width: 100%;
-      height: 180px;
+      height: 220px;
       background: transparent;
       border: none;
       color: #38bdf8;
@@ -185,14 +183,34 @@
       color: var(--text-muted);
       margin-top: 4px;
     }
+    .auth-banner {
+      background: rgba(234, 179, 8, 0.1);
+      border: 1px solid rgba(234, 179, 8, 0.3);
+      border-radius: 6px;
+      padding: 10px 14px;
+      margin-top: 10px;
+      font-size: 12px;
+      color: #fde047;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .dynamic-tag {
+      background: rgba(168, 85, 247, 0.15);
+      color: #c084fc;
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      margin-left: 4px;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <div>
-        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.5.0</span></h1>
-        <p class="desc">网关前置注入控制、动态模型提炼流水线、NoCodeBackend 存储与一键 MCP 导出。</p>
+        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.6.0</span></h1>
+        <p class="desc">网关前置无感注入、路由分组提炼模型绑定与动态远程 MCP 鉴权端点。</p>
       </div>
       <div>
         <button id="btn_save_all" class="btn">💾 保存全部配置</button>
@@ -258,38 +276,35 @@
       </div>
     </div>
 
-    <!-- 2. 动态模型配置 (支持下拉与任意自定义输入) -->
+    <!-- 2. 路由分组模型选择 (动态读取与下拉) -->
     <div class="card">
-      <h2>2. 记忆提炼与 Clef 仲裁模型 (Learner & Clef Pipeline)</h2>
+      <h2>2. 记忆提炼与 Clef 仲裁模型 (Learner & Clef Pipeline) <span class="dynamic-tag">路由分组联动</span></h2>
       <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
-        后台对话收尾后自动提炼事实并由 Clef 进行质量裁决。支持从下方下拉建议中点选，也可直接输入你在网关配置的任意模型名称。
+        后台自动提炼事实并由 Clef 进行质量裁决。下拉菜单优先展示你在网关<strong>「路由」分组</strong>中配置的组合模型与自建模型，支持自由输入与点选。
       </p>
 
       <div class="grid-2">
         <div>
           <label>事实提取模型 (Extractor Model)</label>
-          <!-- 采用 input + datalist 实现自由输入与下拉建议双重支持 -->
-          <input type="text" id="opt_extractor_model" list="suggested_models" placeholder="输入或选择模型名，如 deepseek-chat">
-          <div class="hint-text">建议使用成本低、响应极快的小模型</div>
+          <input type="text" id="opt_extractor_model" list="suggested_group_models" placeholder="选择或输入路由分组模型，如 fast 或 deepseek-chat">
+          <div class="hint-text">负责从长对话中提取关键知识，推荐使用速度极快的小模型组合</div>
         </div>
         <div>
           <label>质量仲裁模型 (Clef Judge Model)</label>
-          <input type="text" id="opt_clef_model" list="suggested_models" placeholder="输入或选择模型名，如 clef 或 deepseek-reasoner">
-          <div class="hint-text">负责甄别高价值经验、过滤临时废话</div>
+          <input type="text" id="opt_clef_model" list="suggested_group_models" placeholder="选择或输入质量裁决模型，如 clef 或 smart">
+          <div class="hint-text">负责甄别高价值经验、评估置信度并执行新旧冲突淘汰</div>
         </div>
       </div>
 
-      <!-- 动态数据列表 datalist (由 JS 从网关已用模型与供应商列表自动填充) -->
-      <datalist id="suggested_models">
+      <!-- 动态路由模型列表 (由 JS 读取网关路由配置自动注入) -->
+      <datalist id="suggested_group_models">
         <option value="clef">
+        <option value="fast">
+        <option value="smart">
         <option value="deepseek-chat">
         <option value="deepseek-reasoner">
         <option value="gpt-4o-mini">
-        <option value="gpt-4o">
         <option value="claude-3-5-haiku">
-        <option value="claude-3-5-sonnet">
-        <option value="qwen-turbo">
-        <option value="qwen-plus">
       </datalist>
 
       <div class="grid-2">
@@ -305,21 +320,39 @@
       </div>
     </div>
 
-    <!-- 3. MCP 客户端一键配置 -->
+    <!-- 3. MCP 客户端动态远程端点与一键配置 -->
     <div class="card">
-      <h2>3. MCP 服务一键挂载 (Model Context Protocol)</h2>
+      <h2>3. 动态远程 MCP 服务挂载 (Model Context Protocol)</h2>
       <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">
-        复制此配置即可一键挂载到 Cursor、Claude Desktop、Cline 或 Minis，使外部 Agent 具备主动调取与沉淀记忆的能力。
+        对外暴露标准远程 MCP 端点。支持挂载到 Cursor、Claude Desktop、Cline 或 Minis，Agent 可通过此接口主动检索与沉淀记忆。
       </p>
 
+      <div class="grid-2" style="margin-bottom: 12px;">
+        <div>
+          <label>网关对外服务域名 (Gateway Host)</label>
+          <input type="text" id="opt_mcp_host" placeholder="自动探测当前访问域名...">
+          <div class="hint-text">动态检测当前访问域名，亦可自定义修改</div>
+        </div>
+        <div>
+          <label>挂载路径与实例 (MCP Endpoint Path)</label>
+          <input type="text" id="opt_mcp_path" value="/41694_agent_core_hub/mcp">
+          <div class="hint-text">支持 <code>/41694_agent_core_hub/mcp</code> 或 <code>/memory/mcp</code></div>
+        </div>
+      </div>
+
+      <div class="auth-banner">
+        <div>🔐 <strong>安全鉴权提示：</strong>此端点需要携带 <code>Authorization: Bearer $MAGPIE_API_KEY</code> 请求头（复用 Magpie 网关统一密钥）。</div>
+      </div>
+
       <div class="mcp-box">
-        <button id="btn_copy_json" class="copy-btn">📋 一键复制配置</button>
+        <button id="btn_copy_json" class="copy-btn">📋 一键复制完整配置</button>
         <textarea id="mcp_config_display" class="mcp-textarea" readonly spellcheck="false"></textarea>
       </div>
 
       <div style="margin-top: 14px; display: flex; gap: 10px;">
-        <button id="btn_copy_cmd" class="btn btn-secondary">📋 复制启动命令</button>
-        <button id="btn_select_all" class="btn btn-secondary">🔍 全选配置文本</button>
+        <button id="btn_copy_url" class="btn btn-secondary">🔗 仅复制 MCP 远程 URL</button>
+        <button id="btn_copy_local_cmd" class="btn btn-secondary">💻 复制本地启动命令 (Stdio)</button>
+        <button id="btn_select_all" class="btn btn-secondary">🔍 全选配置</button>
       </div>
 
       <table class="param-table">
@@ -334,27 +367,22 @@
           <tr>
             <td><code>server_name</code></td>
             <td><strong>magpie-memory-hub</strong></td>
-            <td>MCP 服务注册唯一名称标识</td>
+            <td>MCP 服务注册唯一标识</td>
           </tr>
           <tr>
-            <td><code>command</code></td>
-            <td><strong>python3</strong></td>
-            <td>系统 Python 3 运行时环境</td>
+            <td><code>mcp_url</code></td>
+            <td><code id="display_mcp_url">https://.../mcp</code></td>
+            <td>动态检测生成的外网远程端点</td>
           </tr>
           <tr>
-            <td><code>args</code></td>
-            <td><code>["/path/to/daemon.py", "--mcp"]</code></td>
-            <td>标准 Stdio JSON-RPC 启动参数</td>
+            <td><code>headers</code></td>
+            <td><code>{"Authorization": "Bearer $MAGPIE_API_KEY"}</code></td>
+            <td>复用 Magpie 网关访问密钥鉴权</td>
           </tr>
           <tr>
             <td><code>NCB_INSTANCE</code></td>
             <td><strong>41694_agent_core_hub</strong></td>
-            <td>NoCodeBackend 终态核心数据库实例</td>
-          </tr>
-          <tr>
-            <td><code>NCB_SECRET_KEY</code></td>
-            <td><code><span id="display_secret_masked">已安全加载</span></code></td>
-            <td>数据库端点安全凭证 (Server Secret Key)</td>
+            <td>NoCodeBackend 终态数据库实例</td>
           </tr>
         </tbody>
       </table>
