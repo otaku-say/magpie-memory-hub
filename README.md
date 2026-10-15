@@ -6,31 +6,29 @@
 
 **magpie-memory-hub** 是专为 [Magpie](https://github.com/yetone/magpie) 设计的高性能企业级长期记忆与工程避坑网关中间件。
 
-它深度融合了 **Mem0**（增量状态机与访问衰减）、**Headroom**（Failure-Learning 启发式提取与 Token 预算保护）、**Context-Mode**（运行时系统噪声清洗）以及 **NoCodeBackend** 云端高并发关系型索引底座。
+它拥有**图形化配置面板（开关/下拉选择器/一键复制 MCP 配置）**，深度融合了 **Mem0**（增量状态机与访问衰减）、**Headroom**（Failure-Learning 启发式提取与 Token 预算保护）、**Context-Mode**（运行时系统降噪）以及 **NoCodeBackend** 云端关系型索引底座。
 
 ---
 
-## 核心架构与先进特性
+## 核心特性与架构
 
-1. **Mem0 风格的增量演化状态机 (Incremental State Machine)**：
-   - 提取新经验时，通过哈希指纹和上下文对比，自动执行四分流：`ADD`（全新入库）、`UPDATE`（新推翻旧，旧方案打上 `superseded` 标记）、`NOOP`（已有完全一致经验，仅递增权重）、`DELETE`。
-   - 杜绝传统记忆系统反复重复插入导致的上下文漂移。
+1. **图形化控制台与一键配置 (Graphical UI & One-Click MCP Export)**：
+   - 完全告别裸写 JSON 的繁琐操作，原生内嵌在 Magpie 侧边栏与插件页面中；
+   - 提供直观的 **iOS 风格开关、下拉选择框**；
+   - **MCP 服务一键复制**：提供一键复制包含命令、路径与凭据的标准 JSON 配置，随时无缝接入 Claude Desktop、Cursor、Cline 与 Minis。
 
-2. **多维作用域隔离 (Multi-tier Scope)**：
-   - 支持 `global`（全局不可逾越的纪律与偏好）、`project`（具体仓库或项目的架构约定）、`session`（当前任务的瞬时上下文）三层作用域。
+2. **幂等安装与卸载 (Strictly Idempotent Lifecycle)**：
+   - 无论添加或移除多少次，均不会污染宿主系统环境；
+   - 依赖与状态完全解耦，云端数据库具备防重指纹（SHA-256 Fingerprint），重复写入自动 NOOP。
 
-3. **故障频次与衰减排序 (Recurrence & Decay Policy)**：
-   - 避坑宝典库自动统计同一 Bug 的 `recurrence_count`（复现频次）与 `last_occurred_at`（最近复现时间）；
-   - 动态打分公式：$$\text{Score} = \text{Confidence} \times (1 + 0.1 \times \min(\text{AccessCount}, 10))$$，高频被验证的有效规则自动前置。
+3. **微秒级倒排索引扫描 (Zero Latency Overhead)**：
+   - 运行在 Magpie 的 Go `moejs` 纯内存引擎中；
+   - 前置自动清洗 `<system-reminder>` 等运行时框架噪声；
+   - 采用倒排索引快速匹配，耗时 < 0.1ms。
 
-4. **微秒级倒排索引与系统降噪 (Inverted Index & Noise Cleaning)**：
-   - 中间件运行在 Magpie 的 Go `moejs` 纯内存引擎中；
-   - 自动过滤 `<system-reminder>`、`<task-notification>` 等平台内部运行时标签；
-   - 严格的 Token/字符预算硬顶（默认 2048 字符 / 5 条命中），杜绝撑爆上下文窗口。
-
-5. **云端无限持久化 (NoCodeBackend Tier-2 终身底座)**：
-   - 经过 B-Tree 索引优化的 4 张高内聚数据表；
-   - 直通 Cloudflare R2 对象存储，支持无限大文件、二进制与架构图托管。
+4. **严格的 Token/字符预算硬顶 (Context Budget Guard)**：
+   - 杜绝传统记忆系统暴击上下文导致扣费翻倍的问题；
+   - 提供 1024 / 2048 / 4096 / 8192 等预算预设。
 
 ---
 
@@ -46,10 +44,11 @@ magpie plugin add github:otaku-say/magpie-memory-hub
 1. 打开 **设置 → 插件 (Plugins)**；
 2. 点击 **添加插件 (Add Plugin)**；
 3. 输入 `otaku-say/magpie-memory-hub` 确认即可自动加载生效！
+4. 添加后在 Magpie 侧边栏即可直接打开 **记忆中枢设置** 图形化面板。
 
 ### 方式二：作为独立 MCP Server 挂载
 
-在你的 MCP 配置文件（如 `claude_desktop_config.json` 或 Agent 设置）中添加：
+在设置面板中直接点击 **「📋 复制 JSON 配置」**，或在你的 MCP 配置文件中添加：
 
 ```json
 {
@@ -68,22 +67,19 @@ magpie plugin add github:otaku-say/magpie-memory-hub
 
 ---
 
-## 插件配置选项 (Options)
+## 关键参数表
 
-在 Magpie 中打开该插件的「选项」即可通过 JSON 或图形化表单动态调整：
-
-| 选项键名 | 类型 | 默认值 | 作用说明 |
-| :--- | :--- | :--- | :--- |
-| `disabled` | boolean | `false` | 全局旁路开关（设置为 true 时完全不修改请求） |
-| `inject_pitfalls` | boolean | `true` | 是否同时注入匹配的工程避坑经验与历史翻车根因 |
-| `max_inject_count` | number | `5` | 单次请求允许注入的最大记忆条数 |
-| `max_budget_chars` | number | `2048` | 单次注入文本的总字符预算硬顶（防止爆 Token） |
-| `min_confidence` | number | `0.75` | 记忆置信度过滤阈值（0.0 ~ 1.0） |
-| `ncb_instance` | string | `41694_agent_core_hub` | 关联的 NoCodeBackend 数据库实例 |
-| `r2_domain` | string | `https://agent-core-hub.4a8a.com` | Cloudflare R2 资源访问加速域名 |
+| 参数名 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `opt_auto_inject` | `true` | 全局记忆自动前置注入开关 |
+| `opt_inject_pitfalls` | `true` | 是否同时注入工程避坑经验 |
+| `opt_auto_supersede` | `true` | 新经验推翻旧经验时自动打上淘汰标记 |
+| `opt_max_inject_count` | `5` | 单次最大注入条数 |
+| `opt_max_budget_chars` | `2048` | 单次注入总字符预算上限 |
+| `NCB_INSTANCE` | `41694_agent_core_hub` | 关联的 NoCodeBackend 数据库实例 |
 
 ---
 
 ## 开源协议
 
-本项目基于 [MIT 协议](LICENSE) 开源。欢迎提交 Pull Request 与 Issue！
+本项目基于 [MIT 协议](LICENSE) 开源。
