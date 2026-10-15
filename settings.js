@@ -38,11 +38,32 @@ function getEffectiveGatewayHost() {
   return "https://magpie-api.4a8a.com";
 }
 
+/**
+ * 规范化用户输入的任意 MCP 路径：
+ * 无论输入 "test", "/test", "/test/", "/test/mcp", "41694_agent_core_hub"
+ * 均自动规范化为开头的 "/"，并严格在结尾追加且仅追加一次 "/mcp"
+ */
+function normalizeMcpPath(input) {
+  let val = (input || "").trim();
+  if (!val) {
+    val = "/41694_agent_core_hub";
+  }
+  // 去除首尾空白与斜杠
+  val = val.replace(/^\/+/, '').replace(/\/+$/, '');
+  // 如果用户已经手动输入了 mcp 结尾，去除它以统一规范
+  if (val.toLowerCase().endsWith('/mcp')) {
+    val = val.slice(0, -4).replace(/\/+$/, '');
+  } else if (val.toLowerCase() === 'mcp') {
+    val = '';
+  }
+  return val ? '/' + val + '/mcp' : '/mcp';
+}
+
 function updateMcpBox() {
   const host = getEffectiveGatewayHost();
   const pathInput = document.getElementById('opt_mcp_path');
-  let mcpPath = (pathInput && pathInput.value.trim()) ? pathInput.value.trim() : '/41694_agent_core_hub/mcp';
-  if (!mcpPath.startsWith('/')) mcpPath = '/' + mcpPath;
+  const rawPath = pathInput ? pathInput.value : '';
+  const mcpPath = normalizeMcpPath(rawPath);
 
   const fullMcpUrl = host + mcpPath;
   const urlDisplay = document.getElementById('display_mcp_url');
@@ -71,6 +92,7 @@ function updateMcpBox() {
     ta.value = JSON.stringify(remoteMcpConfig, null, 2);
   }
 }
+
 
 function selectAllText() {
   const ta = document.getElementById('mcp_config_display');
@@ -115,11 +137,11 @@ function copyMcpJson() {
 function copyMcpUrl() {
   const host = getEffectiveGatewayHost();
   const pathInput = document.getElementById('opt_mcp_path');
-  let mcpPath = (pathInput && pathInput.value.trim()) ? pathInput.value.trim() : '/41694_agent_core_hub/mcp';
-  if (!mcpPath.startsWith('/')) mcpPath = '/' + mcpPath;
+  const mcpPath = normalizeMcpPath(pathInput ? pathInput.value : '');
   const fullUrl = host + mcpPath;
   copyToClipboard(fullUrl, "✅ 远程端点已复制：" + fullUrl);
 }
+
 
 function copyLocalCommand() {
   const cmd = `python3 /var/minis/workspace/magpie-memory-hub/daemon.py --mcp`;
@@ -195,7 +217,7 @@ async function saveAllOptions() {
     clef_model: document.getElementById('opt_clef_model').value.trim(),
     min_confidence: parseFloat(document.getElementById('opt_min_confidence').value),
     mcp_host: document.getElementById('opt_mcp_host').value.trim(),
-    mcp_path: document.getElementById('opt_mcp_path').value.trim() || "/41694_agent_core_hub/mcp",
+    mcp_path: normalizeMcpPath(document.getElementById('opt_mcp_path').value),
     ncb_instance: document.getElementById('opt_ncb_instance').value.trim(),
     ncb_secret: document.getElementById('opt_ncb_secret').value.trim(),
     r2_domain: document.getElementById('opt_r2_domain').value.trim()
