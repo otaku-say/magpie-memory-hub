@@ -3,7 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Magpie 记忆中枢设置与 MCP 控制台</title>
+  <title>记忆中枢设置与 MCP 控制台</title>
+  <!-- Magpie 官方官方桥接脚本 (在 Magpie 内嵌沙箱中必须加载以响应 hello 握手) -->
+  <script src="_magpie/bridge.js"></script>
   <style>
     :root {
       --bg: #0b1120;
@@ -155,28 +157,41 @@
       text-align: left;
     }
     .param-table th { background: rgba(255,255,255,0.03); color: var(--text-muted); }
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #0284c7;
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-size: 13px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      display: none;
+      z-index: 999;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <div>
-        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.2.0</span></h1>
-        <p class="desc">网关前置注入开关、NoCodeBackend 云端持久层设置与 MCP 服务端点连接。</p>
+        <h1>🧠 记忆中枢与 MCP 控制台 <span class="badge">v1.3.1</span></h1>
+        <p class="desc">网关前置注入控制、NoCodeBackend 存储凭据与 MCP 一键配置导出。</p>
       </div>
       <div>
         <button class="btn" onclick="saveAllOptions()">💾 保存全部配置</button>
       </div>
     </header>
 
-    <!-- 1. 网关前置注入控制 -->
+    <!-- 1. 网关前置注入控制 (全图形化开关与下拉) -->
     <div class="card">
       <h2>1. 网关前置无感注入 (Gateway Interception)</h2>
       
       <div class="toggle-row">
         <div>
           <div style="font-weight: 600;">启用记忆自动注入 (Auto-Injection)</div>
-          <div style="font-size: 12px; color: var(--text-muted);">拦截用户 Prompt 并在路由前自动注入相关的架构经验与规范</div>
+          <div style="font-size: 12px; color: var(--text-muted);">拦截用户 Prompt 并在路由前自动注入匹配的架构经验与开发规范</div>
         </div>
         <label class="switch">
           <input type="checkbox" id="opt_auto_inject" checked>
@@ -222,7 +237,7 @@
             <option value="1024">1024 字符 (~250 Tokens)</option>
             <option value="2048" selected>2048 字符 (~500 Tokens - 推荐)</option>
             <option value="4096">4096 字符 (~1000 Tokens)</option>
-            <option value="8192">8192 字符 (大模型长窗口)</option>
+            <option value="8192">8192 字符 (长窗口模型)</option>
           </select>
         </div>
       </div>
@@ -232,12 +247,16 @@
     <div class="card">
       <h2>2. MCP 服务一键挂载 (Model Context Protocol)</h2>
       <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">
-        可直接挂载到 Cursor、Claude Desktop、Cline 或 Minis，使 Agent 具备主动调取与沉淀记忆的能力。
+        复制此配置即可一键挂载到 Cursor、Claude Desktop、Cline 或 Minis，使 Agent 具备主动调取与沉淀记忆的能力。
       </p>
 
       <div class="mcp-box">
-        <button class="copy-btn" onclick="copyMcpJson()">📋 复制 JSON 配置</button>
+        <button class="copy-btn" onclick="copyMcpJson()">📋 一键复制完整配置</button>
         <pre id="mcp_config_display"></pre>
+      </div>
+
+      <div style="margin-top: 14px; display: flex; gap: 10px;">
+        <button class="btn btn-secondary" onclick="copyMcpCommand()">📋 仅复制启动命令</button>
       </div>
 
       <table class="param-table">
@@ -252,22 +271,27 @@
           <tr>
             <td><code>server_name</code></td>
             <td><strong>magpie-memory-hub</strong></td>
-            <td>MCP 服务注册唯一标识</td>
+            <td>MCP 服务注册唯一名称标识</td>
           </tr>
           <tr>
             <td><code>command</code></td>
             <td><strong>python3</strong></td>
-            <td>运行环境二进制</td>
+            <td>系统 Python 3 运行时环境</td>
           </tr>
           <tr>
             <td><code>args</code></td>
-            <td><code>[<span id="display_script_path">/path/to/daemon.py</span>, "--mcp"]</code></td>
+            <td><code>["/path/to/daemon.py", "--mcp"]</code></td>
             <td>标准 Stdio JSON-RPC 启动参数</td>
           </tr>
           <tr>
             <td><code>NCB_INSTANCE</code></td>
             <td><strong>41694_agent_core_hub</strong></td>
-            <td>NoCodeBackend 终态数据库实例</td>
+            <td>NoCodeBackend 终态核心数据库实例</td>
+          </tr>
+          <tr>
+            <td><code>NCB_SECRET_KEY</code></td>
+            <td><code><span id="display_secret_masked">已加密</span></code></td>
+            <td>数据库端点安全凭证 (Server Secret Key)</td>
           </tr>
         </tbody>
       </table>
@@ -288,18 +312,26 @@
       </div>
       <div style="margin-top: 14px;">
         <label>Secret Key (Database-Scoped)</label>
-        <input type="password" id="opt_ncb_secret" value="ncb_sec_xxxxxxxxxxxx">
+        <input type="password" id="opt_ncb_secret" value="sk_live_qcmki2ntz9epoz9r91">
       </div>
     </div>
   </div>
 
+  <div id="toast" class="toast"></div>
+
   <script>
-    // Magpie Plugin Page PostMessage Protocol
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.innerText = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 2500);
+    }
+
     let currentOptions = {};
 
     function updateMcpBox() {
       const instance = document.getElementById('opt_ncb_instance').value || '41694_agent_core_hub';
-      const secret = document.getElementById('opt_ncb_secret').value || 'ncb_sec_xxxxxxxx';
+      const secret = document.getElementById('opt_ncb_secret').value || 'sk_live_qcmki2ntz9epoz9r91';
       const mcpConfig = {
         "mcpServers": {
           "magpie-memory-hub": {
@@ -313,31 +345,40 @@
         }
       };
       document.getElementById('mcp_config_display').innerText = JSON.stringify(mcpConfig, null, 2);
+      document.getElementById('display_secret_masked').innerText = secret.slice(0, 10) + '...';
+    }
+
+    function copyToClipboard(text, successMsg) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          showToast(successMsg);
+        }).catch(() => {
+          fallbackCopy(text, successMsg);
+        });
+      } else {
+        fallbackCopy(text, successMsg);
+      }
+    }
+
+    function fallbackCopy(text, successMsg) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      showToast(successMsg);
     }
 
     function copyMcpJson() {
       const text = document.getElementById('mcp_config_display').innerText;
-      navigator.clipboard.writeText(text).then(() => {
-        alert("✅ MCP 配置 JSON 已成功复制到剪贴板！");
-      }).catch(() => {
-        const ta = document.createElement("textarea");
-        ta.value = text;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        document.body.removeChild(ta);
-        alert("✅ MCP 配置 JSON 已成功复制到剪贴板！");
-      });
+      copyToClipboard(text, "✅ MCP 配置 JSON 已成功复制到剪贴板！");
     }
 
-    // Handshake with Magpie Window
-    window.addEventListener("message", (ev) => {
-      const m = ev.data;
-      if (!m || m.magpie !== 1) return;
-      if (m.result && m.result.options) {
-        applyOptionsToUI(m.result.options);
-      }
-    });
+    function copyMcpCommand() {
+      const cmd = "python3 /var/minis/workspace/magpie-memory-hub/daemon.py --mcp";
+      copyToClipboard(cmd, "✅ 启动命令已复制：python3 daemon.py --mcp");
+    }
 
     function applyOptionsToUI(opts) {
       currentOptions = opts || {};
@@ -351,7 +392,7 @@
       updateMcpBox();
     }
 
-    function saveAllOptions() {
+    async function saveAllOptions() {
       const newOpts = {
         ...currentOptions,
         disabled: !document.getElementById('opt_auto_inject').checked,
@@ -363,24 +404,47 @@
         r2_domain: document.getElementById('opt_r2_domain').value
       };
 
-      // Notify parent Magpie window via protocol
-      window.parent.postMessage({
-        magpie: 1,
-        id: Date.now(),
-        method: "options.set",
-        params: { options: newOpts }
-      }, "*");
-
-      alert("✅ 配置已保存，网关中间件已执行热重载！");
+      try {
+        if (window.magpie && window.magpie.options && window.magpie.options.set) {
+          await window.magpie.options.set(newOpts);
+        } else {
+          window.parent.postMessage({ magpie: 1, id: Date.now(), method: "options.set", params: { options: newOpts } }, "*");
+        }
+        showToast("✅ 配置已保存，网关中间件已执行热重载！");
+      } catch (err) {
+        showToast("保存失败: " + err.message);
+      }
     }
 
-    // Initial Hello to Magpie Frame
-    window.parent.postMessage({ magpie: 1, id: 1, method: "hello" }, "*");
-    window.parent.postMessage({ magpie: 1, id: 2, method: "options.get" }, "*");
+    // 握手生命周期与初始化：必须在 10s 内响应以避免 Magpie 报页面超时
+    async function initPage() {
+      try {
+        if (window.magpie && window.magpie.ready) {
+          await window.magpie.ready;
+          const opts = await window.magpie.options.get();
+          applyOptionsToUI(opts);
+        } else {
+          // 独立浏览器测试兼容模式
+          window.parent.postMessage({ magpie: 1, id: 1, method: "hello" }, "*");
+          window.parent.postMessage({ magpie: 1, id: 2, method: "options.get" }, "*");
+        }
+      } catch (e) {
+        console.warn("Init fallback:", e);
+      }
+    }
+
+    window.addEventListener("message", (ev) => {
+      const m = ev.data;
+      if (!m || m.magpie !== 1) return;
+      if (m.result && m.result.options) {
+        applyOptionsToUI(m.result.options);
+      }
+    });
 
     document.getElementById('opt_ncb_instance').addEventListener('input', updateMcpBox);
     document.getElementById('opt_ncb_secret').addEventListener('input', updateMcpBox);
     updateMcpBox();
+    initPage();
   </script>
 </body>
 </html>
