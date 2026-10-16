@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.9.3</span>
+    <span class="version-tag">v6.9.4</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、上下文压缩、R2 存储。</p>
 
@@ -91,15 +91,15 @@
 
       <div class="row">
         <div class="row-head">
-          <label for="ncb_secret">Secret Key</label>
-          <span class="badge rec">推荐 留空即可</span>
+          <label for="ncb_secret">数据库 Secret Key</label>
+          <span class="badge rec">推荐 填</span>
         </div>
         <div class="hint">
-          <div class="hint-desc">数据库的专属访问密钥，用于数据表的增删改查鉴权。</div>
-          <div class="hint-diff"><strong>留空</strong>：若数据库由本插件「一键创建」，会自动回填并保存，无需手动填写；<strong>填写</strong>：需连接已有外部库时手动填入对应密钥。</div>
+          <div class="hint-desc">数据库的专属访问密钥，用于 R2 列举/删除与对象清理。它只在建库时返回一次，插件无法自行取回。</div>
+          <div class="hint-diff"><strong>填写</strong>：前往 NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key 填入；<strong>留空</strong>：若数据库由本插件一键创建，会自动捕获；若既未填写也未捕获，记忆读写不受影响，但 R2 列举与删除不可用。</div>
         </div>
         <div class="control">
-          <input class="mono" type="password" id="ncb_secret" placeholder="留空即可" autocomplete="off" spellcheck="false">
+          <input class="mono" type="password" id="ncb_secret" placeholder="从 NCB 控制台复制 Secret Key 填入" autocomplete="off" spellcheck="false">
         </div>
       </div>
 
@@ -140,6 +140,7 @@
       <div class="btn-row">
         <button type="button" class="primary" id="btn_db_provision">一键创建数据库</button>
         <button type="button" id="btn_check_ncb">检测 MCP Key</button>
+        <button type="button" id="btn_check_secret">检测 Secret Key</button>
         <button type="button" id="btn_db_status">检查状态</button>
         <button type="button" class="danger" id="btn_db_reset">清空数据库</button>
       </div>
@@ -233,6 +234,7 @@
 
       <div class="btn-row">
         <button type="button" id="btn_check_r2">检测 R2 密钥</button>
+        <button type="button" id="btn_clean_probe">清理探针文件</button>
         <button type="button" id="btn_db_storage_setup">挂载 R2 存储</button>
       </div>
 
@@ -598,7 +600,7 @@
         <li>自动在 NoCodeBackend 上创建数据库（若不存在）</li>
         <li>自动补齐缺失的数据表（<code>memories</code>、<code>pitfalls</code>、<code>schema_meta</code>）、列与索引</li>
         <li><strong>若同名已存在不会破坏数据</strong>：将走复用/补齐策略，绝不删除已有数据</li>
-        <li>按配置自动创建或挂载 Cloudflare R2 存储桶并配置 CORS</li>
+        <li><strong>不会动 R2 存储</strong>（如需挂载 R2，请在下方 R2 卡片单独点击「挂载 R2 存储」）</li>
         <li>自动提取并保存数据库的 Secret Key，后续无需手填</li>
       </ul>
     </div>

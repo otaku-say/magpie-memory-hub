@@ -853,7 +853,7 @@ const TOOLS = {
       properties: {
         database: { type: "string", description: "要创建的数据库名（逻辑名即可，NCB 会自动加账号前缀）。默认取设置页的 ncb_instance" },
         on_exist: { type: "string", enum: ["reuse", "auto_rename", "fail"], description: "同名已存在时的策略，默认 reuse" },
-        with_r2: { type: "boolean", description: "是否同时挂载 R2 存储，默认 true" },
+        with_r2: { type: "boolean", description: "是否同时挂载 R2 存储，默认 false，需要时才挂" },
         bucket_name: { type: "string", description: "R2 bucket 名，默认 <数据库名>-storage" },
         public_url: { type: "string", description: "R2 公开域名，如 https://cdn.example.com" },
         account_id: { type: "string", description: "Cloudflare 账号 ID（账号已连接过可留空，会自动复用）" },

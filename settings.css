@@ -974,4 +974,18 @@ code, .mono {
   color: var(--magpie-fg);
 }
 
+.secret-guide-tip {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--magpie-card) 85%, var(--magpie-bg));
+  border: 1px dashed var(--magpie-line);
+  font-size: var(--fs-hint);
+  color: var(--magpie-fg-2);
+  line-height: 1.5;
+}
+.secret-guide-tip strong {
+  color: var(--magpie-fg);
+}
+
 

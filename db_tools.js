@@ -278,7 +278,7 @@ export async function dbProvision(cfg, args) {
   }
   // 重名策略：reuse（默认，复用不新建）/ auto_rename（允许新建带后缀的库）/ fail（报错让用户改名）
   const onExist = String((args && args.on_exist) || "reuse");
-  const withR2 = !(args && args.with_r2 === false);
+  const withR2 = Boolean(args && args.with_r2 === true);
 
   // 1) 先列出现有库（账号内命名空间；跨账号不会冲突，因为 NCB 会强制加账号前缀）
   let existing = [];
@@ -582,5 +582,101 @@ export async function ncbCheck(cfg, args) {
     lines,
     diagnosis: null,
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * secret_check —— 检测数据库 Secret Key 是否有效（只读验证，不上传文件）
+ * ------------------------------------------------------------------ */
+export async function secretCheck(cfg, args) {
+  const db = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
+  const manual = String((args && args.secret) || (cfg && (cfg.ncb_secret || cfg.secret)) || "").trim();
+  const captured = db ? lookupSecret(db) : (lookupSecret("") || "");
+  const secretToUse = manual || captured || "";
+  const source = manual ? "手动填写" : (captured ? "自动捕获" : "未提供");
+
+  if (!secretToUse) {
+    return {
+      ok: false,
+      verdict: "EMPTY",
+      source: "未提供",
+      database: db,
+      title: "未填写 Secret Key",
+      lines: [
+        "未检测到数据库 Secret Key（设置页未填写，本地也无自动捕获记录）",
+        "作用说明：R2 存储的列举与清理需要 Secret Key；记忆读写不受影响",
+        "获取途径：前往 NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key 填入",
+        "提示：Secret Key 仅在建库时返回一次，插件无法自行从远端取回",
+      ],
+    };
+  }
+
+  const url = "https://api.nocodebackend.com/files?Instance=" + encodeURIComponent(db || "");
+  const externalSignal = (cfg && cfg.signal) || null;
+  const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), 15000) : null;
+  if (ctrl && externalSignal) {
+    externalSignal.addEventListener("abort", () => ctrl.abort(), { once: true });
+  }
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: "Bearer " + secretToUse },
+      signal: ctrl ? ctrl.signal : undefined,
+    });
+    if (timer) clearTimeout(timer);
+
+    if (res.status < 400) {
+      return {
+        ok: true,
+        verdict: "VALID",
+        source,
+        database: db,
+        title: "Secret Key 有效（" + source + "）",
+        lines: [
+          `数据库：${db || "当前库"}`,
+          `密钥来源：${source}`,
+          "REST 接口鉴权通过：R2 对象列举与清理权限正常",
+          source === "自动捕获" ? "当前正在使用建库时自动捕获的密钥，建议在设置页显式填写一份备用" : "密钥已通过远端验证，与当前数据库完全匹配",
+        ],
+      };
+    }
+
+    let errorDetail = "Invalid secret_key";
+    try {
+      const body = await res.json();
+      if (body && (body.error || body.message)) {
+        errorDetail = body.error || body.message;
+      }
+    } catch (_) {}
+
+    return {
+      ok: false,
+      verdict: "INVALID",
+      source,
+      database: db,
+      title: "Secret Key 无效（鉴权失败）",
+      lines: [
+        `目标数据库：${db || "当前库"}（来源：${source}）`,
+        `远端接口返回：${errorDetail}`,
+        "高频原因：数据库删除重建后 NCB 会换新密钥，插件手里可能是旧的",
+        "解决办法：前往 NoCodeBackend 控制台 → 该数据库 → 重新复制 Secret Key 填入",
+      ],
+    };
+  } catch (err) {
+    if (timer) clearTimeout(timer);
+    return {
+      ok: false,
+      verdict: "ERROR",
+      source,
+      database: db,
+      title: "检测 Secret Key 失败（连接异常）",
+      lines: [
+        `目标数据库：${db || "当前库"}`,
+        `连接失败：${String((err && err.message) || err).slice(0, 100)}`,
+        "请检查网络连接后重试",
+      ],
+    };
+  }
 }
 

@@ -306,6 +306,15 @@
       }
     }
 
+    if (containerId === "db_action_status") {
+      var secVal = $("ncb_secret") ? $("ncb_secret").value.trim() : "";
+      if (!secVal) {
+        html += '<div class="secret-guide-tip">' +
+          '<strong>💡 Secret Key 提示：</strong>当前未在设置页显式填写 Secret Key。R2 的列举与删除需要它；若需获取，请前往 <strong>NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key</strong> 填入（它只在建库时返回一次，插件无法自行取回）。' +
+        '</div>';
+      }
+    }
+
     el.innerHTML = html;
   }
 
@@ -520,8 +529,10 @@
       var opLabels = {
         provision: "一键创建数据库",
         ncb_check: "检测 MCP Key",
+        secret_check: "检测 Secret Key",
         storage_setup: "挂载 R2 存储",
         r2_check: "检测 R2 密钥",
+        clean_probe: "清理探针文件",
         model_check: "检测本地小模型",
         model_download: "下载本地小模型",
         init: "初始化数据库",
@@ -542,9 +553,9 @@
 
   function setActionButtonsDisabled(disabled) {
     var ids = [
-      "btn_db_provision", "btn_check_ncb", "btn_db_storage_setup", "btn_db_status", "btn_db_reset",
+      "btn_db_provision", "btn_check_ncb", "btn_check_secret", "btn_db_storage_setup", "btn_db_status", "btn_db_reset",
       "btn_confirm_provision", "btn_confirm_reset",
-      "btn_check_r2", "btn_check_model", "btn_download_model",
+      "btn_check_r2", "btn_clean_probe", "btn_check_model", "btn_download_model",
       "btn_harvest_gateway"
     ];
     ids.forEach(function (id) {
@@ -575,7 +586,7 @@
     say("正在提交…");
 
     var targetCard = "ncb";
-    if (op === "storage_setup" || op === "r2_check") {
+    if (op === "storage_setup" || op === "r2_check" || op === "clean_probe") {
       targetCard = "r2";
     } else if (op === "model_check" || op === "model_download") {
       targetCard = "model";
@@ -621,6 +632,9 @@
         action.secret_access_key = sk;
         action.bucket_name = bkt;
         action.public_url = pub;
+      } else if (op === "secret_check") {
+        var sec = payload.ncb_secret || ($("ncb_secret") ? $("ncb_secret").value.trim() : "");
+        if (sec) action.secret = sec;
       }
 
       if (extra && extra.confirm) action.confirm = extra.confirm;
@@ -637,10 +651,14 @@
             msg = "已提交一键创建任务（ID: " + action.id + "）。宿主将在执行后回传结果…";
           } else if (op === "ncb_check") {
             msg = "已提交检测 MCP Key 任务（ID: " + action.id + "）。正在等待宿主执行…";
+          } else if (op === "secret_check") {
+            msg = "已提交检测 Secret Key 任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "storage_setup") {
             msg = "已提交挂载 R2 存储任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "r2_check") {
             msg = "已提交检测 R2 密钥任务（ID: " + action.id + "）。正在等待宿主执行…";
+          } else if (op === "clean_probe") {
+            msg = "已提交清理探针文件任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "model_check") {
             msg = "已提交检测本地小模型任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "model_download") {
@@ -699,7 +717,13 @@
         paintDbStatus(current._action);
         if (btn) btn.disabled = false;
         if (warn) say("已保存（" + warn + "）", "warn");
-        else say("已保存全部设置", "ok");
+        else {
+          var note = "";
+          if (!next.ncb_secret) {
+            note = "（未填写 Secret Key：R2 的列举/删除需要它，留空时这两项不可用，记忆读写不受影响）";
+          }
+          say("已保存全部设置" + note, "ok");
+        }
       },
       function (e) {
         if (btn) btn.disabled = false;
@@ -744,7 +768,11 @@
           current = written || next;
           fill(current);
           paintMode(current);
-          cardSay(statusId, "已保存本卡片", "ok");
+          var note = "";
+          if (cardKey === "ncb" && !next.ncb_secret) {
+            note = "（未填写 Secret Key：R2 的列举/删除需要它，留空时这两项不可用，记忆读写不受影响）";
+          }
+          cardSay(statusId, "已保存本卡片" + note, "ok");
         },
         function (e) {
           if (btn) btn.disabled = false;
@@ -966,6 +994,14 @@
       });
     }
 
+    // 检测 Secret Key
+    var checkSecretBtn = $("btn_check_secret");
+    if (checkSecretBtn) {
+      checkSecretBtn.addEventListener("click", function () {
+        submitAction("secret_check");
+      });
+    }
+
     // 挂载 R2 存储
     var storageBtn = $("btn_db_storage_setup");
     if (storageBtn) {
@@ -979,6 +1015,14 @@
     if (checkR2Btn) {
       checkR2Btn.addEventListener("click", function () {
         submitAction("r2_check");
+      });
+    }
+
+    // 清理探针文件
+    var cleanProbeBtn = $("btn_clean_probe");
+    if (cleanProbeBtn) {
+      cleanProbeBtn.addEventListener("click", function () {
+        submitAction("clean_probe");
       });
     }
 

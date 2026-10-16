@@ -17,6 +17,7 @@
  *   以真实操作为准给出判定。
  */
 import { NcbMcp } from "./ncb_mcp.js";
+import { lookupSecret } from "./local_state.js";
 
 const REST_BASE = "https://api.nocodebackend.com";
 
@@ -160,9 +161,9 @@ export async function r2Probe(cfg, database) {
       const prefix = (out && (out.prefix || out.path)) ? String(out.prefix || out.path) : "";
       if (prefix) keys.push(prefix.replace(/\/+$/, "") + "/" + name);
       keys.push(name);
-      const hasSecret = !!(cfg && (cfg.secret || cfg.ncb_secret));
+      const hasSecret = !!((cfg && (cfg.secret || cfg.ncb_secret)) || (lookupSecret ? lookupSecret(db) : ""));
       if (!hasSecret) {
-        cleanNote = "未配置数据库 Secret Key，无法删除探针（R2 删除走 REST 接口，只有 MCP key 时只能上传）";
+        cleanNote = "探针文件已留在 R2 存储中，因为删除需要数据库 Secret Key，而当前尚未填写（只有 MCP Key 时只能上传）。如需删除探针，请前往 NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key 填入设置页，然后点击「清理探针文件」或调用 storage_delete。";
       } else {
         for (const k of keys) {
           try {
@@ -489,4 +490,124 @@ function utf8ToBase64(s) {
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes.charCodeAt(i));
   return btoa(bin);
+}
+
+/**
+ * cleanProbes —— 扫描 R2 存储桶中所有 _memhub_probe 前缀的探针对象并全部删除。
+ * 走现有的信标机制，结果写回 R2 卡片。
+ */
+export async function cleanProbes(cfg, args) {
+  const db = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
+  const manual = String((args && args.secret) || (cfg && (cfg.ncb_secret || cfg.secret)) || "").trim();
+  const captured = db ? lookupSecret(db) : (lookupSecret("") || "");
+  const secret = manual || captured || "";
+
+  if (!secret) {
+    return {
+      ok: false,
+      action: "NO_SECRET",
+      database: db,
+      deleted_count: 0,
+      title: "未配置 Secret Key，无法清理探针",
+      lines: [
+        `目标数据库：${db || "未指定"}`,
+        "探针文件清理走 REST 接口，必须使用数据库 Secret Key",
+        "只有 MCP Key 时只能上传探针，无法扫描或删除 R2 中的残留文件",
+        "解决办法：前往 NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key 填入设置页",
+        "提示：也可以登录 Cloudflare R2 控制台手动删除带有 _memhub_probe 前缀的文件",
+      ],
+      suggestion: "请前往 NoCodeBackend 控制台复制 Secret Key 填入设置页后重试。",
+    };
+  }
+
+  const clientCfg = Object.assign({}, cfg, { instance: db, secret });
+  let listRes;
+  try {
+    listRes = await r2List(clientCfg, { limit: 1000 });
+  } catch (err) {
+    return {
+      ok: false,
+      action: "ERROR",
+      database: db,
+      deleted_count: 0,
+      title: "扫描 R2 存储桶失败",
+      lines: [
+        `目标数据库：${db || "当前库"}`,
+        `网络或接口异常：${String((err && err.message) || err).slice(0, 100)}`,
+        "无法获取桶内文件列表，清理中止",
+      ],
+    };
+  }
+
+  if (!listRes.ok) {
+    const isAuth = listRes.error && (listRes.error.includes("401") || listRes.error.includes("403"));
+    return {
+      ok: false,
+      action: "AUTH_FAILED",
+      database: db,
+      deleted_count: 0,
+      title: isAuth ? "Secret Key 无效，无法清理探针" : "列举 R2 存储桶对象失败",
+      lines: [
+        `目标数据库：${db || "当前库"}`,
+        isAuth ? "Secret Key 鉴权失败：数据库若删除重建过，NCB 会换新密钥" : `错误信息：${String(listRes.error || "").slice(0, 100)}`,
+        "无法获取桶内文件列表，清理中止",
+        "建议去 NoCodeBackend 控制台重新复制 Secret Key 填入设置页，或去 Cloudflare 手动删除",
+      ],
+    };
+  }
+
+  const files = listRes.files || [];
+  const probeKeys = [];
+  for (const f of files) {
+    const k = typeof f === "string" ? f : (f.key || f.name || f.filename || "");
+    if (k && k.includes("_memhub_probe")) {
+      probeKeys.push(k);
+    }
+  }
+
+  if (probeKeys.length === 0) {
+    return {
+      ok: true,
+      action: "CLEANED",
+      database: db,
+      found_count: 0,
+      deleted_count: 0,
+      title: "未发现残留探针文件",
+      lines: [
+        `目标数据库：${db || "当前库"}`,
+        "已扫描 R2 存储桶，未发现任何包含 _memhub_probe 的探针对象",
+        "存储桶保持整洁，无需清理",
+      ],
+    };
+  }
+
+  let deleted = 0;
+  let failed = 0;
+  for (const k of probeKeys) {
+    try {
+      const del = await r2Delete(clientCfg, { key: k, confirm: "DELETE" });
+      if (del.ok) deleted++;
+      else failed++;
+    } catch (_) {
+      failed++;
+    }
+  }
+
+  const allDeleted = failed === 0;
+  return {
+    ok: allDeleted,
+    action: "CLEANED",
+    database: db,
+    found_count: probeKeys.length,
+    deleted_count: deleted,
+    failed_count: failed,
+    title: allDeleted ? `已清理 ${deleted} 个探针文件` : `探针清理完成（成功 ${deleted}，失败 ${failed}）`,
+    lines: [
+      `目标数据库：${db || "当前库"}`,
+      `共发现 ${probeKeys.length} 个探针文件，已成功删除 ${deleted} 个`,
+      ...(failed > 0
+        ? [`${failed} 个文件删除失败，可在 Cloudflare 控制台手动清理`]
+        : ["R2 存储桶中的探针垃圾文件已全部清除"]),
+    ],
+  };
 }

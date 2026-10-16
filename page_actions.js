@@ -31,8 +31,8 @@
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { dbInit, dbReset, dbStatus, dbProvision, storageSetup, ncbCheck, RESET_CONFIRM } from "./db_tools.js";
-import { r2Setup, r2Check } from "./r2.js";
+import { dbInit, dbReset, dbStatus, dbProvision, storageSetup, ncbCheck, secretCheck, RESET_CONFIRM } from "./db_tools.js";
+import { r2Setup, r2Check, cleanProbes } from "./r2.js";
 import { checkLocalModel, downloadModel, modelDir, human, MODEL_SPEC } from "./model_check.js";
 
 /** 插件目录下的状态文件路径（供 iframe 内设置页通过 script 标签加载）。 */
@@ -55,7 +55,9 @@ export const OPS = {
   reset: "删除插件三张表（结构与数据一并删除，不可恢复）",
   status: "只读检查结构状态",  // db-col-ok: UI 操作描述字典键名，非数据库列
   ncb_check: "检测 MCP Key 有效性并检查目标数据库与结构状态（只读检测）",
+  secret_check: "检测数据库 Secret Key 是否有效（通过只读接口验证，不上传文件）",
   r2_check: "检测 R2 凭据是否真的可用（真实上传探针，只读检测）",
+  clean_probe: "扫描 R2 中残留的探针文件并自动删除（走 REST 接口）",
   model_check: "检测本地多语言小模型是否已就绪（只读检测）",
   model_download: "下载并安装本地多语言小模型（LLMLingua-2 mBERT INT8，约 174MB，支持断点续传与校验）",
 };
@@ -203,13 +205,14 @@ export function readAction(options) {
     database: a.database ? String(a.database) : "",
     confirm: a.confirm ? String(a.confirm) : "",
     on_exist: a.on_exist ? String(a.on_exist) : "",
-    with_r2: a.with_r2 === false ? false : undefined,
+    with_r2: a.with_r2 === true ? true : undefined,
     bucket_name: a.bucket_name ? String(a.bucket_name) : "",
     public_url: a.public_url ? String(a.public_url) : "",
     account_id: a.account_id ? String(a.account_id) : "",
     access_key_id: a.access_key_id ? String(a.access_key_id) : "",
     secret_access_key: a.secret_access_key ? String(a.secret_access_key) : "",
     region: a.region ? String(a.region) : "",
+    secret: a.secret ? String(a.secret) : "",
   };
 }
 
@@ -291,6 +294,7 @@ export async function runPendingAction(options, cfg) {
  */
 async function execute(action, cfg, fs, sp, state) {
   const args = { database: action.database || undefined };
+  if (action.secret) args.secret = action.secret;
   if (action.op === "reset") args.confirm = action.confirm || "";
   if (action.op === "provision") {
     // 重名策略等参数随信标一起传进来
@@ -323,7 +327,9 @@ async function execute(action, cfg, fs, sp, state) {
     else if (action.op === "init") result = await dbInit(cfg, args);
     else if (action.op === "reset") result = await dbReset(cfg, args);
     else if (action.op === "ncb_check") result = await ncbCheck(cfg, args);
+    else if (action.op === "secret_check") result = await secretCheck(cfg, args);
     else if (action.op === "r2_check") result = await r2Check(cfg, args);
+    else if (action.op === "clean_probe") result = await cleanProbes(cfg, args);
     else if (action.op === "model_check") result = await checkLocalModel({ checkUpstream: true });
     else if (action.op === "model_download") {
       if (isModelDownloading()) {
@@ -362,8 +368,8 @@ async function execute(action, cfg, fs, sp, state) {
     // 早先写成 `op === "storage_setup" ? "r2" : "ncb"`，导致 r2_check 的结果
     // 被写进 NoCodeBackend 卡片、model_check 干脆无处可去（它当时也没实现）。
     const CARD_OF_OP = {
-      provision: "ncb", init: "ncb", reset: "ncb", status: "ncb", ncb_check: "ncb",  // db-col-ok: UI 操作对应的卡片映射表，非数据库列
-      storage_setup: "r2", r2_check: "r2",
+      provision: "ncb", init: "ncb", reset: "ncb", status: "ncb", ncb_check: "ncb", secret_check: "ncb",  // db-col-ok: UI 操作对应的卡片映射表，非数据库列
+      storage_setup: "r2", r2_check: "r2", clean_probe: "r2",
       model_check: "model", model_download: "model",
     };
     const cardKey = CARD_OF_OP[action.op] || "ncb";
@@ -511,6 +517,15 @@ export function formatCardStatus(key, rawResult, opHint) {
         if (res.database) lines.push(`目标数据库：${res.database}`);
         if (res.diagnosis && res.diagnosis.detail) lines.push(res.diagnosis.detail);
       }
+    } else if (op === "secret_check") {
+      title = res.title || (ok ? "Secret Key 有效" : "Secret Key 验证未通过");
+      if (Array.isArray(res.lines) && res.lines.length) {
+        lines.push(...res.lines);
+      } else {
+        lines.push(ok ? "Secret Key 验证成功" : "Secret Key 验证未通过");
+        if (res.database) lines.push(`目标数据库：${res.database}`);
+        if (res.source) lines.push(`密钥来源：${res.source}`);
+      }
     } else {
       title = ok ? "操作执行成功" : "操作执行失败";
       lines.push(`操作类型：${op}`);
@@ -524,7 +539,11 @@ export function formatCardStatus(key, rawResult, opHint) {
         lines.push(`数据库：${res.database || "当前库"}`);
         lines.push(`存储桶：${res.bucket_name || "已绑定"}`);
         if (res.public_url) lines.push(`公开域名：${res.public_url}`);
-        lines.push("真实上传与删除探针测试成功，存储通道就绪");
+        if (res.probe && res.probe.cleaned === false) {
+          lines.push(res.probe.clean_note ? `探针残留提示：${res.probe.clean_note}` : "真实上传验证成功；探针文件留在 R2（删除需 Secret Key）");
+        } else {
+          lines.push("真实上传与删除探针测试成功，存储通道就绪");
+        }
       } else {
         const diag = res.diagnosis;
         title = diag && diag.title ? diag.title : (op === "r2_check" ? "R2 凭据验证失败" : "R2 挂载未生效");
@@ -539,6 +558,16 @@ export function formatCardStatus(key, rawResult, opHint) {
           if (diag.actions[1] && lines.length < 5) lines.push(diag.actions[1]);
         } else {
           lines.push("请到 NoCodeBackend 控制台确认 Cloudflare R2 连接与权限");
+        }
+      }
+    } else if (op === "clean_probe") {
+      title = res.title || (ok ? "探针清理完成" : "探针清理失败");
+      if (Array.isArray(res.lines) && res.lines.length) {
+        lines.push(...res.lines);
+      } else {
+        lines.push(`数据库：${res.database || "当前库"}`);
+        if (res.note || res.error || res.suggestion) {
+          lines.push(res.note || res.error || res.suggestion);
         }
       }
     } else {

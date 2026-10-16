@@ -254,7 +254,7 @@ function cut(s, n) {
 }
 
 /* ================= onRequest ================= */
-export function onRequest(body, ctx) {
+function onRequestInner(body, ctx) {
   if (!body) return body;
   ctx = ctx || {};
   var opts = ctx.options || {};
@@ -274,8 +274,12 @@ export function onRequest(body, ctx) {
   ctx.state.harvested = 0;
   ctx.state.cardPrefix = opts.ccr_cards ? "card" : "full";
   // 轮次号与来源 agent：供提炼指令的间隔控制与作用域过滤使用
-  st.turnNo = (Number(st.turnNo) || 0) + 1;
-  st.agent = (ctx && ctx.agent) || st.agent || "";
+  /* 注意：这里必须写 ctx.state，不能写 st。
+   * 曾误写成 st（周边全是 ctx.state，改名的残留），导致 st is not defined，
+   * onRequest 对【每一条正常对话】都抛异常 → 记忆注入从未生效、
+   * 线上表现为插件列表里成片的中间件失败。 */
+  ctx.state.turnNo = (Number(ctx.state.turnNo) || 0) + 1;
+  ctx.state.agent = (ctx && ctx.agent) || ctx.state.agent || "";
   ctx.state.inlineExtract = !!opts.inline_extract;
   ctx.state.memHold = 0;
   ctx.state.memBuf = "";
@@ -436,12 +440,12 @@ export function onRequest(body, ctx) {
   if (wantExtract) {
     var strength = String(opts.extract_strength || "soft").toLowerCase();
     var interval = Number(opts.extract_interval) || 1;
-    var turnNo = Number(st.turnNo) || 0;
+    var turnNo = Number(ctx.state.turnNo) || 0;
     // 作用域过滤：留空=全部适用
     var onlyAgents = opts.extract_agents;
     var onlyModels = opts.extract_models;
-    var agentName = String((ctx && ctx.agent) || st.agent || "").trim();
-    var modelName = String(st.model || "").trim();
+    var agentName = String((ctx && ctx.agent) || ctx.state.agent || "").trim();
+    var modelName = String(ctx.state.model || "").trim();
     if (Array.isArray(onlyAgents) && onlyAgents.length && agentName &&
         onlyAgents.indexOf(agentName) === -1) wantExtract = false;
     if (Array.isArray(onlyModels) && onlyModels.length && modelName &&
@@ -659,7 +663,7 @@ function stripMemoryBlock(text) {
 }
 
 /* ================= onEvent：流式 ================= */
-export function onEvent(event, ctx) {
+function onEventInner(event, ctx) {
   ctx = ctx || {};
   if (!ctx.state) return event;
   var st = ctx.state;
@@ -682,7 +686,7 @@ export function onEvent(event, ctx) {
 }
 
 /* ================= onResponse：非流式 ================= */
-export function onResponse(body, ctx) {
+function onResponseInner(body, ctx) {
   if (!body) return body;
   ctx = ctx || {};
   ctx.state = ctx.state || {};
@@ -707,4 +711,42 @@ export function onResponse(body, ctx) {
 
   harvest(ctx);
   return body;
+}
+
+/* ---------------- fail-open 外壳（最后一道防线） ----------------
+ * 背景：插件的中间件跑在【用户的模型请求链路上】。一旦我们抛异常，
+ * 轻则本次注入/剥离失效，重则整个请求失败 —— 后者绝不可接受。
+ * 实测线上出现过 322 次失败（约 2.1%），而平均耗时仅 87µs，
+ * 说明不是超时，而是某些输入形状不符预期时直接抛异常。
+ *
+ * 三道防线：
+ *   ① 各函数内对所有外部数据做防御性取值
+ *   ② 每个钩子用 try/catch 包住，异常一律降级为「不做任何改动」
+ *   ③ 降级时只打印一行简短原因（不打印内容，避免泄露用户对话）
+ */
+var _mwErrLogged = 0;
+function _mwFailOpen(name, e, fallback) {
+  if (_mwErrLogged < 3) {           // 高频出错时别刷屏
+    _mwErrLogged++;
+    try {
+      console.log("[memory-hub] " + name + " 已降级(fail-open): " +
+        ((e && e.name) || "Error") + ": " + String((e && e.message) || e).slice(0, 160));
+    } catch (_) { /* 连打印都不能抛 */ }
+  }
+  return fallback;
+}
+
+export function onRequest(body, ctx) {
+  try { return onRequestInner(body, ctx); }
+  catch (e) { return _mwFailOpen("onRequest", e, body); }
+}
+
+export function onEvent(event, ctx) {
+  try { return onEventInner(event, ctx); }
+  catch (e) { return _mwFailOpen("onEvent", e, event); }
+}
+
+export function onResponse(body, ctx) {
+  try { return onResponseInner(body, ctx); }
+  catch (e) { return _mwFailOpen("onResponse", e, body); }
 }
