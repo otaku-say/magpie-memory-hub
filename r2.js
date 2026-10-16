@@ -136,23 +136,47 @@ export async function r2Probe(cfg, database) {
   }
   const mcp = clientOf(cfg);
   const db = database || dbOf(cfg, {});
-  const name = "_memhub_probe_" + Date.now() + ".txt";
+  /* 【固定文件名，不要带时间戳】
+   * 早先用 "_memhub_probe_" + Date.now() + ".txt"，于是每次检测都新增一个文件。
+   * 一旦删除失败（没 secret、key 对不上、权限不足），这些探针就会在 R2 里越堆越多。
+   * 改成固定名字后，重复检测只会覆盖同一个文件 —— 最坏情况也只剩 1 个。 */
+  const name = "_memhub_probe.txt";
   try {
     const out = await mcp.uploadFile(db, name, utf8ToBase64("probe"), "text/plain");
     const url = (out && (out.url || out.publicUrl)) || "";
     if (!url) return { ok: false, error: "上传没有返回 URL", raw: out };
-    // 探针用完就删；删不掉不算失败（有些配置不给删权限）
+    /* 探针用完就删。删不掉不算失败（有些配置不给删权限），
+     * 但必须把结果如实回传，让用户知道有没有留下垃圾文件。 */
     let cleaned = false;
+    let cleanNote = "";
     try {
-      const key = (out && out.key) || "";
-      if (key && cfg && (cfg.secret || cfg.ncb_secret)) {
-        const r = await rest(cfg, "DELETE", "/files/" + encodeURIComponent(key), {});
-        cleaned = r.status < 400;
+      /* 注意：NCB 上传后会在文件名前加一段前缀（如 1792163443679-xxxx-），
+       * 所以实际对象 key 与上传时的 name 并不相同。优先用响应里的 key，
+       * 并同时尝试 name 本身，两个都试过才算尽力。 */
+      const keys = [];
+      if (out && out.key) keys.push(String(out.key));
+      const prefix = (out && (out.prefix || out.path)) ? String(out.prefix || out.path) : "";
+      if (prefix) keys.push(prefix.replace(/\/+$/, "") + "/" + name);
+      keys.push(name);
+      const hasSecret = !!(cfg && (cfg.secret || cfg.ncb_secret));
+      if (!hasSecret) {
+        cleanNote = "未配置数据库 Secret Key，无法删除探针（R2 删除走 REST 接口，只有 MCP key 时只能上传）";
+      } else {
+        for (const k of keys) {
+          try {
+            const r = await rest(cfg, "DELETE", "/files/" + encodeURIComponent(k), {});
+            if (r.status < 400) { cleaned = true; break; }
+          } catch (e) {
+            if (e.name === "AbortError" || (signal && signal.aborted)) throw e;
+          }
+        }
+        if (!cleaned) cleanNote = "探针文件删除失败（已尝试返回的 key 与原始文件名），它可能仍留在 R2 里";
       }
     } catch (e) {
       if (e.name === "AbortError" || (signal && signal.aborted)) throw e;
+      cleanNote = "探针清理时出错：" + String(e && e.message || e);
     }
-    return { ok: true, url, cleaned };
+    return { ok: true, url, cleaned, clean_note: cleanNote };
   } catch (e) {
     if (e.name === "AbortError" || (signal && signal.aborted)) {
       throw e;
@@ -246,10 +270,11 @@ export async function r2Setup(cfg, args) {
       bucket_created: out && out.bucket_created,
       cors_configured: out && out.cors_configured,
     },
-    probe: probe.ok ? { uploaded: true, cleaned: probe.cleaned } : { error: probe.error },
+    probe: probe.ok ? { uploaded: true, cleaned: probe.cleaned, clean_note: probe.clean_note || "" } : { error: probe.error },
     diagnosis: explained,
     note: probe.ok
       ? "已用真实上传验证：R2 确实可用（不是只看 NCB 的返回值）。"
+        + (probe.cleaned ? "" : " ⚠️ " + (probe.clean_note || "探针文件未能删除，可能残留在 R2 里。"))
       : "⚠️ NCB 报告成功，但**真实上传失败** —— 这个挂载实际上没生效。" +
         (explained ? "原因：" + explained.title : ""),
     raw: out,
@@ -308,10 +333,13 @@ export async function r2Check(cfg, args) {
     bucket_name: bucketName,
     public_url: publicUrl,
     credentials_source: credentialsSource,
-    probe: probe.ok ? { uploaded: true, cleaned: probe.cleaned } : { error: probe.error },
+    probe: probe.ok ? { uploaded: true, cleaned: probe.cleaned, clean_note: probe.clean_note || "" } : { error: probe.error },
     diagnosis: explained,
     note: ok
-      ? "R2 凭据已通过真实探针验证：上传与删除探针文件均正常，当前存储可用。"
+      ? "R2 凭据已通过真实探针验证：上传正常，当前存储可用。"
+        + (probe.cleaned
+            ? "探针文件已清理。"
+            : " ⚠️ " + (probe.clean_note || "探针文件未能删除，可能残留在 R2 里。"))
       : "R2 凭据验证失败：无法完成探针文件写入。" + (explained ? " 原因：" + explained.title : ""),
   };
 }
