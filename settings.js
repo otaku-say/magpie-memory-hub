@@ -67,6 +67,79 @@
   }
 
   /* ---------------- 状态行与各卡片反馈 ---------------- */
+  /* ---------------- 带 1100ms 防抖的排队保存器 ----------------
+   * 依据：Magpie 源码 internal/gui/pluginpage.go 的 pageSetAllowed 规则，
+   * 限制两次 options.set 间隔须 ≥ 1000ms，违者返回 HTTP 429。
+   * 防抖排队器机制：
+   *   1. 连续快速改动/连击时，合并 payload 并防抖 1100ms，仅最后一次真正落盘，绝不丢配置；
+   *   2. 关键动作（例如提交信标 _action、点「保存」按钮）立即 flush 队列，保证时效敏感信标零延迟；
+   *   3. 若距离上次底层落盘不足 1000ms，即使要求 immediate 也会安全排队至频控窗口结束，规避 429；
+   *   4. 无论何种写入，始终保留已有的 options 与 memories 快照。
+   */
+  var queuedTimer = null;
+  var queuedPayload = null;
+  var queuedResolvers = [];
+  var lastUnderlyingSetTime = 0;
+
+  function flushQueuedOptionsSet() {
+    if (queuedTimer) {
+      clearTimeout(queuedTimer);
+      queuedTimer = null;
+    }
+    if (!queuedPayload) return Promise.resolve(current);
+
+    var toSend = queuedPayload;
+    var resolvers = queuedResolvers;
+    queuedPayload = null;
+    queuedResolvers = [];
+
+    if (!window.magpie || !window.magpie.options || typeof window.magpie.options.set !== "function") {
+      var noBridgeErr = new Error("桥接未就绪");
+      for (var j = 0; j < resolvers.length; j++) resolvers[j].reject(noBridgeErr);
+      return Promise.reject(noBridgeErr);
+    }
+
+    lastUnderlyingSetTime = Date.now();
+    return window.magpie.options.set(toSend).then(
+      function (written) {
+        current = written || toSend;
+        for (var i = 0; i < resolvers.length; i++) {
+          resolvers[i].resolve(written);
+        }
+        return written;
+      },
+      function (err) {
+        for (var i = 0; i < resolvers.length; i++) {
+          resolvers[i].reject(err);
+        }
+      }
+    );
+  }
+
+  function queuedOptionsSet(payload, immediate) {
+    if (!queuedPayload) {
+      queuedPayload = Object.assign({}, payload || {});
+    } else {
+      Object.assign(queuedPayload, payload || {});
+    }
+
+    return new Promise(function (resolve, reject) {
+      queuedResolvers.push({ resolve: resolve, reject: reject });
+
+      var isImmediate = !!(immediate || (payload && payload._action));
+      var now = Date.now();
+      var timeSinceLast = now - lastUnderlyingSetTime;
+
+      if (isImmediate && (lastUnderlyingSetTime === 0 || timeSinceLast >= 1000)) {
+        flushQueuedOptionsSet();
+      } else {
+        if (queuedTimer) clearTimeout(queuedTimer);
+        var delay = isImmediate ? Math.max(1100 - timeSinceLast, 50) : 1100;
+        queuedTimer = setTimeout(flushQueuedOptionsSet, delay);
+      }
+    });
+  }
+
   var statusTimer = null;
   function say(msg, kind) {
     var el = $("status");
@@ -640,7 +713,7 @@
       if (extra && extra.confirm) action.confirm = extra.confirm;
       payload._action = action;
 
-      return window.magpie.options.set(payload).then(
+      return queuedOptionsSet(payload, true).then(
         function (written) {
           setActionButtonsDisabled(false);
           current = written || payload;
@@ -709,7 +782,7 @@
     if (btn) btn.disabled = true;
     say("保存中…");
 
-    window.magpie.options.set(next).then(
+    queuedOptionsSet(next, true).then(
       function (written) {
         current = written || next;
         fill(current);
@@ -762,7 +835,7 @@
         }
       });
 
-      return window.magpie.options.set(next).then(
+      return queuedOptionsSet(next, true).then(
         function (written) {
           if (btn) btn.disabled = false;
           current = written || next;
@@ -813,7 +886,7 @@
         any++;
         if (v) filled++;
       });
-      return window.magpie.options.set(next).then(
+      return queuedOptionsSet(next, true).then(
         function (written) {
           if (btn) btn.disabled = false;
           current = written || next;

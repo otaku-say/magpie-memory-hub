@@ -429,6 +429,20 @@ async function runTests() {
   assert.strictEqual(modelCheckPayload._action.op, "model_check", "op 必须为 model_check");
   console.log("PASS: 点击「检测本地小模型」提交信标 op='model_check'");
 
+  await new Promise((r) => setTimeout(r, 1100));
+  env.elements.btn_check_secret.click();
+  await new Promise((r) => setTimeout(r, 50));
+  const secretCheckPayload = env.setCalls[env.setCalls.length - 1];
+  assert.strictEqual(secretCheckPayload._action.op, "secret_check", "op 必须为 secret_check");
+  console.log("PASS: 点击「检测 Secret Key」提交信标 op='secret_check'");
+
+  await new Promise((r) => setTimeout(r, 1100));
+  env.elements.btn_clean_probe.click();
+  await new Promise((r) => setTimeout(r, 50));
+  const cleanProbePayload = env.setCalls[env.setCalls.length - 1];
+  assert.strictEqual(cleanProbePayload._action.op, "clean_probe", "op 必须为 clean_probe");
+  console.log("PASS: 点击「清理探针文件」提交信标 op='clean_probe'");
+
   // ==========================================
   // 测试 8: MCP Key 显隐切换
   // ==========================================

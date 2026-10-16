@@ -21,12 +21,9 @@
 
 import { compressBody } from "./compress.js";
 
-var HARVEST_TAG = "[MEMORY_HARVEST]";
 /* 插件自己的包名 —— Magpie 把插件工具注册成 <包名>_<工具名>，
  * 所以这里要写全名，否则模型按 memory_save 去调会找不到工具。 */
 var PLUGIN_NAME = "magpie-memory-hub";
-var ANSWER_CAP = 4000;
-var PROMPT_CAP = 1500;
 var RRF_K = 60;
 var CAND_CAP = 200;      // 参与 RRF 融合的候选上限
 var BUCKET_CAP = 50;     // 每个倒排桶最多取多少条
@@ -184,20 +181,285 @@ function buildIndex(memories, now, version) {
   return _cache;
 }
 
-function lastUserText(messages) {
-  for (var i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role !== "user") continue;
-    var c = messages[i].content;
-    if (typeof c === "string") return cleanText(c);
-    if (c && c.length) {
-      var out = "";
-      for (var j = 0; j < c.length; j++) {
-        if (c[j] && c[j].type === "text") out += " " + cleanText(c[j].text);
+/* ================= 多协议嗅探与统一遍历器 ================= */
+
+/**
+ * 协议嗅探（降级策略）：当 ctx.protocol 缺失或为空时，根据请求体结构自动嗅探协议类型
+ */
+function sniffProtocol(body, ctx) {
+  if (ctx && typeof ctx.protocol === "string" && ctx.protocol.trim()) {
+    return ctx.protocol.trim().toLowerCase();
+  }
+  if (body && typeof body === "object") {
+    if (Array.isArray(body.contents)) return "gemini";
+    if (body.input !== undefined) return "responses";
+    if (Array.isArray(body.messages)) {
+      if (body.system !== undefined) return "anthropic";
+      return "chat";
+    }
+    if (body.systemInstruction || body.system_instruction) return "gemini";
+  }
+  return "chat";
+}
+
+/**
+ * getLastUserTurn(body, protocol)
+ * 返回定位到的「最后一条用户消息」的句柄，用于注入（前缀插入）与提取当前 prompt。
+ * 纯同步、无依赖，符合 moejs 运行时约束。
+ *
+ * 协议支持：
+ *   - chat / anthropic: body.messages (role: "user")
+ *   - responses: body.input 为纯字符串或数组 (role: "user")
+ *   - gemini: body.contents (role: "user" 或 role 缺失)
+ */
+function getLastUserTurn(body, protocol) {
+  if (!body || typeof body !== "object") return null;
+  var proto = String(protocol || "").toLowerCase();
+  if (!proto) proto = sniffProtocol(body);
+
+  // 1. Gemini: body.contents
+  if (proto === "gemini" || Array.isArray(body.contents)) {
+    var contents = Array.isArray(body.contents) ? body.contents : [];
+    for (var i = contents.length - 1; i >= 0; i--) {
+      var item = contents[i];
+      if (!item || typeof item !== "object") continue;
+      if (item.role && item.role !== "user") continue;
+      var parts = Array.isArray(item.parts) ? item.parts : [];
+      return {
+        protocol: "gemini",
+        turn: item,
+        getText: function () {
+          var out = "";
+          for (var p = 0; p < parts.length; p++) {
+            var pt = parts[p];
+            if (pt && typeof pt.text === "string" && !pt.thought) {
+              out += (out ? " " : "") + cleanText(pt.text);
+            }
+          }
+          return cleanText(out);
+        },
+        prepend: function (injectedText) {
+          if (!injectedText) return;
+          var pfx = String(injectedText).replace(/^\s+/, "");
+          if (!pfx) return;
+          if (!Array.isArray(item.parts)) item.parts = [];
+          if (item.parts.length > 0 && typeof item.parts[0].text === "string" && !item.parts[0].thought) {
+            item.parts[0].text = pfx + "\n\n" + item.parts[0].text;
+          } else {
+            // Gemini schema: Part 对象只包含合法字段（例如 text），禁止插入 type 等非法字段
+            item.parts.unshift({ text: pfx });
+          }
+        }
+      };
+    }
+    return null;
+  }
+
+  // 2. OpenAI Responses: body.input (字符串或数组)
+  if (proto === "responses" || body.input !== undefined) {
+    if (typeof body.input === "string") {
+      return {
+        protocol: "responses",
+        turn: body,
+        getText: function () {
+          return cleanText(body.input);
+        },
+        prepend: function (injectedText) {
+          if (!injectedText) return;
+          var pfx = String(injectedText).replace(/^\s+/, "");
+          if (!pfx) return;
+          body.input = pfx + "\n\n" + body.input;
+        }
+      };
+    }
+    if (Array.isArray(body.input)) {
+      var inputItems = body.input;
+      for (var j = inputItems.length - 1; j >= 0; j--) {
+        var it = inputItems[j];
+        if (!it || typeof it !== "object") continue;
+        if (it.role !== "user") continue;
+        return {
+          protocol: "responses",
+          turn: it,
+          getText: function () {
+            var c = it.content;
+            if (typeof c === "string") return cleanText(c);
+            if (Array.isArray(c)) {
+              var out = "";
+              for (var p = 0; p < c.length; p++) {
+                var cp = c[p];
+                if (cp && typeof cp.text === "string" && (cp.type === "input_text" || cp.type === "text" || !cp.type)) {
+                  out += (out ? " " : "") + cleanText(cp.text);
+                }
+              }
+              return cleanText(out);
+            }
+            return "";
+          },
+          prepend: function (injectedText) {
+            if (!injectedText) return;
+            var pfx = String(injectedText).replace(/^\s+/, "");
+            if (!pfx) return;
+            var c = it.content;
+            if (typeof c === "string") {
+              it.content = pfx + "\n\n" + c;
+            } else if (Array.isArray(c)) {
+              // Responses schema: user 输入块严格要求 type: "input_text"
+              it.content = [{ type: "input_text", text: pfx }].concat(c);
+            } else {
+              it.content = [{ type: "input_text", text: pfx }];
+            }
+          }
+        };
       }
-      return cleanText(out);
+      return null;
+    }
+    return null;
+  }
+
+  // 3. Chat / Anthropic: body.messages
+  var msgs = Array.isArray(body.messages) ? body.messages : [];
+  for (var u = msgs.length - 1; u >= 0; u--) {
+    var m = msgs[u];
+    if (!m || typeof m !== "object") continue;
+    if (m.role !== "user") continue;
+    return {
+      protocol: proto === "anthropic" ? "anthropic" : "chat",
+      turn: m,
+      getText: function () {
+        var c = m.content;
+        if (typeof c === "string") return cleanText(c);
+        if (Array.isArray(c)) {
+          var out = "";
+          for (var p = 0; p < c.length; p++) {
+            var pt = c[p];
+            if (pt && pt.type === "text" && typeof pt.text === "string") {
+              out += (out ? " " : "") + cleanText(pt.text);
+            }
+          }
+          return cleanText(out);
+        }
+        return "";
+      },
+      prepend: function (injectedText) {
+        if (!injectedText) return;
+        var pfx = String(injectedText).replace(/^\s+/, "");
+        if (!pfx) return;
+        var c = m.content;
+        if (typeof c === "string") {
+          m.content = pfx + "\n\n" + c;
+        } else if (Array.isArray(c)) {
+          m.content = [{ type: "text", text: pfx }].concat(c);
+        } else {
+          m.content = pfx;
+        }
+      }
+    };
+  }
+  return null;
+}
+
+/**
+ * walkTurns(body, protocol, callback)
+ * 统一遍历请求体中各轮次的文本内容，供标签剥离与提炼采集复用。
+ * callback(text, setText, info)
+ */
+function walkTurns(body, protocol, fn) {
+  if (!body || typeof body !== "object" || typeof fn !== "function") return;
+  var proto = String(protocol || "").toLowerCase();
+  if (!proto) proto = sniffProtocol(body);
+
+  if (proto === "gemini" || Array.isArray(body.contents)) {
+    var contents = Array.isArray(body.contents) ? body.contents : [];
+    for (var i = 0; i < contents.length; i++) {
+      var item = contents[i];
+      if (!item || typeof item !== "object") continue;
+      var role = item.role || "user";
+      if (Array.isArray(item.parts)) {
+        for (var p = 0; p < item.parts.length; p++) {
+          var part = item.parts[p];
+          if (part && typeof part.text === "string") {
+            (function (pt, r, it) {
+              fn(pt.text, function (newText) { pt.text = newText; }, { role: r, item: it, part: pt, protocol: "gemini" });
+            })(part, role, item);
+          }
+        }
+      }
+    }
+    return;
+  }
+
+  if (proto === "responses" || body.input !== undefined) {
+    if (typeof body.input === "string") {
+      fn(body.input, function (newText) { body.input = newText; }, { role: "user", item: body, protocol: "responses" });
+      return;
+    }
+    if (Array.isArray(body.input)) {
+      for (var j = 0; j < body.input.length; j++) {
+        var itm = body.input[j];
+        if (!itm || typeof itm !== "object") continue;
+        var rRole = itm.role || "user";
+        if (typeof itm.content === "string") {
+          (function (it, r) {
+            fn(it.content, function (newText) { it.content = newText; }, { role: r, item: it, protocol: "responses" });
+          })(itm, rRole);
+        } else if (Array.isArray(itm.content)) {
+          for (var cp = 0; cp < itm.content.length; cp++) {
+            var cpart = itm.content[cp];
+            if (cpart && typeof cpart.text === "string") {
+              (function (p, r, it) {
+                fn(p.text, function (newText) { p.text = newText; }, { role: r, item: it, part: p, protocol: "responses" });
+              })(cpart, rRole, itm);
+            }
+          }
+        }
+      }
+      return;
+    }
+    return;
+  }
+
+  var msgs = Array.isArray(body.messages) ? body.messages : [];
+  for (var m = 0; m < msgs.length; m++) {
+    var msg = msgs[m];
+    if (!msg || typeof msg !== "object") continue;
+    var mRole = msg.role || "user";
+    if (typeof msg.content === "string") {
+      (function (it, r) {
+        fn(it.content, function (newText) { it.content = newText; }, { role: r, item: it, protocol: proto });
+      })(msg, mRole);
+    } else if (Array.isArray(msg.content)) {
+      for (var k = 0; k < msg.content.length; k++) {
+        var blk = msg.content[k];
+        if (blk && typeof blk.text === "string") {
+          (function (p, r, it) {
+            fn(p.text, function (newText) { p.text = newText; }, { role: r, item: it, part: p, protocol: proto });
+          })(blk, mRole, msg);
+        }
+      }
     }
   }
-  return "";
+}
+
+function lastUserText(body, protocol) {
+  if (Array.isArray(body)) {
+    for (var i = body.length - 1; i >= 0; i--) {
+      if (body[i] && body[i].role === "user") {
+        var c = body[i].content;
+        if (typeof c === "string") return cleanText(c);
+        if (Array.isArray(c)) {
+          var out = "";
+          for (var j = 0; j < c.length; j++) {
+            if (c[j] && c[j].type === "text") out += " " + cleanText(c[j].text);
+          }
+          return cleanText(out);
+        }
+      }
+    }
+    return "";
+  }
+  var turn = getLastUserTurn(body, protocol);
+  return turn ? turn.getText() : "";
 }
 
 /* ================= 词法命中分（字段加权） ================= */
@@ -255,23 +517,47 @@ function cut(s, n) {
 
 /* ================= onRequest ================= */
 function onRequestInner(body, ctx) {
-  if (!body) return body;
+  if (!body || typeof body !== "object") return body;
   ctx = ctx || {};
-  var opts = ctx.options || {};
+  var opts = (ctx.options && typeof ctx.options === "object") ? ctx.options : {};
+
+  if (!ctx.state || typeof ctx.state !== "object") ctx.state = {};
+
+  var proto = (ctx && ctx.protocol) ? String(ctx.protocol).toLowerCase() : sniffProtocol(body, ctx);
+  ctx.state.protocol = proto;
+
+  var userTurn = getLastUserTurn(body, proto);
+  if (!userTurn) return body;
+
+  var prompt = userTurn.getText();
+
+  /* ================= 存活探针 (__MEMHUB_PROBE__) =================
+   * 依据：第三方插件 heaven-1314/magpie-plugin-claude-scrub 用 ctx.reject(418, msg) 做秒级存活确认。
+   * ctx.reject 在状态码 400-599 时可阻断请求并返回消息。
+   * 防御性调用：只有在 ctx.reject 为函数且最后一条用户消息恰好等于探针串 "__MEMHUB_PROBE__" 时触发。
+   */
+  if (prompt === "__MEMHUB_PROBE__" && typeof ctx.reject === "function") {
+    var probePayload = {
+      status: "ok",
+      probe: "__MEMHUB_PROBE__",
+      plugin: PLUGIN_NAME,
+      version: "5.0", // db-col-ok: 存活探针版本
+      disabled: !!opts.disabled,
+      memories_count: (opts.memories && Array.isArray(opts.memories)) ? opts.memories.length : 0,
+      compress: opts.compress !== false,
+      protocol: proto,
+      turn_no: (Number(ctx.state.turnNo) || 0) + 1,
+      timestamp: Date.now ? Date.now() : 0
+    };
+    return ctx.reject(418, JSON.stringify(probePayload));
+  }
+
   if (opts.disabled) return body;
 
-  ctx.state = ctx.state || {};
-  var messages = body.messages;
-  if (!messages || !messages.length) return body;
-
   /* system 一律不碰（可能是字符串，也可能是 block 数组）。
-   * 下面只读它来判断协议，不做任何写入。 */
-
-  var prompt = lastUserText(messages);
+   * 保 KV-Cache 核心不变量：绝不改写 system prompt 与历史消息。 */
   ctx.state.promptText = prompt;
   ctx.state.model = body.model;
-  ctx.state.answer = "";
-  ctx.state.harvested = 0;
   ctx.state.cardPrefix = opts.ccr_cards ? "card" : "full";
   // 轮次号与来源 agent：供提炼指令的间隔控制与作用域过滤使用
   /* 注意：这里必须写 ctx.state，不能写 st。
@@ -283,6 +569,7 @@ function onRequestInner(body, ctx) {
   ctx.state.inlineExtract = !!opts.inline_extract;
   ctx.state.memHold = 0;
   ctx.state.memBuf = "";
+  ctx.state.memPending = "";
   ctx.opts = opts;
 
   var injected = "";
@@ -498,26 +785,16 @@ function onRequestInner(body, ctx) {
    * 这也是 Headroom Persistent Memory 的做法（prepend 到 user message）。
    *
    * 找不到可写的用户消息时就不注入 —— 宁可少注入，也不动缓存热区。 */
-  for (var u = messages.length - 1; u >= 0; u--) {
-    if (messages[u].role !== "user") continue;
-    var mc = messages[u].content;
-    if (typeof mc === "string") {
-      messages[u].content = injected.replace(/^\s+/, "") + "\n\n" + mc;
-      return body;
-    }
-    if (mc && mc.length) {
-      /* Anthropic/OpenAI 的 content 可能是块数组：在最前面插一个文本块 */
-      messages[u].content = [{ type: "text", text: injected.replace(/^\s+/, "") }].concat(mc);
-      return body;
-    }
-    break;
-  }
+  /* 找不到可写的用户消息时就不注入 —— 宁可少注入，也不动缓存热区。 */
+  userTurn.prepend(injected);
   return body;
 }
 
-/* ================= 从事件里取正文 ================= */
+/* ================= 从事件或响应里取正文（多协议支持） ================= */
 function pickText(obj) {
   if (!obj || typeof obj !== "object") return "";
+
+  // 1. OpenAI Chat: choices[0].delta or choices[0].message
   if (obj.choices && obj.choices.length) {
     var c = obj.choices[0];
     if (c.delta && typeof c.delta.content === "string") return c.delta.content;
@@ -530,9 +807,55 @@ function pickText(obj) {
     }
     if (c.message && typeof c.message.content === "string") return c.message.content;
   }
+
+  // 2. Anthropic: content_block_delta
   if (obj.type === "content_block_delta" && obj.delta && typeof obj.delta.text === "string") {
     return obj.delta.text;
   }
+
+  // 3. OpenAI Responses 流式事件: response.output_text.delta
+  if (obj.type === "response.output_text.delta" && typeof obj.delta === "string") {
+    return obj.delta;
+  }
+  if (obj.type === "response.output_text.done" && typeof obj.text === "string") {
+    return obj.text;
+  }
+
+  // 4. Gemini 流式事件与响应: candidates[].content.parts[].text
+  if (Array.isArray(obj.candidates) && obj.candidates.length) {
+    var gOut = "";
+    for (var gi = 0; gi < obj.candidates.length; gi++) {
+      var cand = obj.candidates[gi];
+      if (cand && cand.content && Array.isArray(cand.content.parts)) {
+        for (var pi = 0; pi < cand.content.parts.length; pi++) {
+          var gPart = cand.content.parts[pi];
+          if (gPart && typeof gPart.text === "string" && !gPart.thought) {
+            gOut += gPart.text;
+          }
+        }
+      }
+    }
+    if (gOut) return gOut;
+  }
+
+  // 5. OpenAI Responses 非流式完整响应: body.output[].content[].text
+  if (Array.isArray(obj.output) && obj.output.length) {
+    var rOut = "";
+    for (var oi = 0; oi < obj.output.length; oi++) {
+      var oItem = obj.output[oi];
+      if (oItem && Array.isArray(oItem.content)) {
+        for (var ci = 0; ci < oItem.content.length; ci++) {
+          var oPart = oItem.content[ci];
+          if (oPart && typeof oPart.text === "string") {
+            rOut += oPart.text;
+          }
+        }
+      }
+    }
+    if (rOut) return rOut;
+  }
+
+  // 6. Anthropic 非流式响应: body.content[].text
   if (obj.content && obj.content.length) {
     var out = "";
     for (var k = 0; k < obj.content.length; k++) {
@@ -542,26 +865,69 @@ function pickText(obj) {
     }
     return out;
   }
+
   if (typeof obj.output_text === "string") return obj.output_text;
   return "";
 }
 
 function isFinish(obj) {
   if (!obj || typeof obj !== "object") return false;
+  // 1. Chat
   if (obj.choices && obj.choices.length && obj.choices[0].finish_reason) return true;
-  if (obj.type === "message_stop" || obj.type === "response.completed") return true;
+  // 2. Anthropic
+  if (obj.type === "message_stop") return true;
+  if (obj.type === "message_delta" && obj.delta && obj.delta.stop_reason) return true;
+  // 3. Responses
+  if (obj.type === "response.completed" || obj.type === "response.done") return true;
+  // 4. Gemini
+  if (Array.isArray(obj.candidates) && obj.candidates.length && obj.candidates[0].finishReason) return true;
   return false;
 }
 
-/* ================= 写回事件正文（两种协议） ================= */
+/* ================= 写回事件正文（四种协议） ================= */
 function setEventText(obj, text) {
   if (!obj || typeof obj !== "object") return;
+  // 1. Chat
   if (obj.choices && obj.choices.length) {
-    var d = obj.choices[0].delta;
-    if (d && typeof d.content === "string") { d.content = text; return; }
+    var c0 = obj.choices[0];
+    if (!c0.delta) c0.delta = {};
+    c0.delta.content = text;
+    return;
   }
-  if (obj.type === "content_block_delta" && obj.delta && typeof obj.delta.text === "string") {
-    obj.delta.text = text; return;
+  // 2. Anthropic
+  if (obj.type === "content_block_delta") {
+    if (!obj.delta) obj.delta = {};
+    obj.delta.text = text;
+    return;
+  }
+  if (obj.type === "message_delta" || obj.type === "message_stop") {
+    if (!obj.delta) obj.delta = {};
+    obj.delta.text = text;
+    return;
+  }
+  // 3. Responses
+  if (obj.type === "response.output_text.delta" || (obj.type && obj.type.indexOf("response.") === 0)) {
+    obj.delta = text;
+    return;
+  }
+  // 4. Gemini: candidates[0].content.parts[0].text
+  if (Array.isArray(obj.candidates) && obj.candidates.length) {
+    var gc = obj.candidates[0];
+    if (!gc.content) gc.content = {};
+    if (!Array.isArray(gc.content.parts)) gc.content.parts = [];
+    if (gc.content.parts.length === 0) {
+      gc.content.parts.push({ text: text });
+      return;
+    }
+    for (var j = 0; j < gc.content.parts.length; j++) {
+      var p = gc.content.parts[j];
+      if (p && !p.thought) {
+        p.text = text;
+        return;
+      }
+    }
+    gc.content.parts.push({ text: text });
+    return;
   }
 }
 
@@ -600,15 +966,51 @@ function stripStream(piece, st) {
       }
       return piece;
     }
+    /* 【必须判定「是否真的像记忆块」再扣留】
+     * 早先这里无条件进入扣留，于是模型只要在散文里【提到】这个标签
+     * （例如「这个 <memory> 标签的作用是…」），后面的正文就全部被吞 ——
+     * 用户界面上表现为回复在中途莫名其妙断掉（真实踩过两次）。
+     * 判据：标签之后跳过空白，必须紧跟 "["（JSON 数组）或 "{"（单个对象），
+     * 这才是本插件约定的记忆块格式；否则按普通正文原样输出。 */
+    var head = piece.slice(0, i);
+    var rem = piece.slice(i);
+    var closeAngle = rem.indexOf(">");
+    if (closeAngle === -1) {
+      // "<memory" 尚未闭合 ">"，先扣留在 pending
+      if (rem.length > 50) return piece;
+      st.memPending = rem;
+      return head;
+    }
+
+    var tagStr = rem.slice(0, closeAngle + 1);
+    // 严格保证只认 <memory> 或 <memory >，防止 <memoryManagement> 被误判
+    if (tagStr !== "<memory>" && !/^<memory\s*>$/i.test(tagStr)) {
+      return head + tagStr + stripStream(rem.slice(closeAngle + 1), st);
+    }
+
+    var afterTag = rem.slice(closeAngle + 1);
+    if (/^\s*$/.test(afterTag)) {
+      // 标签后在本 chunk 全是空白，等待下一个 chunk 确认首个非空白字符
+      if (rem.length > 100) return piece;
+      st.memPending = rem;
+      return head;
+    }
+
+    /* 必须判定「是否真的像记忆块」再扣留：
+     * 跳过空白必须紧跟 "[" 或 "{"；若紧跟散文汉字/英文等，绝不扣留！原样吐出。 */
+    if (!/^\s*[\[{]/.test(afterTag)) {
+      return head + tagStr + stripStream(afterTag, st);
+    }
+
     st.memHold = 1;
-    st.memBuf = piece.slice(i);
-    st.memHead = piece.slice(0, i);
+    st.memBuf = rem;
+    st.memHead = head;
     var end0 = st.memBuf.indexOf(CLOSE_TAG);
     if (end0 !== -1) {
-      st.memHold = 2;   // 同一块内就闭合了
+      st.memHold = 0;   // 同一块内就闭合了，重置状态并支持后续连续块
       var tail0 = st.memBuf.slice(end0 + CLOSE_TAG.length);
       st.memBuf = "";
-      return st.memHead + tail0;
+      return st.memHead + (tail0 ? stripStream(tail0, st) : "");
     }
     return st.memHead;
   }
@@ -617,14 +1019,14 @@ function stripStream(piece, st) {
     st.memBuf += piece;
     var end = st.memBuf.indexOf(CLOSE_TAG);
     if (end !== -1) {
-      st.memHold = 2;
+      st.memHold = 0;
       var tail = st.memBuf.slice(end + CLOSE_TAG.length);
       st.memBuf = "";
-      return tail;
+      return tail ? stripStream(tail, st) : "";
     }
     if (st.memBuf.length > HOLD_MAX) {
       /* 迟迟不闭合：判定为模型没按格式输出，原样吐出，绝不吞掉用户内容 */
-      var flush = OPEN_TAG + st.memBuf;
+      var flush = st.memBuf;
       st.memHold = 0;
       st.memBuf = "";
       return flush;
@@ -632,34 +1034,14 @@ function stripStream(piece, st) {
     return "";
   }
 
-  /* hold=2：已剥离，但可能还有第二个块 */
+  /* 兜底状态：重置后重走 */
   st.memHold = 0;
   return stripStream(piece, st);
 }
 
-/* ================= 交出一轮对话 ================= */
-function harvest(ctx) {
-  var st = ctx.state;
-  if (!st || st.harvested) return;
-  st.harvested = 1;
-  var prompt = st.promptText || "";
-  var answer = st.answer || "";
-  if (prompt.length < 10 || answer.length < 80) return;   // 降噪门槛
-  console.log(
-    HARVEST_TAG +
-      JSON.stringify({
-        v: 5,
-        model: st.model || "",
-        prompt: prompt.slice(0, PROMPT_CAP),
-        response: answer.slice(0, ANSWER_CAP),
-        ts: Date.now ? Date.now() : 0
-      })
-  );
-}
-
 function stripMemoryBlock(text) {
   if (!text || text.indexOf("<memory") === -1) return text;
-  return text.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/\n{3,}/g, "\n\n");
+  return text.replace(/<memory>\s*(?:\[|\{)[\s\S]*?<\/memory>/gi, "").replace(/\n{3,}/g, "\n\n");
 }
 
 /* ================= onEvent：流式 ================= */
@@ -667,21 +1049,34 @@ function onEventInner(event, ctx) {
   ctx = ctx || {};
   if (!ctx.state) return event;
   var st = ctx.state;
-  var opts = ctx.opts || {};
 
   var piece = pickText(event);
   if (piece) {
-    /* 抓取用【原始】文本（含 <memory>，供提炼） */
-    var cur = st.answer || "";
-    if (cur.length < ANSWER_CAP) st.answer = (cur + piece).slice(0, ANSWER_CAP + 200);
-
     /* 用户可见的部分去掉 <memory> 块 */
     if (st.inlineExtract) {
       var visible = stripStream(piece, st);
       if (visible !== piece) setEventText(event, visible);
     }
   }
-  if (isFinish(event)) harvest(ctx);
+  if (isFinish(event)) {
+    if (st.inlineExtract) {
+      // 流结束保命：若有扣留未闭合的待定尾部或未闭合块，原样释放
+      var toRelease = "";
+      if (st.memPending) {
+        toRelease += st.memPending;
+        st.memPending = "";
+      }
+      if (st.memHold === 1 && st.memBuf) {
+        toRelease += st.memBuf;
+        st.memBuf = "";
+        st.memHold = 0;
+      }
+      if (toRelease) {
+        var curVis = pickText(event) || "";
+        setEventText(event, curVis + toRelease);
+      }
+    }
+  }
   return event;
 }
 
@@ -693,7 +1088,6 @@ function onResponseInner(body, ctx) {
   var opts = ctx.options || {};
 
   var answer = pickText(body);
-  if (answer) ctx.state.answer = answer;
 
   if (opts.inline_extract && answer && answer.indexOf("<memory") !== -1) {
     var stripped = stripMemoryBlock(answer);
@@ -705,11 +1099,35 @@ function onResponseInner(body, ctx) {
           body.content[i].text = stripMemoryBlock(body.content[i].text);
         }
       }
+    } else if (Array.isArray(body.output)) {
+      // Responses 协议输出
+      for (var oi = 0; oi < body.output.length; oi++) {
+        var oit = body.output[oi];
+        if (oit && Array.isArray(oit.content)) {
+          for (var ci = 0; ci < oit.content.length; ci++) {
+            var cp = oit.content[ci];
+            if (cp && typeof cp.text === "string") {
+              cp.text = stripMemoryBlock(cp.text);
+            }
+          }
+        }
+      }
+    } else if (Array.isArray(body.candidates)) {
+      // Gemini 协议输出
+      for (var gi = 0; gi < body.candidates.length; gi++) {
+        var gc = body.candidates[gi];
+        if (gc && gc.content && Array.isArray(gc.content.parts)) {
+          for (var gp = 0; gp < gc.content.parts.length; gp++) {
+            var part = gc.content.parts[gp];
+            if (part && typeof part.text === "string") {
+              part.text = stripMemoryBlock(part.text);
+            }
+          }
+        }
+      }
     }
-    ctx.state.answer = answer;  // 抓取侧保留完整文本（含 <memory>）
   }
 
-  harvest(ctx);
   return body;
 }
 

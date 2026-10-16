@@ -42,7 +42,6 @@ import urllib.error
 import urllib.parse
 from datetime import datetime, timezone
 
-HARVEST_TAG = "[MEMORY_HARVEST]"
 NCB_BASE = "https://api.nocodebackend.com"
 
 CATEGORIES = ["preference", "fact", "context", "entity", "decision", "insight"]
@@ -1445,23 +1444,6 @@ def process_turn(cfg, ncb, turn, caches, dry_run):
     return stats
 
 
-def read_turns(stream, follow):
-    """从流里逐行读 [MEMORY_HARVEST]{json}"""
-    while True:
-        line = stream.readline()
-        if not line:
-            if follow:
-                time.sleep(0.8)
-                continue
-            return
-        line = line.rstrip("\n")
-        idx = line.find(HARVEST_TAG)
-        if idx < 0:
-            continue
-        try:
-            yield json.loads(line[idx + len(HARVEST_TAG):])
-        except Exception:
-            continue
 
 
 def main():
@@ -1550,51 +1532,11 @@ def main():
 
 
 def run(stream, follow, cfg, ncb, caches, dry_run, pusher=None):
-    if caches is None:
-        caches = {}
-    if "memory" not in caches:
-        caches["memory"] = set()
-    if "pitfall" not in caches:
-        caches["pitfall"] = set()
-    if "evidence" not in caches:
-        caches["evidence"] = get_evidence_collector(cfg, log)
-
-    n = 0
-    try:
-        for turn in read_turns(stream, follow):
-            n += 1
-            stats = process_turn(cfg, ncb, turn, caches, dry_run)
-            counted = ("ADD", "UPDATE", "DRYRUN")
-            mem = [s for s in stats["memories"] if s.get("action") in counted]
-            pit = [s for s in stats["pitfalls"] if s.get("action") in counted]
-            # NOOP 单独报，避免「什么都没变」被读成「有产出」
-            noop = (len(stats["memories"]) - len(mem)) + (len(stats["pitfalls"]) - len(pit))
-            if dry_run:
-                for s_ in mem:
-                    log(f"  [记忆] [{s_.get('category','fact')}] {s_.get('title')}: "
-                        f"{str(s_.get('content'))[:100]}")
-                for s_ in pit:
-                    log(f"  [踩坑] <{s_.get('error_type','?')}> {str(s_.get('symptom'))[:70]} "
-                        f"=> {str(s_.get('solution'))[:70]}")
-            cmsg = ""
-            c = stats.get("compressed")
-            if c:
-                cmsg = (f" 压缩 {c['before']}→{c['after']} 字"
-                        f"（省 {100*(1-c['after']/max(1,c['before'])):.0f}%）")
-            log(f"#{n} 记忆 +{len(mem)} 踩坑 +{len(pit)}"
-                + (f" 去重跳过 {noop}" if noop else "") + cmsg
-                + (f" 错误: {'; '.join(stats['errors'])}" if stats["errors"] else ""))
-
-            # 记忆作用域提升（轻量版）
-            promoted = promote_scopes(ncb, cfg, dry_run=dry_run)
-            if promoted:
-                log(f"  [提升] {len(promoted)} 条记忆提升为 project 作用域")
-
-            # 有新内容入库或有提升时才把快照推回网关（内部还会按间隔 + 内容去重）
-            if pusher and not dry_run and (mem or pit or promoted):
-                pusher.maybe_push(ncb)
-    except KeyboardInterrupt:
-        log("已停止")
+    """
+    旧的 stdout / 日志流采集链路已移除。
+    在官方 Docker 部署下该链路从未生效，自动记忆已改用原生网关异步钩子 (gateway_harvest.hooks.js)。
+    """
+    log("提示：基于 stdout/日志流的 [MEMORY_HARVEST] 抓取链路已废弃移除，自动记忆已改用网关原生异步钩子。")
 
 
 if __name__ == "__main__":

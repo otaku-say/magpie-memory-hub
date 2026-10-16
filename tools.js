@@ -31,10 +31,6 @@ const CATEGORIES = ["principle", "preference", "fact", "context", "entity", "dec
 const SCOPES = ["user", "project", "session", "turn"];
 const SEVERITIES = ["low", "medium", "high", "critical"];
 const FETCH_LIMIT = 200;
-/* 推给网关中间件的快照上限。
- * 中间件在 moejs 里每元素约 0.8µs，快照越大它每请求越贵；
- * 这里按重要度排序后截断，保证中间件侧接近 O(1)。 */
-const SNAPSHOT_CAP = 500;
 
 /**
  * 进程内近期写入指纹 → 写入时刻。
@@ -309,7 +305,6 @@ async function saveMemory(client, cfg, m, ctx) {
   const callerAgent = (ctx && (ctx.agent || (ctx._ctx && ctx._ctx.agent))) || "";
   const clientVal = (m.client && String(m.client).trim())
     || (callerAgent && String(callerAgent).trim())
-    || (m.source_client && String(m.source_client).trim())
     || (m.agent && String(m.agent).trim())
     || "unknown";
   const origin = String(m.origin || "tool").trim();
@@ -530,7 +525,6 @@ async function pitfallSave(client, cfg, args, ctx) {
   const callerAgent = (ctx && (ctx.agent || (ctx._ctx && ctx._ctx.agent))) || "";
   const clientVal = (args.client && String(args.client).trim())
     || (callerAgent && String(callerAgent).trim())
-    || (args.source_client && String(args.source_client).trim())
     || (args.agent && String(args.agent).trim())
     || "unknown";
   const component = String(args.component || "").trim();

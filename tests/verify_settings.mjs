@@ -171,6 +171,8 @@ for (const [btnId, op] of [
   ["btn_db_status", "status"],
   ["btn_db_storage_setup", "storage_setup"],
   ["btn_check_ncb", "ncb_check"],
+  ["btn_check_secret", "secret_check"],
+  ["btn_clean_probe", "clean_probe"],
   ["btn_check_model", "model_check"]
 ]) {
   await new Promise((r) => setTimeout(r, 1100));   // 绕开页面自身 1 秒频控

@@ -79,11 +79,13 @@ try {
       `OPS 表条目数 ${Object.keys(OPS).length} ≥ 页面发出的 op 数 ${sentOps.size}`);
   }
 
-  console.log("\n=== 4. 真实跑一遍：三个检测信标各自把结果写进哪张卡片 ===");
+  console.log("\n=== 4. 真实跑一遍：检测信标各自把结果写进哪张卡片 ===");
   {
     const cases = [
       ["ncb_check", "ncb"],
+      ["secret_check", "ncb"],
       ["r2_check", "r2"],
+      ["clean_probe", "r2"],
       ["model_check", "model"],
     ];
     for (const [op, wantCard] of cases) {

@@ -17,29 +17,26 @@ Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记�
 ## 架构
 
 ```
-                    ┌──────────────── Mgpie 网关（Go 进程）────────────────┐
+                    ┌──────────────── Magpie 网关（Go 进程）────────────────┐
    Agent ──请求──▶  │ moejs 中间件（memory.middleware.js）                │
                     │   ① 压缩历史工具输出（compress.js，纯 JS 规则）      │
-                    │   ② 按关键词+热度+新鲜度检索记忆，注入 system prompt │
-                    │   ③ 注入内联提炼指令 / 剥离回复里的 <memory> 块      │
+                    │   ② 检索记忆，注入上下文（按关键词+热度+新鲜度）    │
+                    │   ③ 剥离模型回复里的 <memory> 块（改善前端呈现）   │
                     └───────────────────────┬───────────────────────────┘
-                                            │ [MEMORY_HARVEST] 日志
+                                            │ 本地录制 / 异步网关钩子
                                             ▼
-                    ┌────────── 离线管线（harvest.py，独立进程）──────────┐
-                    │ ① 失败→成功相关性挖掘（正则，零模型）               │
-                    │ ② 语义压缩（Kompress ONNX，可选）                  │
-                    │ ③ 提炼（可选，含 clef 仲裁）                       │
-                    │ ④ 写入 NoCodeBackend                              │
-                    │ ⑤ magpie plugin options 推快照（带版本号）          │
-                    └───────────────────────┬───────────────────────────┘
-                                            │ 快照 ≤1s 生效
-                                            ▼
-                                    回到网关中间件，闭环
+                    ┌────────── 宿主提炼层（Bun 宿主 / MCP）───────────────┐
+                    │ ① 网关录制增量提炼（harvest_gateway，零模型规则）   │
+                    │ ② 异步请求钩子（gateway_harvest.hooks.js，非阻塞）   │
+                    │ ③ 写入 NoCodeBackend（memories / pitfalls）         │
+                    └───────────────────────────────────────────────────┘
 
-   Agent ◄──MCP── /mcp/magpie/tools （Magpie 内置，聚合本插件 9 个工具）
+   Agent ◄──MCP── /mcp/magpie/tools （Magpie 内置，聚合本插件 22 个工具）
 ```
 
-**为什么中间件不能直连数据库**：moejs 是 Go 内嵌的 JS 引擎，无网络、无线程、无原生模块，`onRequest` 限额 250ms。它只读一个由离线管线推进 `plugins.json` 的记忆快照。这也决定了检索必须在内存数组上完成。
+**自动记忆机制说明**：
+- **用户体验保全**：中间件负责在流式 `onEvent` 与非流式 `onResponse` 中无损剥离 `<memory>` 标签，确保模型可能产出的提炼标记不泄露至终端呈现。
+- **自动采集入库**：真实部署环境下，自动记忆通过 **网关对话录制增量扫描（`harvest_gateway`）** 与 **异步网关请求钩子（`gateway_harvest.hooks.js`）** 运行在具备完整网络与 I/O 能力的 Bun 宿主中，完全非阻塞，实现零外部模型开销的经验与踩坑提炼入库。
 
 ## 安装
 
@@ -59,28 +56,31 @@ Magpie 会自动写进各 agent 的配置，无需手工改文件。工具名形
 
 ## 数据库
 
-用 [NoCodeBackend](https://nocodebackend.com) 建一个库，两张表：
+用 [NoCodeBackend](https://nocodebackend.com) 建一个库，三张表（或直接使用 `db_provision` 工具一键全自动建表建库）：
 
 ```sql
 CREATE TABLE memories (
   id INT AUTO_INCREMENT PRIMARY KEY,
   project VARCHAR(128) DEFAULT 'global',
   category VARCHAR(64) DEFAULT 'fact',
+  scope_level VARCHAR(32) DEFAULT 'project',
+  client VARCHAR(64) DEFAULT 'unknown',
+  origin VARCHAR(32) DEFAULT 'tool',
   title VARCHAR(512) NOT NULL,
   content TEXT NOT NULL,
+  full_text LONGTEXT NULL,
   tags VARCHAR(512) DEFAULT '',
-  entities VARCHAR(512) DEFAULT '',
-  related VARCHAR(512) DEFAULT '',
-  source VARCHAR(64) DEFAULT '',
-  fingerprint VARCHAR(64) NOT NULL,
+  related_entities VARCHAR(512) DEFAULT '',
+  content_fingerprint VARCHAR(64) NOT NULL,
   confidence_score INT DEFAULT 100,
-  status VARCHAR(16) DEFAULT 'active',
-  superseded_by INT DEFAULT 0,
-  version INT DEFAULT 1,
-  hits INT DEFAULT 0,
-  access_count INT DEFAULT 1,
+  lifecycle_status VARCHAR(16) DEFAULT 'active',
+  superseded_by_id INT NULL,
+  revision INT DEFAULT 1,
+  retrieval_count INT DEFAULT 0,
   invalid_at DATETIME NULL,
-  last_accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  invalid_reason VARCHAR(64) DEFAULT '',
+  expires_at DATETIME NULL,
+  last_used_at DATETIME NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
@@ -88,6 +88,7 @@ CREATE TABLE memories (
 CREATE TABLE pitfalls (
   id INT AUTO_INCREMENT PRIMARY KEY,
   project VARCHAR(128) DEFAULT 'global',
+  client VARCHAR(64) DEFAULT 'unknown',
   component VARCHAR(128) NOT NULL,
   symptom TEXT NOT NULL,
   root_cause TEXT NOT NULL,
@@ -95,22 +96,33 @@ CREATE TABLE pitfalls (
   severity VARCHAR(16) DEFAULT 'medium',
   error_type VARCHAR(64) DEFAULT '',
   tags VARCHAR(512) DEFAULT '',
-  fingerprint VARCHAR(64) NOT NULL,
+  content_fingerprint VARCHAR(64) NOT NULL,
   recurrence INT DEFAULT 1,
   invalid_at DATETIME NULL,
+  invalid_reason VARCHAR(64) DEFAULT '',
   last_occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
--- ⚠️ 必须建：这是去重的最终保证
-CREATE UNIQUE INDEX idx_memories_uniq_fp ON memories(project, fingerprint);
-CREATE UNIQUE INDEX idx_pitfalls_uniq_fp ON pitfalls(project, fingerprint);
+CREATE TABLE schema_meta (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  k VARCHAR(64) NOT NULL,
+  v TEXT,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- ⚠️ 必须建：这是去重与检索效率的保证
+CREATE UNIQUE INDEX idx_memories_uniq_fp ON memories(project, content_fingerprint);
+CREATE INDEX idx_memories_scope ON memories(project, lifecycle_status);
+CREATE INDEX idx_memories_expires ON memories(expires_at);
+CREATE UNIQUE INDEX idx_pitfalls_uniq_fp ON pitfalls(project, content_fingerprint);
+CREATE UNIQUE INDEX idx_schema_meta_k ON schema_meta(k);
 ```
 
 > **为什么唯一索引是必须的**：NoCodeBackend 的读接口有约 2 秒的写后可见延迟，只靠「先读后写」判重，会漏掉紧邻或并发的重复写入（实测出现过指纹相同却都 active 的两行）。插件在收到 `Duplicate entry` 时会按 NOOP 处理。
 
-## MCP 工具（9 个）
+## MCP 工具（22 个）
 
 | 工具 | 说明 |
 |------|------|
@@ -118,11 +130,24 @@ CREATE UNIQUE INDEX idx_pitfalls_uniq_fp ON pitfalls(project, fingerprint);
 | `memory_search` | 关键词检索（标题5/标签3/正文1），按置信度·热度·新鲜度排序 |
 | `memory_list` | 列出活跃记忆 |
 | `memory_context` | 生成可直接注入的记忆上下文块（受条数与字符预算约束） |
-| `memory_extract` | 用配置的提炼模型 + clef 仲裁提炼一段对话（**可选**，零外部模型模式下不需要） |
 | `memory_get` | 按 id 取出完整内容（配合摘要卡使用） |
 | `memory_forget` | 软失效（写 `invalid_at`，保留审计链） |
 | `pitfall_save` | 记录工程踩坑，相同指纹复发计数 +1 |
 | `pitfall_search` | 检索踩坑 |
+| `ncb_check` | 只读检测 MCP Key 有效性并检查目标数据库与表结构状态 |
+| `db_status` | 检查记忆库结构就绪度（缺哪些表/列/索引） |
+| `db_provision` | 【一键全自动】创建记忆库、全部表/字段/索引，并可选自动挂载 R2 |
+| `db_init` | 幂等初始化或自愈补齐缺失的表/列/索引（只增不删） |
+| `db_reset` | 删除插件三张表（需 confirm: "RESET"） |
+| `r2_check` | 上传并删除探针文件，端到端检测 Cloudflare R2 可用性 |
+| `storage_setup` | 为当前数据库配置 Cloudflare R2 存储（建 bucket 并配置 CORS） |
+| `storage_upload` | 上传文件到 R2 存储（支持 base64 或文本） |
+| `storage_list` | 列出 R2 bucket 中的文件（需 Secret Key） |
+| `storage_delete` | 删除 R2 bucket 中的文件（需 confirm: "DELETE"） |
+| `storage_guide` | 说明 R2 存储的可用能力与推荐工作流 |
+| `model_check` | 检测本地多语言小模型就绪状态，支持可选联网比对版本 |
+| `model_download` | 后台非阻塞下载并安装本地多语言小模型（LLMLingua-2 mBERT INT8，约 174MB） |
+| `harvest_gateway` | 增量扫描 Magpie 网关录制的对话落盘（GatewayConversations），提炼经验存入记忆库 |
 
 ## 离线管线
 
@@ -275,11 +300,12 @@ sslv3 alert handshake failure (SSL alert number 40)
   - **绝不压缩**：用户自己写的散文（`skip_user_messages`）、system prompt（KV-Cache 热区）、最近一轮
 - **流式剥离**：回复里的 `<memory>` 块在 `onEvent` 上逐块剥离；超 20KB 未闭合则原样吐出（fail-open）
 
-### 工具层（Bun 宿主，18 个 MCP 工具）
-- 记忆：`memory_save` / `memory_search` / `memory_list` / `memory_context` / `memory_extract` / `memory_get` / `memory_forget`
+### 工具层（Bun 宿主，22 个 MCP 工具）
+- 记忆：`memory_save` / `memory_search` / `memory_list` / `memory_context` / `memory_get` / `memory_forget`
 - 踩坑：`pitfall_save` / `pitfall_search`
-- 数据库：`db_status`（只读，零凭据也能用）/ **`db_provision`（一键全自动）** / `db_init`（幂等补齐）/ `db_reset`（需 `confirm:"RESET"`）
-- R2：`storage_setup` / `storage_upload` / `storage_list` / `storage_delete`（需 `confirm:"DELETE"`）/ `storage_guide`
+- 数据库：`ncb_check` / `db_status`（只读，零凭据也能用）/ **`db_provision`（一键全自动）** / `db_init`（幂等补齐）/ `db_reset`（需 `confirm:"RESET"`）
+- R2：`r2_check` / `storage_setup` / `storage_upload` / `storage_list` / `storage_delete`（需 `confirm:"DELETE"`）/ `storage_guide`
+- 模型与提炼：`model_check` / `model_download` / `harvest_gateway`
 
 ### 离线管线（Python）
 失败→恢复挖掘、环境事实、架构决策、规则仲裁、快照推送、可选语义压缩
