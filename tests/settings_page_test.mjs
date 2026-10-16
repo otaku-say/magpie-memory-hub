@@ -446,17 +446,17 @@ async function runTests() {
   console.log("\n--- 测试 9: 状态回传渲染测试 (window.__memhubStatus) ---");
   const mockStatus = {
     ncb: {
-      at: 1792129607020, op: "provision", ok: true,
+      at: Date.now(), op: "provision", ok: true,
       title: "一键创建完成",
       lines: ["数据库：41694_memory", "新增 3 表 / 4 索引"]
     },
     r2: {
-      at: 1792129608000, op: "storage_setup", ok: false,
+      at: Date.now(), op: "storage_setup", ok: false,
       title: "R2 挂载未生效",
       lines: ["TLS 握手被拒（凭据陈旧）", "请到 NCB 控制台更新 Cloudflare 连接"]
     },
     model: {
-      at: 1792129609000, op: "model_check", ok: true,
+      at: Date.now(), op: "model_check", ok: true,
       title: "本地模型就绪",
       lines: ["模型路径：models/multilingual.onnx", "大小：48MB"]
     }

@@ -203,6 +203,12 @@
   }
 
   /* 卡片 key → 状态容器 id。多处共用，提成常量避免各写一份写歪。 */
+  /* 正在等待更新的卡片 → 提交时间戳。
+   * 为什么需要它：renderAllStatus 会把 _status.js 里的结果全量画一遍，
+   * 于是「刚画出等待态 → 轮询用上一次的旧结果覆盖 → 又画等待态」会来回打架，
+   * 用户看到两个提示交替闪。所以等待中的卡片只接受【比提交时间更新】的结果。 */
+  var pendingSince = {};
+
   var containerMap = {
     ncb: "db_action_status",
     r2: "r2_action_status",
@@ -293,9 +299,19 @@
   function renderAllStatus(statusData) {
     statusData = statusData || window.__memhubStatus;
     if (!statusData || typeof statusData !== "object") return;
-    if (statusData.ncb) renderStatusBlock("db_action_status", statusData.ncb);
-    if (statusData.r2) renderStatusBlock("r2_action_status", statusData.r2);
-    if (statusData.model) renderStatusBlock("model_action_status", statusData.model);
+    var map = [
+      ["ncb", "db_action_status"],
+      ["r2", "r2_action_status"],
+      ["model", "model_action_status"],
+    ];
+    for (var i = 0; i < map.length; i++) {
+      var key = map[i][0], cid = map[i][1];
+      var card = statusData[key];
+      if (!card) continue;
+      // 该卡片正在等待更新的结果 → 不用旧结果覆盖等待态
+      if (pendingSince[key] && !(card.at >= pendingSince[key])) continue;
+      renderStatusBlock(cid, card);
+    }
   }
 
   function loadStatus(callback) {
@@ -387,6 +403,8 @@
     if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; }
     if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
 
+    // 等待期间只接受「比提交时间更新」的结果，避免旧结果把等待态刷掉（会来回闪）
+    pendingSince[targetCard] = submitTime;
     var waitSec = (opHint === "model_download" || targetCard === "model") ? 600 : WAIT_SECONDS;
     var containerId = containerMap[targetCard] || "db_action_status";
     var el = $(containerId);
@@ -426,6 +444,7 @@
         if (Date.now() >= deadline) {
           clearInterval(pollingTimer); pollingTimer = null;
           if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+          delete pendingSince[targetCard];       // 超时：允许显示现有结果
           var box = $(containerId);
           if (box) {
             box.style.display = "block";

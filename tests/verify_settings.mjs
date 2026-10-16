@@ -332,17 +332,17 @@ console.log("\n=== 11. 状态回传渲染测试（伪造 window.__memhubStatus �
 {
   const mockStatus = {
     ncb: {
-      at: 1792129607020, op: "provision", ok: true,
+      at: Date.now(), op: "provision", ok: true,
       title: "一键创建完成",
       lines: ["数据库：41694_memory", "新增 3 表 / 4 索引"]
     },
     r2: {
-      at: 1792129608000, op: "storage_setup", ok: false,
+      at: Date.now(), op: "storage_setup", ok: false,
       title: "R2 挂载未生效",
       lines: ["TLS 握手被拒（凭据陈旧）", "请到 NCB 控制台更新 Cloudflare 连接"]
     },
     model: {
-      at: 1792129609000, op: "model_check", ok: true,
+      at: Date.now(), op: "model_check", ok: true,
       title: "本地模型就绪",
       lines: ["模型文件存在：models/kompress-v1.onnx", "模型权重完整，校验耗时 12ms"]
     }
