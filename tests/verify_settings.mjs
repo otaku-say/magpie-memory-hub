@@ -1,8 +1,8 @@
 /** 独立验收设置页：用 DOM stub 真实执行 settings.js，重点验证「写信标不丢配置」。 */
 import { readFileSync } from "node:fs";
 
-const HTML = readFileSync("../settings.html", "utf8");
-const JS = readFileSync("../settings.js", "utf8");
+const HTML = readFileSync(new URL("../settings.html", import.meta.url), "utf8");
+const JS = readFileSync(new URL("../settings.js", import.meta.url), "utf8");
 
 let fail = 0;
 const ok = (m) => console.log(`  ✓ ${m}`);

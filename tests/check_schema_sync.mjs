@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { TABLES } from "../schema.js";
 
-const SRC = readFileSync("../tools.js", "utf8");
+const SRC = readFileSync(new URL("../tools.js", import.meta.url), "utf8");
 
 /** 从 src 的 pos 处（指向 `{`）解析出对象字面量的顶层键 */
 function keysOfLiteral(text) {
