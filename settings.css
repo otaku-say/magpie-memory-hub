@@ -1,0 +1,442 @@
+/* settings.css — 与 Magpie 窗口一致的克制风格
+   只使用窗口下发的主题变量（--magpie-*），不写死任何颜色，
+   因此自动跟随 Magpie 的浅色/深色主题。 */
+
+:root {
+  --magpie-bg: Canvas;
+  --magpie-fg: CanvasText;
+  --magpie-fg-2: GrayText;
+  --magpie-card: Canvas;
+  --magpie-line: FieldBorder;
+  --magpie-muted: GrayText;
+  --magpie-faint: GrayText;
+  --magpie-accent: Highlight;
+  --magpie-accent-fg: HighlightText;
+  --magpie-green: ForestGreen;
+  --magpie-red: Crimson;
+  --magpie-amber: DarkOrange;
+}
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 20px 22px 40px;
+  font: 13px/1.55 var(--magpie-font, system-ui);
+  color: var(--magpie-fg);
+  background: var(--magpie-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.lead {
+  margin: 0 0 22px;
+  color: var(--magpie-muted);
+}
+
+/* ---- 小节 ---- */
+
+section {
+  margin: 0 0 22px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--magpie-line);
+}
+section:last-of-type {
+  border-bottom: 0;
+}
+
+h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sub {
+  margin: -6px 0 10px;
+  color: var(--magpie-faint);
+}
+
+/* ---- 运行模式提示 ---- */
+.mode {
+  margin: -14px 0 20px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--magpie-muted);
+  background: var(--magpie-card);
+  border: 1px solid var(--magpie-line);
+  border-radius: 6px;
+}
+.mode.ok { color: var(--magpie-green); border-color: var(--magpie-green); }
+
+/* ---- 字段 ---- */
+
+.field { margin-bottom: 12px; }
+
+label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--magpie-muted);
+}
+
+.opt {
+  margin-left: 4px;
+  color: var(--magpie-faint);
+}
+
+select,
+input[type="text"],
+input[type="password"],
+input[type="number"] {
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  color: var(--magpie-fg);
+  background: var(--magpie-bg);
+  border: 1px solid var(--magpie-line);
+  border-radius: 5px;
+  outline: none;
+}
+input:focus { border-color: var(--magpie-accent); }
+select {
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  color: var(--magpie-fg);
+  background: var(--magpie-bg);
+  border: 1px solid var(--magpie-line);
+  border-radius: 5px;
+  outline: none;
+}
+input::placeholder { color: var(--magpie-faint); }
+input[readonly] {
+  color: var(--magpie-fg-2);
+  font-family: var(--magpie-code, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.pair {
+  display: flex;
+  gap: 12px;
+}
+.pair > .field { flex: 1; }
+
+.note {
+  margin: 5px 0 0;
+  color: var(--magpie-faint);
+}
+
+em {
+  font-style: normal;
+  color: var(--magpie-faint);
+}
+
+code {
+  font-family: var(--magpie-code, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+/* ---- 复选 ---- */
+
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 12px 0 0;
+  cursor: pointer;
+}
+.check input {
+  flex: none;
+  margin: 2px 0 0;
+  accent-color: var(--magpie-accent);
+}
+.check > span { display: block; }
+.check b {
+  font-weight: 500;
+  color: var(--magpie-fg);
+}
+.check .desc {
+  display: block;
+  color: var(--magpie-faint);
+}
+
+/* ---- 复制行 ---- */
+
+.copy {
+  display: flex;
+  gap: 8px;
+}
+.copy input { flex: 1; }
+
+/* ---- 按钮 ---- */
+
+button {
+  padding: 6px 12px;
+  font: inherit;
+  color: var(--magpie-accent);
+  background: none;
+  border: 1px solid var(--magpie-line);
+  border-radius: 5px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--magpie-accent); }
+
+button.primary {
+  min-width: 96px;
+  color: var(--magpie-accent-fg);
+  background: var(--magpie-accent);
+  border-color: var(--magpie-accent);
+  font-weight: 600;
+}
+button.primary:hover { filter: brightness(1.06); }
+button.primary:disabled {
+  opacity: .55;
+  cursor: default;
+  filter: none;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.status { color: var(--magpie-muted); }
+.status.ok { color: var(--magpie-green); }
+.status.bad { color: var(--magpie-red); }
+.status.warn { color: var(--magpie-amber); }
+
+/* ---- 危险与次级按钮 ---- */
+
+button.danger {
+  color: var(--magpie-red);
+  border-color: var(--magpie-line);
+}
+button.danger:hover {
+  border-color: var(--magpie-red);
+}
+
+button.danger-solid {
+  color: var(--magpie-accent-fg);
+  background: var(--magpie-red);
+  border-color: var(--magpie-red);
+  font-weight: 600;
+}
+button.danger-solid:hover {
+  filter: brightness(1.06);
+}
+button.danger-solid:disabled {
+  opacity: .45;
+  cursor: default;
+  filter: none;
+}
+
+.btn-subtle {
+  font-size: 12px;
+  padding: 4px 10px;
+  color: var(--magpie-muted);
+}
+.btn-subtle:hover {
+  color: var(--magpie-accent);
+}
+
+/* ---- 数据库管理区块 ---- */
+
+.db-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 14px 0 10px;
+}
+
+.db-sql-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.sql-fallback {
+  margin: 10px 0;
+  padding: 10px;
+  background: var(--magpie-card);
+  border: 1px solid var(--magpie-line);
+  border-radius: 6px;
+}
+
+.sql-fallback-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--magpie-muted);
+}
+
+.sql-fallback textarea {
+  width: 100%;
+  font-family: var(--magpie-code, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--magpie-fg);
+  background: var(--magpie-bg);
+  border: 1px solid var(--magpie-line);
+  border-radius: 4px;
+  padding: 6px;
+  resize: vertical;
+  outline: none;
+}
+.sql-fallback textarea:focus {
+  border-color: var(--magpie-accent);
+}
+
+.db-status-box {
+  margin-top: 12px;
+  padding: 10px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: var(--magpie-card);
+  border: 1px solid var(--magpie-line);
+  color: var(--magpie-muted);
+}
+.db-status-box.ok {
+  border-color: var(--magpie-green);
+  color: var(--magpie-fg);
+}
+.db-status-box.warn {
+  border-color: var(--magpie-amber);
+  color: var(--magpie-fg);
+}
+.db-status-box.bad {
+  border-color: var(--magpie-red);
+  color: var(--magpie-fg);
+}
+
+.db-status-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.db-status-detail {
+  color: var(--magpie-muted);
+  line-height: 1.5;
+}
+
+/* ---- 确认弹窗 ---- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: var(--magpie-bg, Canvas);
+  background: color-mix(in srgb, var(--magpie-bg, Canvas) 80%, transparent);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.modal-box {
+  width: 100%;
+  max-width: 440px;
+  padding: 18px 20px;
+  background: var(--magpie-card, Canvas);
+  border: 1px solid var(--magpie-line, FieldBorder);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--magpie-line, FieldBorder);
+}
+
+.modal-box h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.modal-danger h3 {
+  color: var(--magpie-red);
+}
+
+.modal-body {
+  font-size: 13px;
+  color: var(--magpie-fg);
+  line-height: 1.6;
+}
+
+.modal-body ul {
+  margin: 8px 0;
+  padding-left: 18px;
+  color: var(--magpie-muted);
+}
+
+.modal-body li {
+  margin-bottom: 4px;
+}
+
+.danger-banner {
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--magpie-red);
+  background: var(--magpie-bg);
+  border-radius: 5px;
+  color: var(--magpie-red);
+  font-size: 12px;
+}
+
+.reset-prompt {
+  margin: 10px 0 6px;
+  color: var(--magpie-muted);
+}
+
+.reset-target {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 6px;
+  font-family: var(--magpie-code, ui-monospace, monospace);
+  color: var(--magpie-fg);
+  background: var(--magpie-bg);
+  border: 1px solid var(--magpie-line);
+  border-radius: 4px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+/* ---- R2 折叠配置 ---- */
+
+.r2-details {
+  margin: 12px 0;
+  border: 1px solid var(--magpie-line);
+  border-radius: 6px;
+  background: var(--magpie-card);
+  overflow: hidden;
+}
+
+.r2-details summary {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--magpie-fg);
+  user-select: none;
+}
+
+.r2-details summary:hover {
+  color: var(--magpie-accent);
+}
+
+.r2-fields {
+  padding: 12px 14px 4px;
+  border-top: 1px solid var(--magpie-line);
+}

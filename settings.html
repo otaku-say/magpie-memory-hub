@@ -1,88 +1,318 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>记忆中枢设置</title>
-<style>
-  :root { --bg: #1a1a2e; --card: #16213e; --border: #0f3460; --accent: #e94560; --text: #eee; --dim: #aaa; --green: #4ecca3; }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 16px; line-height: 1.6; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
-  .card h2 { color: var(--accent); font-size: 16px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
-  label { display: block; font-size: 13px; color: var(--dim); margin-bottom: 4px; margin-top: 12px; }
-  input[type="text"], input[type="number"] { width: 100%; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px; }
-  input:focus { outline: none; border-color: var(--accent); }
-  .hint { font-size: 11px; color: var(--dim); margin-top: 2px; }
-  .row { display: flex; gap: 12px; }
-  .row > div { flex: 1; }
-  .toggle-row { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; }
-  .toggle-row label { margin: 0; }
-  .status { padding: 12px; border-radius: 8px; font-size: 13px; display: none; margin-top: 12px; }
-  .status.ok { display: block; background: rgba(78,204,163,0.15); color: var(--green); border: 1px solid rgba(78,204,163,0.3); }
-  .status.err { display: block; background: rgba(233,69,96,0.15); color: var(--accent); border: 1px solid rgba(233,69,96,0.3); }
-  .btn { display: block; width: 100%; padding: 14px; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 16px; }
-  .btn-primary { background: var(--accent); color: #fff; }
-  .btn-primary:active { opacity: 0.8; }
-  .btn-copy { background: var(--border); color: var(--text); font-size: 13px; padding: 10px; margin-top: 8px; }
-  textarea { width: 100%; padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--green); font-family: "SF Mono", Menlo, monospace; font-size: 12px; resize: vertical; min-height: 120px; }
-  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
-  .stat-item { background: var(--bg); padding: 10px; border-radius: 6px; text-align: center; }
-  .stat-item .num { font-size: 24px; font-weight: 700; color: var(--green); }
-  .stat-item .label { font-size: 11px; color: var(--dim); }
-</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记忆中枢</title>
+<link rel="stylesheet" href="settings.css">
+<script src="_magpie/bridge.js"></script>
+<script src="settings.js" defer></script>
 </head>
 <body>
 
-<!-- 卡片 1: 数据库状态 -->
-<div class="card">
-  <h2>📊 数据库状态</h2>
-  <div class="stat-grid">
-    <div class="stat-item"><div class="num" id="stat_memories">-</div><div class="label">活跃记忆</div></div>
-    <div class="stat-item"><div class="num" id="stat_pitfalls">-</div><div class="label">踩坑记录</div></div>
+<h1>记忆中枢</h1>
+<p class="lead">把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供所有 agent 取用。</p>
+<div id="mode" class="mode"></div>
+
+<!-- ① 数据库 -->
+<section>
+  <h2>数据库</h2>
+  <div class="field">
+    <label for="ncb_instance">数据库名称 <span class="opt">必填 · 逻辑名</span></label>
+    <input type="text" id="ncb_instance" spellcheck="false" placeholder="memory">
+    <p class="note">
+      要创建或连接的数据库名称。填逻辑名即可（如 <code>memory</code>），NoCodeBackend 会自动添加账号前缀，实际在后台形如 <code>41694_memory</code>。
+    </p>
   </div>
-  <div id="db_status" class="status"></div>
-</div>
+  <div class="field">
+    <label for="ncb_secret">Secret Key <span class="opt">可选</span></label>
+    <input type="password" id="ncb_secret" spellcheck="false" placeholder="若由本插件创建，会自动取得并保存，无需手填">
+    <p class="note">
+      数据库本身的 Secret Key。若由本插件创建数据库，宿主会自动取得并写回保存，无需手填。
+    </p>
+  </div>
+</section>
 
-<!-- 卡片 2: 核心配置 -->
-<div class="card">
-  <h2>⚙️ 核心配置</h2>
-  <label>NCB 数据库实例名</label>
-  <input type="text" id="opt_ncb_instance" value="41694_agent_memory">
-
-  <div class="row">
-    <div>
-      <label>最大注入条数</label>
-      <input type="number" id="opt_max_inject" value="5" min="1" max="20">
+<!-- ② 模型 -->
+<section>
+  <h2>提炼模型</h2>
+  <p class="sub">模型 ID 手动填写，插件不内置任何模型。</p>
+  <div class="field">
+    <label for="magpie_base_url">Magpie 地址</label>
+    <input type="text" id="magpie_base_url" spellcheck="false" placeholder="http://127.0.0.1:8000/v1">
+  </div>
+  <div class="field">
+    <label for="magpie_api_key">访问密钥 <span class="opt">可选</span></label>
+    <input type="password" id="magpie_api_key" spellcheck="false" placeholder="网关 key，本地免鉴权可留空">
+  </div>
+  <div class="pair">
+    <div class="field">
+      <label for="extractor_model">提炼模型 ID</label>
+      <input type="text" id="extractor_model" spellcheck="false" placeholder="group/flash">
     </div>
-    <div>
-      <label>注入预算 (字符)</label>
-      <input type="number" id="opt_max_budget" value="2048" min="256" max="8192">
+    <div class="field">
+      <label for="clef_model">仲裁模型 ID <span class="opt">clef</span></label>
+      <input type="text" id="clef_model" spellcheck="false" placeholder="group/clef">
     </div>
   </div>
+  <div class="pair">
+    <div class="field">
+      <label for="min_confidence">最低入库置信度</label>
+      <input type="number" id="min_confidence" min="0" max="1" step="0.05" value="0.6">
+    </div>
+    <div class="field">
+      <label for="clef_mode">仲裁方式</label>
+      <select id="clef_mode">
+        <option value="rule">规则（零模型）</option>
+        <option value="llm">clef 模型</option>
+      </select>
+    </div>
+  </div>
+  <div class="hint">
+    规则仲裁用「置信度阈值 + 信息量 + 与既有记忆的相似度」判断，不花任何模型调用。
+  </div>
+</section>
 
-  <label>提取模型 (留空=不自动提取)</label>
-  <input type="text" id="opt_extractor_model" placeholder="如 group/clef 或 deepseek-chat">
-  <div class="hint">用于从对话中自动提取记忆的 LLM 模型。留空则仅通过 MCP 手动写入。</div>
+<!-- ③ 上下文压缩 -->
+<section>
+  <h2>上下文压缩</h2>
+  <p class="sub">
+    压掉历史里的工具输出与超长文本，保住报错与关键行。
+    <b>绝不动 system prompt 与最后一条用户消息。</b>
+  </p>
+  <label class="check">
+    <input type="checkbox" id="compress">
+    <span>
+      <b>启用压缩</b>
+      <span class="desc">只改写历史消息；压缩后不比原文小就自动放弃，任何异常都不影响请求。异常项（报错/数值离群/突变点）<b>超出配额也保留</b>。</span>
+    </span>
+  </label>
+  <label class="check">
+    <input type="checkbox" id="cross_turn_dedup">
+    <span>
+      <b>跨轮逐字去重</b>
+      <span class="desc">agent 常把同一个文件反复重显（cat → sed → git diff → cat）。把重复片段折成指向上文的指针。<b>只回指更早的轮</b>，因此前缀缓存不失效；最早出现处永不改写。</span>
+    </span>
+  </label>
+  <div class="field">
+    <label for="compress_engine">离线语义压缩引擎</label>
+    <select id="compress_engine">
+      <option value="auto">自动（有依赖就用）</option>
+      <option value="kompress">Kompress（英文，ONNX 现成）</option>
+      <option value="llmlingua2">LLMLingua-2 多语言版（需自备 ONNX）</option>
+      <option value="none">关闭</option>
+    </select>
+  </div>
+  <div class="pair">
+    <div class="field">
+      <label for="compress_max_chars">单块压缩后上限</label>
+      <input type="number" id="compress_max_chars" min="500" max="20000" step="100" value="3000">
+    </div>
+    <div class="field">
+      <label for="compress_min_chars">小于此长度不动</label>
+      <input type="number" id="compress_min_chars" min="200" max="10000" step="100" value="1200">
+    </div>
+  </div>
+</section>
+
+<!-- ④ 网关注入 -->
+<section>
+  <h2>网关注入</h2>
+  <p class="sub">按提问关键词挑选相关记忆，注入 system prompt。</p>
+  <div class="pair">
+    <div class="field">
+      <label for="max_inject_count">最多条数</label>
+      <input type="number" id="max_inject_count" min="1" max="20" value="5">
+    </div>
+    <div class="field">
+      <label for="max_budget_chars">字符预算</label>
+      <input type="number" id="max_budget_chars" min="256" max="8192" step="128" value="2048">
+    </div>
+  </div>
+  <label class="check">
+    <input type="checkbox" id="inline_extract">
+    <span>
+      <b>内联提炼</b>
+      <span class="desc">让模型在回复末尾自己产出 <code>&lt;memory&gt;</code> 块，<b>无需额外模型调用</b>。流式与非流式都会被自动剥离（流式超 20KB 未闭合则原样吐出，绝不吞内容）。<b>这是脱离外部 LLM 的主推方式。</b></span>
+    </span>
+  </label>
+  <label class="check">
+    <input type="checkbox" id="inject_principles">
+    <span>
+      <b>行为准则置顶注入</b>
+      <span class="desc">把 <code>principle</code> 类记忆无条件放在注入块最前。它的价值在于「你还不知道会踩这个坑时就提醒你」，所以不走关键词匹配。</span>
+    </span>
+  </label>
+  <label class="check">
+    <input type="checkbox" id="ccr_cards">
+    <span>
+      <b>长内容用摘要卡</b>
+      <span class="desc">超过 160 字的记忆只注入摘要与 id，Agent 需要时再调 <code>memory_get</code> 展开，省 Token。</span>
+    </span>
+  </label>
+  <div class="field" style="margin-top:12px">
+    <label for="max_principles">最多置顶几条准则</label>
+    <input type="number" id="max_principles" min="0" max="10" value="2">
+  </div>
+  <label class="check">
+    <input type="checkbox" id="disabled">
+    <span>
+      <b>停用网关注入</b>
+      <span class="desc">MCP 工具与抓取不受影响。</span>
+    </span>
+  </label>
+</section>
+
+<!-- ⑤ 数据库管理 -->
+<section>
+  <h2>数据库管理</h2>
+  <p class="sub">只需填写 MCP Key，即可一键全自动建库、建表、挂载存储与迁移。</p>
+
+  <div class="field">
+    <label for="mcp_key">MCP Key <span class="opt">必填 · 账号级密钥</span></label>
+    <div class="copy">
+      <input type="password" id="mcp_key" spellcheck="false" placeholder="NoCodeBackend 账号级 MCP Key">
+      <button type="button" id="toggle_mcp_key">显示</button>
+    </div>
+    <p class="note">
+      建库/建表/挂载存储需要 MCP Key（在 NoCodeBackend 后台 Developer 页面获取）。这是全自动管理数据库唯一必需填写的凭据。
+    </p>
+  </div>
+
+  <div class="field">
+    <label for="on_exist">同名处理策略 <span class="opt">重名防分裂</span></label>
+    <select id="on_exist">
+      <option value="reuse" selected>复用已有库（推荐：只补结构，不破坏数据）</option>
+      <option value="auto_rename">允许自动加后缀（NCB 自动建成 _1 独立库）</option>
+      <option value="fail">直接报错（若重名则中止操作，由用户改名）</option>
+    </select>
+    <p class="note">
+      NoCodeBackend 遇到重名不会报错而是静默加后缀（例如请求 <code>memhub</code> 已存在时会建成 <code>41694_memhub_1</code>），导致数据被劈成两半。<b>复用已有库（reuse）</b>会复用同名库并集中数据；<b>自动加后缀（auto_rename）</b>会新建一个互不相通的独立库。
+    </p>
+  </div>
+
+  <details class="r2-details">
+    <summary>Cloudflare R2 对象存储配置 <span class="opt">可选 · 全部留空即可自动复用</span></summary>
+    <div class="r2-fields">
+      <div class="pair">
+        <div class="field">
+          <label for="r2_account_id">Account ID <span class="opt">可选</span></label>
+          <input type="text" id="r2_account_id" spellcheck="false" placeholder="账号若有 Cloudflare 连接会自动复用">
+        </div>
+        <div class="field">
+          <label for="r2_bucket_name">Bucket 名称 <span class="opt">可选</span></label>
+          <input type="text" id="r2_bucket_name" spellcheck="false" placeholder="默认 &lt;数据库名&gt;-storage">
+        </div>
+      </div>
+      <div class="pair">
+        <div class="field">
+          <label for="r2_access_key_id">Access Key ID <span class="opt">可选</span></label>
+          <input type="text" id="r2_access_key_id" spellcheck="false" placeholder="留空则自动复用已有连接">
+        </div>
+        <div class="field">
+          <label for="r2_secret_access_key">Secret Access Key <span class="opt">可选</span></label>
+          <input type="password" id="r2_secret_access_key" spellcheck="false" placeholder="留空则自动复用已有连接">
+        </div>
+      </div>
+      <div class="field">
+        <label for="r2_public_url">公共访问地址 <span class="opt">可选</span></label>
+        <input type="text" id="r2_public_url" spellcheck="false" placeholder="https://pub-xxx.r2.dev 或自定义域名">
+        <p class="note">用于大文件与记忆附件的多模态持久存储。账号若在 NoCodeBackend 中已有 Cloudflare 连接会自动复用，以上字段均可留空。</p>
+      </div>
+    </div>
+  </details>
+
+  <div class="db-actions">
+    <button type="button" id="btn_db_provision" class="primary">一键创建数据库</button>
+    <button type="button" id="btn_db_storage_setup">挂载 R2 存储</button>
+    <button type="button" id="btn_db_status">检查状态</button>
+    <button type="button" id="btn_db_reset" class="danger">清空数据库</button>
+  </div>
+
+  <div class="db-sql-actions">
+    <button type="button" id="btn_copy_init_sql" class="btn-subtle">复制初始化 SQL</button>
+    <button type="button" id="btn_copy_reset_sql" class="btn-subtle">复制清库 SQL</button>
+  </div>
+
+  <!-- 待选中的 SQL 降级展示区（默认隐藏） -->
+  <div id="sql_fallback_wrap" class="sql-fallback" style="display:none;">
+    <div class="sql-fallback-header">
+      <span id="sql_fallback_title">SQL 语句</span>
+      <button type="button" id="btn_close_sql">关闭</button>
+    </div>
+    <textarea id="sql_fallback_text" readonly spellcheck="false" rows="8"></textarea>
+  </div>
+
+  <!-- 任务与执行状态提示区 -->
+  <div id="db_action_status" class="db-status-box" style="display:none;"></div>
+</section>
+
+<!-- ⑥ MCP -->
+<section>
+  <h2>MCP 接入地址</h2>
+  <div class="copy">
+    <input type="text" id="mcp_url" readonly spellcheck="false">
+    <button type="button" id="copy">复制</button>
+  </div>
+  <p class="note">
+    在 <b>资源库 → MCP 服务器</b> 里添加该地址并勾选要启用的 agent，Magpie 会自动写进各 agent 的配置，无需手工改配置文件。
+  </p>
+  <p class="note">
+    地址生效需要两个前提：<b>设置 → 插件</b> 中开启内置的 <b>Plugin tools</b>，且本插件处于启用状态。
+  </p>
+  <p class="note">
+    工具名形如 <code>magpie-memory-hub_memory_search</code>。
+  </p>
+</section>
+
+<div class="actions">
+  <button type="button" id="save" class="primary">保存</button>
+  <span id="status" class="status" role="status" aria-live="polite"></span>
 </div>
 
-<!-- 卡片 3: MCP 配置 -->
-<div class="card">
-  <h2>🔌 MCP 端点配置</h2>
-  <label>挂载路径</label>
-  <input type="text" id="opt_mcp_path" placeholder="输入任意自定义路径，如 /agent_memory">
-  <div class="hint">自动在结尾追加 <code>/mcp</code>，例如输入 <code>/test</code> → 实际路径 <code>域名/test/mcp</code></div>
-
-  <label>MCP 配置 (给 AI 客户端用)</label>
-  <textarea id="mcp_config" readonly></textarea>
-  <button class="btn btn-copy" id="btn_copy_config">📋 复制 MCP 配置</button>
+<!-- 一键创建确认弹窗 -->
+<div id="modal_provision" class="modal-backdrop" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="modal_provision_title">
+  <div class="modal-box">
+    <h3 id="modal_provision_title">确认一键创建数据库</h3>
+    <div class="modal-body">
+      <p>将向宿主提交一键创建信标，自动执行以下操作：</p>
+      <ul>
+        <li>自动在 NoCodeBackend 上创建数据库（若不存在）</li>
+        <li>自动补齐缺失的数据表（<code>memories</code>、<code>pitfalls</code>、<code>memhub_meta</code>）、列与索引</li>
+        <li><strong>若同名已存在不会破坏数据</strong>：将走复用/补齐策略，绝不删除已有数据</li>
+        <li>按配置自动创建或挂载 Cloudflare R2 存储桶并配置 CORS</li>
+        <li>自动提取并保存数据库的 Secret Key，后续无需手填</li>
+      </ul>
+    </div>
+    <div class="modal-actions">
+      <button type="button" id="btn_cancel_provision">取消</button>
+      <button type="button" id="btn_confirm_provision" class="primary">确认提交</button>
+    </div>
+  </div>
 </div>
 
-<!-- 底部保存按钮 -->
-<button class="btn btn-primary" id="btn_save">💾 保存全部配置</button>
-<div id="save_status" class="status"></div>
+<!-- 清空确认弹窗（强二次确认） -->
+<div id="modal_reset" class="modal-backdrop" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="modal_reset_title">
+  <div class="modal-box modal-danger">
+    <h3 id="modal_reset_title">⚠️ 确认清空数据库</h3>
+    <div class="modal-body">
+      <div class="danger-banner">
+        将删除 <code>memories</code> / <code>pitfalls</code> / <code>memhub_meta</code> 三张表，<strong>表结构与全部数据一并删除，不可恢复</strong>；库中其它表不受影响。
+      </div>
+      <p class="reset-prompt">
+        请输入当前数据库名称以确认清空：<br>
+        <strong id="reset_target_name" class="reset-target"></strong>
+      </p>
+      <div class="field">
+        <input type="text" id="reset_instance_input" spellcheck="false" placeholder="请在此输入上方数据库名">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" id="btn_cancel_reset">取消</button>
+      <button type="button" id="btn_confirm_reset" class="danger-solid" disabled>我已知晓后果，确认清空</button>
+    </div>
+  </div>
+</div>
 
-<script src="_magpie/bridge.js"></script>
-<script src="settings.js" defer></script>
 </body>
 </html>

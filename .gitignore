@@ -3,3 +3,6 @@ node_modules/
 .DS_Store
 __pycache__/
 *.pyc
+
+# 测试残留
+.magpie-memory-hub/
