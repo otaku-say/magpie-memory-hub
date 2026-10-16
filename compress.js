@@ -683,6 +683,30 @@ function crushText(text, opts) {
  * 只动 content 里 type 为 tool_result / 超长 text 的部分，
  * 绝不动 system prompt 与最后一条用户消息——那是语义关键区。
  */
+/* ---------------- 时间兜底（紧急泄压阀） ----------------
+ * 背景：moejs 的 onRequest 硬限额约 250ms，一旦超时【整个请求被丢弃】。
+ * 实测压缩速率约 1.4µs/字符（iSH：15302 字符 → 21.45ms），
+ * 故 180ms 预算 ≈ 12.8 万字符的可压缩内容，对正常请求有 8 倍以上余量。
+ *
+ * 【两级设计的原因 —— 不能照搬别人的 afford() 时间判据】
+ * 纯时间判据是【非确定性】的：第 5 块超时与第 7 块超时，
+ * 会让同一个历史块在 A 轮被压、B 轮没被压 → 前缀字节变化 → KV-Cache 失效，
+ * 破坏我们「绝不改历史前缀」的核心不变量。
+ * 所以主力防线改用【确定性】的工作量预算，时间只作应急后备：
+ *
+ *   一级（确定性，主力）：累计「已压字符数」超预算就停手。
+ *        同一输入永远得到同一决策，前缀稳定不受影响。
+ *   二级（非确定性，应急）：单次调用异常慢时（预估失准），
+ *        按墙钟时间停手。仅在内容比实测均值慢得多时才会触发，
+ *        代价是这一轮压缩结果不完整 —— 但这远好过整个请求被丢弃。
+ *
+ * 触发时【就地停止压后续块】，已压完的块保持生效。
+ * 刻意不返回「整轮放弃」：那需要深拷贝原文（我们已删掉 cloneDeep），
+ * 且会让「这一轮到底压没压」变成更难推理的状态。
+ */
+var WORK_BUDGET_CHARS = 128000;   // 一级：累计可压字符上限（≈180ms）
+var TIME_BUDGET_MS    = 180;      // 二级：墙钟兜底（moejs 限额 250ms 的安全垫）
+
 function compressBody(body, opts) {
   if (!body || !body.messages || !body.messages.length) return { body: body, saved: 0 };
   opts = opts || {};
@@ -694,6 +718,23 @@ function compressBody(body, opts) {
    * 因此追加新一轮绝不改动更早的轮（前缀单调性）。 */
   var seenLines = {};
   var dedupSaved = 0;
+
+  /* 两级兜底的状态（详见上方注释） */
+  var workBudget = (opts.work_budget_chars !== undefined ? opts.work_budget_chars
+                  : (opts.workBudgetChars !== undefined ? opts.workBudgetChars : WORK_BUDGET_CHARS));
+  var timeBudgetMs = (opts.time_budget_ms !== undefined ? opts.time_budget_ms
+                  : (opts.timeBudgetMs !== undefined ? opts.timeBudgetMs : TIME_BUDGET_MS));
+  var startedAt = Date.now();
+  var workUsed = 0;
+  var guardTripped = "";
+  /* 是否还有预算继续压下一块；返回 tripGuard('work'|'time') 表示用完了 */
+  function budgetLeft(len) {
+    if (guardTripped) return false;
+    if (workUsed + len > workBudget) { guardTripped = "work"; return false; }
+    if (Date.now() - startedAt > timeBudgetMs) { guardTripped = "time"; return false; }
+    workUsed += len;
+    return true;
+  }
 
   /* skip_user_messages（Headroom 默认 True）：用户自己写的散文绝不压缩——
    * 那是请求意图本身，动了它等于改了需求。
@@ -717,7 +758,7 @@ function compressBody(body, opts) {
     if (typeof c === "string") {
       if (skipUser && msg.role === "user") continue;   // 用户散文不动
       before += c.length;
-      var nc = c.length > minChars ? crushText(c, crushOpts) : c;
+      var nc = (c.length > minChars && budgetLeft(c.length)) ? crushText(c, crushOpts) : c;
       msg.content = nc;
       after += nc.length;
       continue;
@@ -729,7 +770,7 @@ function compressBody(body, opts) {
         // Anthropic 风格的工具结果
         if (blk.type === "tool_result" && typeof blk.content === "string") {
           before += blk.content.length;
-          if (blk.content.length > minChars) {
+          if (blk.content.length > minChars && budgetLeft(blk.content.length)) {
             blk.content = crushText(blk.content, crushOpts);
           }
           /* 跨轮去重：块内压完再压【跨块】冗余 */
@@ -746,7 +787,7 @@ function compressBody(body, opts) {
             var sub = blk.content[k];
             if (sub && typeof sub.text === "string") {
               before += sub.text.length;
-              if (sub.text.length > minChars) {
+              if (sub.text.length > minChars && budgetLeft(sub.text.length)) {
                 sub.text = crushText(sub.text, crushOpts);
               }
               after += sub.text.length;
@@ -757,7 +798,7 @@ function compressBody(body, opts) {
         // OpenAI 风格的工具结果
         if (msg.role === "tool" && blk.type === "text" && typeof blk.text === "string") {
           before += blk.text.length;
-          if (blk.text.length > minChars) {
+          if (blk.text.length > minChars && budgetLeft(blk.text.length)) {
             blk.text = crushText(blk.text, crushOpts);
           }
           after += blk.text.length;
@@ -765,7 +806,8 @@ function compressBody(body, opts) {
         }
         /* 普通文本块：仅当它不是「用户自己在说话」时才压 */
         if (blk.type === "text" && typeof blk.text === "string" &&
-            blk.text.length > minChars * 3 && !(skipUser && msg.role === "user")) {
+            blk.text.length > minChars * 3 && !(skipUser && msg.role === "user") &&
+            budgetLeft(blk.text.length)) {
           before += blk.text.length;
           blk.text = crushText(blk.text, crushOpts);
           after += blk.text.length;
@@ -774,7 +816,9 @@ function compressBody(body, opts) {
     }
   }
   return { body: body, saved: before - after, before: before, after: after,
-           dedup_saved: dedupSaved, dedup_lines: seenLines ? Object.keys(seenLines).length : 0 };
+           dedup_saved: dedupSaved, dedup_lines: seenLines ? Object.keys(seenLines).length : 0,
+           /* 兜底诊断：空串=未触发；"work"/"time"=触发了哪一级 */
+           guard_tripped: guardTripped, work_used: workUsed, elapsed_ms: Date.now() - startedAt };
 }
 
 /* ---------------- CacheAligner：前缀漂移探测器（Detector-Only） ----------------

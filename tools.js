@@ -297,6 +297,11 @@ function jsonOut(o) {
 /* ================================================================== *
  * 记忆写入（含指纹去重 + 时序版本链）
  * ================================================================== */
+/** 统一的 SQL 时间戳字符串（NCB 不生效 DEFAULT CURRENT_TIMESTAMP，必须显式写）。 */
+function nowSql() {
+  return new Date().toISOString().slice(0, 19).replace("T", " ");
+}
+
 async function saveMemory(client, cfg, m, ctx) {
   const project = String(m.project || "global").trim();
   const category = CATEGORIES.includes(m.category) ? m.category : "fact";
@@ -361,7 +366,11 @@ async function saveMemory(client, cfg, m, ctx) {
     content_fingerprint: fp,
     confidence_score: confidence,
     lifecycle_status: "active",
-    superseded_by_id: 0,
+    /* 【外键列，必须写 NULL 而非 0】
+     * NCB 会按 `*_id` 列名自动建外键：superseded_by_id → memories.id。
+     * 写 0 会触发外键违约（没有 id=0 的行），整个 memory_save 直接失败。
+     * NULL 是外键的合法值，语义也正是「未被任何行取代」。 */
+    superseded_by_id: null,
     /* 修订版本号 = 被取代那批里最大的修订号 + 1。没有旧版时就是 1。 */
     revision: superseded.reduce(function (mx, r) { return Math.max(mx, Number(r.revision || r.version) || 1); }, 0) + 1,
     retrieval_count: 0,
@@ -370,6 +379,10 @@ async function saveMemory(client, cfg, m, ctx) {
     // 会话级/轮次级记忆带 TTL（默认 7 / 1 天）；project/user 级永不过期
     expires_at: expiresAtFor(scopeLevel),
     last_used_at: null,
+    /* 【必须显式写时间戳】实测 NCB 不生效 DEFAULT CURRENT_TIMESTAMP，
+     * 省略这两列会落库为 NULL —— 而 freshness() 依赖它们，会永远返回 0。 */
+    created_at: nowSql(),
+    updated_at: nowSql(),
   };
 
   /* 数据库上有 (project, content_fingerprint) 唯一索引：它才是去重的最终保证，
@@ -399,8 +412,9 @@ async function saveMemory(client, cfg, m, ctx) {
     try {
       await client.update("memories", oldId, {
         lifecycle_status: "superseded", superseded_by_id: newId,
-        invalid_at: new Date().toISOString().slice(0, 19).replace("T", " "),
+        invalid_at: nowSql(),
         invalid_reason: "superseded",
+        updated_at: nowSql(),
       });
       return { action: "UPDATE", id: newId, superseded_id: oldId, superseded_count: superseded.length };
     } catch (e) {
@@ -548,7 +562,7 @@ async function pitfallSave(client, cfg, args, ctx) {
     const row = exist[0];
     const next = (Number(row.recurrence) || 1) + 1;
     try {
-      await client.update("pitfalls", row.id, { recurrence: next, last_occurred_at: now });
+      await client.update("pitfalls", row.id, { recurrence: next, last_occurred_at: now, updated_at: now });
       markRecent("p:" + fp);
       return jsonOut({ action: "NOOP", id: row.id, recurrence: next });
     } catch (e) {
@@ -562,6 +576,7 @@ async function pitfallSave(client, cfg, args, ctx) {
       project, client: clientVal, component, symptom, root_cause: rootCause, solution,
       severity, error_type: errorType, tags, content_fingerprint: fp,
       recurrence: 1, last_occurred_at: now,
+      created_at: now, updated_at: now,
     });
   } catch (e) {
     if (/duplicate entry/i.test(String(e.message))) {
@@ -571,7 +586,7 @@ async function pitfallSave(client, cfg, args, ctx) {
       )[0];
       if (dup) {
         const next = (Number(dup.recurrence) || 1) + 1;
-        try { await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now }); } catch (_) {}
+        try { await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now }); } catch (_) {}
         return jsonOut({ action: "NOOP", id: dup.id, recurrence: next, note: "唯一索引拦下重复" });
       }
       return jsonOut({ action: "NOOP", id: null, note: "唯一索引拦下重复" });
@@ -615,6 +630,7 @@ async function memoryGet(client, cfg, args) {
     await client.update("memories", id, {
       retrieval_count: count,
       last_used_at: now,
+      updated_at: nowSql(),
     });
   } catch (e) { /* 计数失败不影响读取 */ }
   const full = (hit.full_text != null && String(hit.full_text).trim() !== "")
@@ -667,6 +683,7 @@ async function memoryForget(client, cfg, args) {
     try {
       await client.update("memories", t.id, {
         invalid_at: now, lifecycle_status: "invalid", invalid_reason: "user_forgot",
+        updated_at: now,          // NCB 不生效 ON UPDATE CURRENT_TIMESTAMP，必须显式写
       });
       done.push({ id: t.id, title: t.title });
     } catch (e) { /* 单条失败不影响其余 */ }

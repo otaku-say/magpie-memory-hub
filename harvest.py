@@ -704,12 +704,17 @@ def save_memory(ncb, cfg, m, cache):
             "content_fingerprint": fp,
             "confidence_score": int(conf),
             "lifecycle_status": "active",
-            "superseded_by_id": 0,
+            # 外键列必须写 None（NULL）而非 0：NCB 按 `*_id` 自动建外键
+            # superseded_by_id -> memories.id，写 0 会违约导致整条写入失败。
+            "superseded_by_id": None,
             "revision": max([int(r.get("revision") or r.get("version") or 1) for r in superseded] or [0]) + 1,
             "retrieval_count": 0,
             "invalid_at": None,
             "invalid_reason": "",
             "last_used_at": None,
+            # 必须显式写：NCB 不生效 DEFAULT CURRENT_TIMESTAMP，省略即 NULL。
+            "created_at": now_str(),
+            "updated_at": now_str(),
         })
     except RuntimeError as e:
         if "duplicate" in str(e).lower():
@@ -724,6 +729,7 @@ def save_memory(ncb, cfg, m, cache):
             "superseded_by_id": new_id,
             "invalid_at": now_str(),
             "invalid_reason": "superseded",
+            "updated_at": now_str(),
         })
         return {"action": "UPDATE", "id": new_id, "superseded_id": old}
     return {"action": "ADD", "id": new_id}
@@ -746,7 +752,9 @@ def save_pitfall(ncb, cfg, p, cache):
     if exist:
         rid = exist[0]["id"]
         n = int(exist[0].get("recurrence") or 1) + 1
-        ncb.update("pitfalls", rid, {"recurrence": n, "last_occurred_at": now_str()})
+        ncb.update("pitfalls", rid,
+                   {"recurrence": n, "last_occurred_at": now_str(),
+                    "updated_at": now_str()})   # NCB 不生效 ON UPDATE，须显式写
         return {"action": "NOOP", "id": rid, "recurrence": n}
 
     try:
@@ -763,6 +771,9 @@ def save_pitfall(ncb, cfg, p, cache):
             "content_fingerprint": fp,
             "recurrence": 1,
             "last_occurred_at": now_str(),
+            # 同上：NCB 不生效列默认值，必须显式写。
+            "created_at": now_str(),
+            "updated_at": now_str(),
         })
     except RuntimeError as e:
         if "duplicate" in str(e).lower():

@@ -47,7 +47,9 @@ export const TABLES = {
       { name: "confidence_score", type: "INT", default: "100" },
       // 状态：active / superseded / invalid
       { name: "lifecycle_status", type: "VARCHAR", length: 24, default: "'active'" },
-      { name: "superseded_by_id", type: "INT", default: "0" },
+      /* 默认值必须是 NULL 不是 0：NCB 按 `*_id` 列名自动建外键
+     * （superseded_by_id → memories.id），0 不是合法引用会违约。 */
+    { name: "superseded_by_id", type: "INT", default: "NULL" },
       { name: "revision", type: "INT", default: "1" },
       { name: "retrieval_count", type: "INT", default: "0" },
       { name: "invalid_at", type: "DATETIME", nullable: true },
@@ -372,8 +374,10 @@ export function buildDropStatements() {
 /** 初始化完成后的版本记录语句。 */
 export function versionUpsertSQL(version) {
   var v = String(version);
-  return "INSERT INTO " + META_TABLE + " (k, v) VALUES ('" + VERSION_KEY + "', '" + v +
-    "') ON DUPLICATE KEY UPDATE v = '" + v + "'";
+  /* 时间戳必须显式写：实测 NCB 不生效 DEFAULT CURRENT_TIMESTAMP，
+   * 省略 updated_at 会让它恒为 NULL（用户实测发现）。 */
+  return "INSERT INTO " + META_TABLE + " (k, v, updated_at) VALUES ('" + VERSION_KEY + "', '" + v +
+    "', CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE v = '" + v + "', updated_at = CURRENT_TIMESTAMP";
 }
 
 /** 人类可读的计划摘要（给二次确认弹窗用）。 */
