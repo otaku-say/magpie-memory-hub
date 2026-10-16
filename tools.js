@@ -246,7 +246,7 @@ function scoreMemory(row, terms) {
   if (!terms.length) return 1;
   const title = String(row.title || "").toLowerCase();
   const tags = String(row.tags || "").toLowerCase();
-  const body = String(row.content || row.related_entities || row.related || "").toLowerCase();
+  const body = String(row.content || row.related_entities || "").toLowerCase();
   let s = 0;
   for (const t of terms) {
     if (title.includes(t)) s += 5;
@@ -281,7 +281,7 @@ function freshness(row) {
 
 function rankMemory(row) {
   const conf = (Number(row.confidence_score) || 100) / 100;
-  const acc = Math.min(Number(row.retrieval_count != null ? row.retrieval_count : row.access_count) || 0, 10);
+  const acc = Math.min(Number(row.retrieval_count) || 0, 10);
   return conf * (1 + 0.1 * acc) * (0.5 + 0.5 * freshness(row));
 }
 
@@ -305,7 +305,7 @@ function nowSql() {
 async function saveMemory(client, cfg, m, ctx) {
   const project = String(m.project || "global").trim();
   const category = CATEGORIES.includes(m.category) ? m.category : "fact";
-  const scopeLevel = SCOPES.includes(m.scope_level || m.scope) ? (m.scope_level || m.scope) : "project";
+  const scopeLevel = SCOPES.includes(m.scope_level) ? m.scope_level : "project";
   const callerAgent = (ctx && (ctx.agent || (ctx._ctx && ctx._ctx.agent))) || "";
   const clientVal = (m.client && String(m.client).trim())
     || (callerAgent && String(callerAgent).trim())
@@ -317,9 +317,9 @@ async function saveMemory(client, cfg, m, ctx) {
   const content = String(m.content || "").trim();
   const fullText = (m.full_text != null && String(m.full_text).trim() !== "")
     ? String(m.full_text)
-    : ((m.full_content != null && String(m.full_content).trim() !== "") ? String(m.full_content) : content);
+    : content;
   const tags = String(m.tags || "").trim().toLowerCase();
-  const relatedEntities = String(m.related_entities || m.related || "").trim();
+  const relatedEntities = String(m.related_entities || "").trim();
   let confidence = Number(m.confidence);
   if (!confidence || confidence <= 1) confidence = Math.round((confidence || 1) * 100);
   confidence = Math.max(0, Math.min(100, Math.round(confidence || 100)));
@@ -336,18 +336,18 @@ async function saveMemory(client, cfg, m, ctx) {
 
   // 1) 完全相同的指纹 → NOOP，不虚增检索计数，不更新 last_used_at
   const same = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT })).filter(
-    (r) => r.content_fingerprint === fp || r.fingerprint === fp
+    (r) => r.content_fingerprint === fp
   );
   if (same.length) {
     const hit = same[0];
     markRecent("m:" + fp);
-    return { action: "NOOP", id: hit.id, retrieval_count: Number(hit.retrieval_count != null ? hit.retrieval_count : hit.access_count) || 0, note: "内容未变化" };
+    return { action: "NOOP", id: hit.id, retrieval_count: Number(hit.retrieval_count) || 0, note: "内容未变化" };
   }
 
   // 2) 同项目同分类同标题但内容不同 → 新版本，旧版进 supersede 版本链
   const superseded = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT })).filter(
     (r) =>
-      (r.lifecycle_status === "active" || r.status === "active") &&
+      r.lifecycle_status === "active" &&
       String(r.title || "").trim().toLowerCase() === title.toLowerCase() &&
       String(r.category || "") === category
   );
@@ -372,7 +372,7 @@ async function saveMemory(client, cfg, m, ctx) {
      * NULL 是外键的合法值，语义也正是「未被任何行取代」。 */
     superseded_by_id: null,
     /* 修订版本号 = 被取代那批里最大的修订号 + 1。没有旧版时就是 1。 */
-    revision: superseded.reduce(function (mx, r) { return Math.max(mx, Number(r.revision || r.version) || 1); }, 0) + 1,
+    revision: superseded.reduce(function (mx, r) { return Math.max(mx, Number(r.revision) || 1); }, 0) + 1,
     retrieval_count: 0,
     invalid_at: null,
     invalid_reason: '',
@@ -395,10 +395,10 @@ async function saveMemory(client, cfg, m, ctx) {
     if (/duplicate entry/i.test(String(e.message))) {
       markRecent("m:" + fp);
       const dup = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT })).filter(
-        (r) => r.content_fingerprint === fp || r.fingerprint === fp
+        (r) => r.content_fingerprint === fp
       )[0];
       if (dup) {
-        return { action: "NOOP", id: dup.id, retrieval_count: Number(dup.retrieval_count != null ? dup.retrieval_count : dup.access_count) || 0, note: "唯一索引拦下重复" };
+        return { action: "NOOP", id: dup.id, retrieval_count: Number(dup.retrieval_count) || 0, note: "唯一索引拦下重复" };
       }
       return { action: "NOOP", id: null, note: "唯一索引拦下重复（写后读延迟内读不到既有行）" };
     }
@@ -443,12 +443,12 @@ async function memorySearch(client, cfg, args) {
   let pool = all;
   if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
   if (args.category) pool = pool.filter((r) => String(r.category || "") === args.category);
-  const targetScope = args.scope_level || args.scope;
-  if (targetScope) pool = pool.filter((r) => String(r.scope_level || r.scope || "") === targetScope);
+  const targetScope = args.scope_level;
+  if (targetScope) pool = pool.filter((r) => String(r.scope_level || "") === targetScope);
   if (args.client) pool = pool.filter((r) => String(r.client || "") === String(args.client));
   if (args.origin) pool = pool.filter((r) => String(r.origin || "") === String(args.origin));
   // 历史版本默认不返回（Headroom：查询默认排除 superseded）
-  if (args.include_history !== true) pool = pool.filter((r) => r.lifecycle_status !== "superseded" && r.status !== "superseded");
+  if (args.include_history !== true) pool = pool.filter((r) => r.lifecycle_status !== "superseded");
 
   const scored = pool
     .map((r) => ({ row: r, hit: scoreMemory(r, terms) }))
@@ -459,15 +459,14 @@ async function memorySearch(client, cfg, args) {
     id: x.row.id,
     project: x.row.project,
     category: x.row.category,
-    scope_level: x.row.scope_level || x.row.scope,
-    scope: x.row.scope_level || x.row.scope,
+    scope_level: x.row.scope_level,
     client: x.row.client || "unknown",
     origin: x.row.origin || "tool",
     title: x.row.title,
     content: x.row.content,
     tags: x.row.tags,
     confidence: x.row.confidence_score,
-    retrieval_count: Number(x.row.retrieval_count != null ? x.row.retrieval_count : x.row.access_count) || 0,
+    retrieval_count: Number(x.row.retrieval_count) || 0,
     last_used_at: x.row.last_used_at || null,
     updated_at: x.row.updated_at,
     _hit: x.hit,
@@ -479,7 +478,7 @@ async function memorySearch(client, cfg, args) {
 async function memoryList(client, cfg, args) {
   const limit = Math.max(1, Math.min(Number(args.limit) || 20, 100));
   let all = (await fetchAll(client, "memories", { lifecycle_status: "active" })).filter(
-    (r) => r.lifecycle_status !== "superseded" && r.status !== "superseded"
+    (r) => r.lifecycle_status !== "superseded"
   );
   if (args.project) all = all.filter((r) => String(r.project || "") === String(args.project));
   if (args.client) all = all.filter((r) => String(r.client || "") === String(args.client));
@@ -489,12 +488,11 @@ async function memoryList(client, cfg, args) {
     returned: sorted.length,
     memories: sorted.map((r) => ({
       id: r.id, project: r.project, category: r.category,
-      scope_level: r.scope_level || r.scope,
-      scope: r.scope_level || r.scope,
+      scope_level: r.scope_level,
       client: r.client || "unknown",
       origin: r.origin || "tool",
       title: r.title, tags: r.tags,
-      retrieval_count: Number(r.retrieval_count != null ? r.retrieval_count : r.access_count) || 0,
+      retrieval_count: Number(r.retrieval_count) || 0,
       last_used_at: r.last_used_at || null,
     })),
   });
@@ -505,8 +503,8 @@ async function memoryContext(client, cfg, args) {
   const budget = Number(args.max_chars) || cfg.maxBudget;
   const terms = termsOf(args.query);
 
-  let pool = (await fetchAll(client, "memories", { status: "active" })).filter(
-    (r) => r.status !== "superseded"
+  let pool = (await fetchAll(client, "memories", { lifecycle_status: "active" })).filter(
+    (r) => r.lifecycle_status !== "superseded"
   );
   if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
 
@@ -556,7 +554,7 @@ async function pitfallSave(client, cfg, args, ctx) {
   }
 
   const exist = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT })).filter(
-    (r) => r.content_fingerprint === fp || r.fingerprint === fp
+    (r) => r.content_fingerprint === fp
   );
   if (exist.length) {
     const row = exist[0];
@@ -582,7 +580,7 @@ async function pitfallSave(client, cfg, args, ctx) {
     if (/duplicate entry/i.test(String(e.message))) {
       markRecent("p:" + fp);
       const dup = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT })).filter(
-        (r) => r.content_fingerprint === fp || r.fingerprint === fp
+        (r) => r.content_fingerprint === fp
       )[0];
       if (dup) {
         const next = (Number(dup.recurrence) || 1) + 1;
@@ -624,7 +622,7 @@ async function memoryGet(client, cfg, args) {
   const hit = rowsOf(res).filter((r) => Number(r.id) === id)[0];
   if (!hit) throw new Error("找不到 id=" + id + " 的记忆");
   // 展开属于一次真实取用，顺带累加被检索命中次数与更新最后使用时间
-  const count = (Number(hit.retrieval_count != null ? hit.retrieval_count : hit.access_count) || 0) + 1;
+  const count = (Number(hit.retrieval_count) || 0) + 1;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   try {
     await client.update("memories", id, {
@@ -635,22 +633,20 @@ async function memoryGet(client, cfg, args) {
   } catch (e) { /* 计数失败不影响读取 */ }
   const full = (hit.full_text != null && String(hit.full_text).trim() !== "")
     ? hit.full_text
-    : ((hit.full_content != null && String(hit.full_content).trim() !== "") ? hit.full_content : hit.content);
+    : hit.content;
   return jsonOut({
     id: hit.id,
     project: hit.project,
     category: hit.category,
-    scope_level: hit.scope_level || hit.scope,
-    scope: hit.scope_level || hit.scope,
+    scope_level: hit.scope_level,
     client: hit.client || "unknown",
     origin: hit.origin || "tool",
     title: hit.title,
     content: full,
     summary: hit.content,
     full_text: full,
-    full_content: full,
     tags: hit.tags,
-    related_entities: hit.related_entities || hit.related || "",
+    related_entities: hit.related_entities || "",
     retrieval_count: count,
     last_used_at: now,
     _note: "已返回完整原文（见 full_text 与 content），summary 为注入卡片所用摘要",
@@ -706,16 +702,13 @@ const TOOLS = {
         project: { type: "string", description: "项目名，默认 global" },
         category: { type: "string", enum: CATEGORIES, description: "记忆分类。principle=行为准则，会被无条件置顶注入" },
         scope_level: { type: "string", enum: SCOPES, description: "作用域层级，默认 project（可选 user, project, session, turn）" },
-        scope: { type: "string", enum: SCOPES, description: "作用域层级（scope_level 别名）" },
         client: { type: "string", description: "产生该记忆的客户端标识（如 minis、codex、claude 等，可选，默认取调用者智能体）" },
         origin: { type: "string", enum: ["tool", "inline", "harvest"], description: "产生方式：tool=主动调用工具, inline=中间件内联提炼, harvest=网关录制提炼。默认 tool" },
         title: { type: "string", description: "精简标题（<=40字）" },
         content: { type: "string", description: "记忆正文/摘要，要具体、可复用" },
         full_text: { type: "string", description: "完整原文（可选，未提供时默认等于 content）" },
-        full_content: { type: "string", description: "完整原文（full_text 别名）" },
         tags: { type: "string", description: "逗号分隔的检索关键词" },
         related_entities: { type: "string", description: "相关实体/技术栈" },
-        related: { type: "string", description: "相关实体/技术栈（related_entities 别名）" },
         confidence: { type: "number", description: "置信度 0~1，默认 1" },
       },
       required: ["title", "content"],
@@ -733,7 +726,6 @@ const TOOLS = {
         project: { type: "string", description: "限定项目" },
         category: { type: "string", enum: CATEGORIES, description: "限定分类" },
         scope_level: { type: "string", enum: SCOPES, description: "限定作用域层级" },
-        scope: { type: "string", enum: SCOPES, description: "限定作用域（scope_level 别名）" },
         client: { type: "string", description: "限定客户端来源（如 minis、codex、claude）" },
         origin: { type: "string", enum: ["tool", "inline", "harvest"], description: "限定产生方式" },
         include_history: { type: "boolean", description: "是否包含已被 superseded 的历史版本" },

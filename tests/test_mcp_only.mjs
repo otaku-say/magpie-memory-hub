@@ -39,7 +39,7 @@ try {
     content: tricky,
     category: "fact",
     tags: "mcp,probe",
-    scope: "project",
+    scope_level: "project",
   }));
   check(sv.action === "ADD", `新命名空间首次写入 action 必须为 ADD（实际: ${sv.action}）`);
   check(typeof sv.id === "number" && sv.id > 0, `拿到合法数字主键 id=${sv.id}`);

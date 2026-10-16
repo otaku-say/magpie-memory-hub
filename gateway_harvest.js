@@ -245,7 +245,7 @@ export function mineEnvironmentFacts(text) {
     const venvPath = vmMatch[1].trim();
     results.push({
       category: "fact",
-      scope: "project",
+      scope_level: "project",
       title: "Python 虚拟环境激活",
       content: `Python virtual environment: \`source ${venvPath}\` before running Python tools.`,
       tags: "environment,python,venv",
@@ -263,7 +263,7 @@ export function mineEnvironmentFacts(text) {
       if (/\b(?:PASSED|passed|OK|\d+\s+passed)\b/.test(window)) {
         results.push({
           category: "fact",
-          scope: "project",
+          scope_level: "project",
           title: "可用测试命令",
           content: `Working test command: \`${cmd}\``,
           tags: "environment,test",
@@ -282,7 +282,7 @@ export function mineEnvironmentFacts(text) {
     if (preferred && avoid && preferred !== avoid && !GENERIC_PRONOUNS.has(preferred.toLowerCase()) && !GENERIC_PRONOUNS.has(avoid.toLowerCase())) {
       results.push({
         category: "fact",
-        scope: "project",
+        scope_level: "project",
         title: `工具规范: ${preferred} 代替 ${avoid}`,
         content: `环境规范：优先使用 \`${preferred}\`，避免使用 \`${avoid}\`。`,
         tags: "environment,tooling",
@@ -301,7 +301,7 @@ export function mineEnvironmentFacts(text) {
       const base = path.basename(okP.replace(/\\/g, "/"));
       results.push({
         category: "fact",
-        scope: "project",
+        scope_level: "project",
         title: `路径纠正: ${base}`,
         content: `文件 \`${errP}\` 不存在，正确路径为 \`${okP}\`。`,
         tags: "environment,path",
@@ -319,7 +319,7 @@ export function mineEnvironmentFacts(text) {
     if (cNf && cAlt && cNf !== cAlt) {
       results.push({
         category: "fact",
-        scope: "project",
+        scope_level: "project",
         title: `命令替代: ${cNf} 不可用，改用 ${cAlt}`,
         content: `环境缺少命令 \`${cNf}\`，改用 \`${cAlt}\` 执行对应操作。`,
         tags: "environment,command",
@@ -356,7 +356,7 @@ export function mineArchitecturalDecisions(text) {
     if (depNew && depOld && depNew !== depOld && !GENERIC_PRONOUNS.has(depNew.toLowerCase()) && !GENERIC_PRONOUNS.has(depOld.toLowerCase())) {
       results.push({
         category: "decision",
-        scope: "project",
+        scope_level: "project",
         title: `选型决策: 采用 ${depNew} 替换 ${depOld}`,
         content: `架构决策：采用 \`${depNew}\` 替代 \`${depOld}\`。`,
         tags: "architecture,decision,tech-choice",
@@ -375,7 +375,7 @@ export function mineArchitecturalDecisions(text) {
       if (!dirPath.endsWith("/")) dirPath += "/";
       results.push({
         category: "decision",
-        scope: "project",
+        scope_level: "project",
         title: `目录规范: ${modType} 存放在 ${dirPath}`,
         content: `架构目录约定：${modType}统一存放在 \`${dirPath}\` 目录中。`,
         tags: "architecture,structure,convention",
@@ -392,7 +392,7 @@ export function mineArchitecturalDecisions(text) {
     if (standard && !GENERIC_PRONOUNS.has(standard)) {
       results.push({
         category: "decision",
-        scope: "project",
+        scope_level: "project",
         title: `架构规范: 遵循 ${standard}`,
         content: `系统架构规范约定：统一采用并遵循 ${standard}。`,
         tags: "architecture,pattern,convention",
@@ -699,7 +699,7 @@ export async function harvestGateway(args, context) {
             const res = await saveMemory(client, cfg, {
               project: targetProject,
               category: item.category,
-              scope_level: item.scope || "project",
+              scope_level: item.scope_level || "project",
               client: agent,
               origin: "harvest",
               title: item.title,

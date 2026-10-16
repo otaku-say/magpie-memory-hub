@@ -87,6 +87,75 @@ for (const table of ["memories", "pitfalls"]) {
 }
 
 /* ------------------------------------------------------------------ *
+ * 旧列名残留校验（查询侧）
+ *
+ * 上面那些检查只比对「写入侧」字段 —— 曾因此漏过一个大 bug：
+ * memory_context 的查询过滤写成 { status: "active" }，而列早已改名
+ * lifecycle_status，NCB 直接报「未知列名 status」，整个工具不可用。
+ * 同时读取侧 r.status 恒为 undefined，superseded 过滤静默失效。
+ * 教训：改名只查写入侧是不够的，查询侧（WHERE / 读取字段）同样会残留。
+ * ------------------------------------------------------------------ */
+/* 旧名 → 新名。
+ * 现已彻底删除所有针对数据库列改名的兼容代码，因此在数据库语境中一律不允许出现旧列名。 */
+const RENAMED_AWAY = {
+  status: "lifecycle_status",
+  version: "revision",
+  access_count: "retrieval_count",
+  hits: "retrieval_count",
+  fingerprint: "content_fingerprint",
+  related: "related_entities",
+  entities: "related_entities",
+  full_content: "full_text",
+  superseded_by: "superseded_by_id",
+  last_accessed_at: "last_used_at",
+  scope: "scope_level",
+};
+/* 合法的同名用法（与数据库列无关），逐条给出理由，不做宽泛豁免 */
+const LEGIT_CTX = [
+  /res\.status|response\.status|\bstatusText\b|statusCode/,   // HTTP 状态
+  /out\.get\("status"\)|\.get\("status"\)\s*==\s*"failed"/,    // 子进程结果字典
+  /git status|status\s*[:=]\s*["'](?:ok|failed)["']/,          // 非 DB 的普通状态字段
+  /\bversion\s*[:=]\s*(?:["']|SCHEMA_|String\()/,              // 版本号常量
+];
+const CODE_FILES = ["tools.js", "db_tools.js", "gateway_harvest.js", "page_actions.js",
+                    "memory.middleware.js", "harvest.py", "schema.js"];
+/* 反证：确认「豁免机制」不会把真 bug 一起放行（见文件末尾断言） */
+console.log("\n【旧列名残留校验（查询侧）】");
+let staleHits = [];
+for (const f of CODE_FILES) {
+  let src = "";
+  try { src = readFileSync(new URL("../" + f, import.meta.url), "utf8"); } catch { continue; }
+  const lines = src.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i];
+    const t = L.trim();
+    if (t.startsWith("//") || t.startsWith("#") || t.startsWith("*") || t.startsWith("/*")) continue;
+    if (LEGIT_CTX.some((re) => re.test(L))) continue;
+    /* 行内豁免：源码里写 `db-col-ok: <理由>` 即可放行。
+     * 理由必须写在那一行旁边，评审时一眼能看到为什么它是安全的。 */
+    if (/db-col-ok\s*:/.test(L)) continue;
+    for (const [col, fresh] of Object.entries(RENAMED_AWAY)) {
+      // 作为对象键（JS 字面量 / Python 字典）、字典读取、SQL WHERE 或行对象属性读取
+      const asKey = new RegExp(`(?:^|[^\\w.])["']?${col}["']?\\s*:`);
+      const asGet = new RegExp(`\\.get\\(\\s*["']${col}["']\\s*\\)`);
+      const inSql = new RegExp(`\\b${col}\\b\\s*(?:=|!=|<>|IS)\\s`, "i");
+      const asProp = new RegExp(`\\b(?:r|row|m|hit|item|dup|cq)\\b\\.${col}\\b`);
+      if (asKey.test(L) || asGet.test(L) || (/SELECT|WHERE|UPDATE|INSERT/i.test(L) && inSql.test(L)) || asProp.test(L)) {
+        staleHits.push(`${f}:${i + 1}  「${col}」（应改用 ${fresh}）→ ${t.slice(0, 58)}`);
+      }
+    }
+  }
+}
+if (staleHits.length) {
+  fail++;
+  console.log(`  ✗ 发现 ${staleHits.length} 处可能仍在用【改名前的旧列名】：`);
+  staleHits.slice(0, 12).forEach((h) => console.log("      " + h));
+  if (staleHits.length > 12) console.log(`      …另有 ${staleHits.length - 12} 处`);
+} else {
+  console.log("  ✓ 查询侧没有旧列名残留");
+}
+
+/* ------------------------------------------------------------------ *
  * 版本号同步校验：package.json version vs settings.html
  * ------------------------------------------------------------------ */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -98,6 +167,17 @@ if (!matchVer || matchVer[1] !== pkg.version) {
   console.log(`  ✗ settings.html 中的版本号 (v${matchVer ? matchVer[1] : "null"}) 与 package.json (${pkg.version}) 不一致！`);
 } else {
   console.log(`  ✓ 版本号完全对齐 (v${pkg.version})`);
+}
+
+/* 反证：未标记的旧列名必被抓到，标记过的必被放行 —— 否则门禁是空转 */
+{
+  const probeBad = `const f = { status: "active" };`;
+  const probeOk  = `const f = { status: "active" };  // db-col-ok: UI 状态字段`;
+  const hit = (line) => !/db-col-ok\s*:/.test(line) && /(?:^|[^\w.])["']?status["']?\s*:/.test(line);
+  const c1 = hit(probeBad), c2 = hit(probeOk);
+  console.log("\n【反证】旧列名检测器的有效性");
+  if (c1 && !c2) console.log("  ✓ 反证通过：未标记的坏行被检出，标记过的被放行");
+  else { fail++; console.log(`  ✗ 反证失败：坏行检出=${c1}（应 true），豁免行放行=${!c2}（应 true）`); }
 }
 
 console.log(fail ? `\n❌ 失败 ${fail} 项` : "\n✅ schema 声明与代码写入完全对齐，版本号严格同步");

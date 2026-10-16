@@ -389,7 +389,7 @@ def mine_environment_facts(text):
     """
     从对话文本中提取「环境事实（Environment facts）」。
     覆盖：Python虚拟环境激活、有效测试命令、工具链执行规范(如 uv run python vs python3)、路径纠错、命令可用性。
-    返回 [{category, scope, title, content, tags, confidence}]，category 统一为 'fact'。
+    返回 [{category, scope_level, title, content, tags, confidence}]，category 统一为 'fact'。
     """
     cleaned = _clean_dialogue_text(text)
     if _is_dialogue_noise(cleaned):
@@ -407,7 +407,7 @@ def mine_environment_facts(text):
         venv_path = m.group(1).strip()
         results.append({
             "category": "fact",
-            "scope": "project",
+            "scope_level": "project",
             "title": "Python 虚拟环境激活",
             "content": f"Python virtual environment: `source {venv_path}` before running Python tools.",
             "tags": "environment,python,venv",
@@ -427,7 +427,7 @@ def mine_environment_facts(text):
             if re.search(r"\b(?:PASSED|passed|OK|\d+\s+passed)\b", window):
                 results.append({
                     "category": "fact",
-                    "scope": "project",
+                    "scope_level": "project",
                     "title": "可用测试命令",
                     "content": f"Working test command: `{cmd}`",
                     "tags": "environment,test",
@@ -482,7 +482,7 @@ def mine_environment_facts(text):
 
             results.append({
                 "category": "fact",
-                "scope": "project",
+                "scope_level": "project",
                 "title": f"环境执行工具: 使用 {preferred} 代替 {avoid}",
                 "content": f"环境工具链规范：使用 `{preferred}` 代替 `{avoid}` 执行相关命令。",
                 "tags": "environment,toolchain",
@@ -497,7 +497,7 @@ def mine_environment_facts(text):
             base = os.path.basename(ok_p.replace("\\", "/"))
             results.append({
                 "category": "fact",
-                "scope": "project",
+                "scope_level": "project",
                 "title": f"路径纠正: {base}",
                 "content": f"文件 `{err_p}` 不存在，正确路径为 `{ok_p}`。",
                 "tags": "environment,path",
@@ -511,7 +511,7 @@ def mine_environment_facts(text):
             base = os.path.basename(ok_p.replace("\\", "/"))
             results.append({
                 "category": "fact",
-                "scope": "project",
+                "scope_level": "project",
                 "title": f"路径纠正: {base}",
                 "content": f"文件 `{err_p}` 不存在，正确路径为 `{ok_p}`。",
                 "tags": "environment,path",
@@ -525,7 +525,7 @@ def mine_environment_facts(text):
         if c_nf and c_alt and c_nf != c_alt:
             results.append({
                 "category": "fact",
-                "scope": "project",
+                "scope_level": "project",
                 "title": f"命令替代: {c_nf} 不可用，改用 {c_alt}",
                 "content": f"环境缺少命令 `{c_nf}`，改用 `{c_alt}` 执行对应操作。",
                 "tags": "environment,command",
@@ -550,7 +550,7 @@ def mine_architectural_decisions(text):
     """
     从对话文本中提取「架构决策（Architectural decisions）」。
     覆盖：技术选型与依赖库替代、技术选型角色定位、目录结构与模块分工收口约定、架构规范。
-    返回 [{category, scope, title, content, tags, confidence}]，category 统一为 'decision'。
+    返回 [{category, scope_level, title, content, tags, confidence}]，category 统一为 'decision'。
     """
     cleaned = _clean_dialogue_text(text)
     if _is_dialogue_noise(cleaned):
@@ -568,7 +568,7 @@ def mine_architectural_decisions(text):
             continue
         results.append({
             "category": "decision",
-            "scope": "project",
+            "scope_level": "project",
             "title": f"技术选型: 使用 {dep_new} 替代 {dep_old}",
             "content": f"架构技术选型决策：采用 `{dep_new}` 替代 `{dep_old}` 作为项目依赖。",
             "tags": "architecture,dependency,decision",
@@ -583,7 +583,7 @@ def mine_architectural_decisions(text):
             continue
         results.append({
             "category": "decision",
-            "scope": "project",
+            "scope_level": "project",
             "title": f"技术选型: 采用 {dep_name} 作为 {role}",
             "content": f"架构技术选型决策：采用 `{dep_name}` 作为 {role}。",
             "tags": "architecture,dependency,decision",
@@ -598,7 +598,7 @@ def mine_architectural_decisions(text):
             continue
         results.append({
             "category": "decision",
-            "scope": "project",
+            "scope_level": "project",
             "title": f"技术选型: 使用 {dep_new} 替代 {dep_old}",
             "content": f"架构技术选型决策：采用 `{dep_new}` 替代 `{dep_old}` 作为项目依赖。",
             "tags": "architecture,dependency,decision",
@@ -615,7 +615,7 @@ def mine_architectural_decisions(text):
             dir_path = dir_path + "/"
         results.append({
             "category": "decision",
-            "scope": "project",
+            "scope_level": "project",
             "title": f"目录规范: {mod_type} 存放在 {dir_path}",
             "content": f"架构目录约定：{mod_type}统一存放在 `{dir_path}` 目录中。",
             "tags": "architecture,structure,convention",
@@ -628,7 +628,7 @@ def mine_architectural_decisions(text):
         standard = m.group(1).strip()
         results.append({
             "category": "decision",
-            "scope": "project",
+            "scope_level": "project",
             "title": f"架构规范: 遵循 {standard}",
             "content": f"系统架构规范约定：统一采用并遵循 {standard}。",
             "tags": "architecture,pattern,convention",
@@ -665,14 +665,14 @@ def save_memory(ncb, cfg, m, cache):
         return {"action": "NOOP", "cached": True}
     cache.add(fp)
 
-    same = [r for r in ncb.all("memories", {"project": project}) if (r.get("content_fingerprint") == fp or r.get("fingerprint") == fp)]
+    same = [r for r in ncb.all("memories", {"project": project}) if r.get("content_fingerprint") == fp]
     if same:
         rid = same[0]["id"]
         return {"action": "NOOP", "id": rid}
 
     superseded = [
         r for r in ncb.all("memories", {"project": project})
-        if (r.get("lifecycle_status") == "active" or r.get("status") == "active")
+        if r.get("lifecycle_status") == "active"
         and str(r.get("title") or "").strip().lower() == title.lower()
         and str(r.get("category") or "") == category
     ]
@@ -688,7 +688,7 @@ def save_memory(ncb, cfg, m, cache):
     # (project, content_fingerprint) 上有唯一索引，它是去重的最终保证：
     # NCB 的读有约 2 秒写后可见延迟，靠「先读后写」会漏掉紧邻的重复写入。
     try:
-        scope_val = m.get("scope_level") or m.get("scope")
+        scope_val = m.get("scope_level")
         scope_val = scope_val if scope_val in ("user", "project", "session", "turn") else "project"
         res = ncb.create("memories", {
             "project": project,
@@ -698,16 +698,16 @@ def save_memory(ncb, cfg, m, cache):
             "origin": "harvest",
             "title": title,
             "content": content,
-            "full_text": str(m.get("full_text") or m.get("full_content") or content),
+            "full_text": str(m.get("full_text") or content),
             "tags": str(m.get("tags") or "").lower(),
-            "related_entities": str(m.get("related_entities") or m.get("related") or ""),
+            "related_entities": str(m.get("related_entities") or ""),
             "content_fingerprint": fp,
             "confidence_score": int(conf),
             "lifecycle_status": "active",
             # 外键列必须写 None（NULL）而非 0：NCB 按 `*_id` 自动建外键
             # superseded_by_id -> memories.id，写 0 会违约导致整条写入失败。
             "superseded_by_id": None,
-            "revision": max([int(r.get("revision") or r.get("version") or 1) for r in superseded] or [0]) + 1,
+            "revision": max([int(r.get("revision") or 1) for r in superseded] or [0]) + 1,
             "retrieval_count": 0,
             "invalid_at": None,
             "invalid_reason": "",
@@ -748,7 +748,7 @@ def save_pitfall(ncb, cfg, p, cache):
         return {"action": "NOOP", "cached": True}
     cache.add(fp)
 
-    exist = [r for r in ncb.all("pitfalls", {"project": project}) if (r.get("content_fingerprint") == fp or r.get("fingerprint") == fp)]
+    exist = [r for r in ncb.all("pitfalls", {"project": project}) if r.get("content_fingerprint") == fp]
     if exist:
         rid = exist[0]["id"]
         n = int(exist[0].get("recurrence") or 1) + 1
@@ -839,7 +839,7 @@ class EvidenceCollector:
         try:
             os.makedirs(dir_name, exist_ok=True)
             data = {
-                "version": 1,
+                "version": 1,  # db-col-ok: 本地状态文件结构版本号，非数据库列
                 "updated_at": time.time(),
                 "pending": self.pending,
                 "saved": list(self.saved)[-2000:],
@@ -992,7 +992,7 @@ def record_pitfall(ncb, cfg, p, cache, accumulator=None, dry_run=False):
     if not res["ready"]:
         return {
             "action": "PENDING",
-            "fingerprint": fp,
+            "content_fingerprint": fp,
             "count": res["count"],
             "min_evidence": res["min_evidence"],
             "symptom": symptom,
@@ -1000,7 +1000,7 @@ def record_pitfall(ncb, cfg, p, cache, accumulator=None, dry_run=False):
         }
 
     if dry_run:
-        return {"action": "DRYRUN", "count": res.get("count"), "fingerprint": fp, **p}
+        return {"action": "DRYRUN", "count": res.get("count"), "content_fingerprint": fp, **p}
 
     return save_pitfall(ncb, cfg, p, cache)
 
@@ -1029,8 +1029,8 @@ def _get_conf_score(m):
 def promote_scopes(ncb, cfg, dry_run=False):
     """
     轻量版「记忆提升」（scope promotion）：
-    对 scope 为 session 或 turn、且 access_count + hits >= N（默认 3）、
-    confidence_score >= 阈值、status=active 的记忆，就地改 scope 为 project。
+    对 scope_level 为 session 或 turn、且 retrieval_count >= N（默认 3）、
+    confidence_score >= 阈值、lifecycle_status=active 的记忆，就地改 scope_level 为 project。
     """
     if not cfg.get("enable_promotion", True):
         return []
@@ -1066,22 +1066,20 @@ def promote_scopes(ncb, cfg, dry_run=False):
         if len(promoted) >= limit:
             break
 
-        # 检查 status
-        if str(m.get("status") or "active").lower() != "active":
+        # 检查 lifecycle_status
+        if str(m.get("lifecycle_status") or "active").lower() != "active":
             continue
         # 双时态：已失效（invalid_at 已过）的记忆不得提升。
-        # 本文件其它地方（build_snapshot）与网关中间件都是 status + invalid_at 两个都查，
-        # 这里原先只查了 status，属于不一致的漏洞。
         if m.get("invalid_at"):
             continue
 
         # 检查 scope_level 是否为 session 或 turn
-        scope = str(m.get("scope_level") or m.get("scope") or "").lower()
-        if scope not in ("session", "turn"):
+        scope_lvl = str(m.get("scope_level") or "").lower()
+        if scope_lvl not in ("session", "turn"):
             continue
 
-        # 检查 retrieval_count (或 access_count + hits) >= min_hits
-        rc_cnt = int(m.get("retrieval_count") or (int(m.get("access_count") or 0) + int(m.get("hits") or 0)))
+        # 检查 retrieval_count >= min_hits
+        rc_cnt = int(m.get("retrieval_count") or 0)
         if rc_cnt < min_hits:
             continue
 
@@ -1097,7 +1095,6 @@ def promote_scopes(ncb, cfg, dry_run=False):
         # 符合条件，就地提升为 project
         if dry_run:
             m["scope_level"] = "project"
-            m["scope"] = "project"
             promoted.append({"id": rid, "title": m.get("title"), "dry_run": True})
         else:
             try:
@@ -1106,10 +1103,9 @@ def promote_scopes(ncb, cfg, dry_run=False):
                     "updated_at": now_str(),
                 })
                 m["scope_level"] = "project"
-                m["scope"] = "project"
                 promoted.append({"id": rid, "title": m.get("title")})
             except Exception as e:
-                log(f"更新记忆 scope 失败 id={rid}: {e}")
+                log(f"更新记忆 scope_level 失败 id={rid}: {e}")
 
     return promoted
 
@@ -1156,7 +1152,7 @@ def rule_judge(cfg, ncb, cands, project, stats):
     known = []
     try:
         for m in ncb.all("memories", {"project": project}):
-            if str(m.get("status") or "active") == "active" and not m.get("invalid_at"):
+            if str(m.get("lifecycle_status") or "active") == "active" and not m.get("invalid_at"):
                 known.append((_tokens(m.get("title")), _tokens(m.get("content"))))
     except Exception as e:
         stats["errors"].append(f"规则仲裁取既有记忆失败: {e}")
@@ -1325,31 +1321,31 @@ def rank_importance(m, now_ts):
     只用于【决定谁进快照】，与中间件内部的排序是两件事。
     """
     conf = (float(m.get("confidence_score") or 100)) / 100.0
-    hits = int(m.get("retrieval_count") or (int(m.get("hits") or 0) + int(m.get("access_count") or 0)))
-    stab = 1.0 * (1 + 1.5 * math.log(1 + hits))
-    t = m.get("last_used_at") or m.get("last_accessed_at") or m.get("updated_at") or m.get("created_at") or ""
+    rc = int(m.get("retrieval_count") or 0)
+    stab = 1.0 * (1 + 1.5 * math.log(1 + rc))
+    t = m.get("last_used_at") or m.get("updated_at") or m.get("created_at") or ""
     try:
         dt = datetime.strptime(str(t)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         days = max(0.0, (now_ts - dt.timestamp()) / 86400.0)
     except Exception:
         days = 0.0
     retention = math.exp(-days / stab) if stab > 0 else 1.0
-    return conf * (1 + 0.1 * min(hits, 10)) * (0.5 + 0.5 * retention)
+    return conf * (1 + 0.1 * min(rc, 10)) * (0.5 + 0.5 * retention)
 
 
 def build_snapshot(mems, cap, dormant_days, now_ts):
     """挑出该推给网关的记忆：活跃、未失效、未被取代，按重要度截断"""
     out = []
     for m in mems:
-        status = str(m.get("lifecycle_status") or m.get("status") or "active")
-        if status != "active":
+        st = str(m.get("lifecycle_status") or "active")
+        if st != "active":
             continue
         if m.get("invalid_at"):
             continue
         # 休眠：久未取用且从未被命中过的，不进快照（保留在库里，可被检索到）
-        hits = int(m.get("retrieval_count") or (int(m.get("hits") or 0) + int(m.get("access_count") or 0)))
-        if hits <= 1 and dormant_days > 0:
-            t = m.get("last_used_at") or m.get("last_accessed_at") or m.get("created_at") or ""
+        rc = int(m.get("retrieval_count") or 0)
+        if rc <= 1 and dormant_days > 0:
+            t = m.get("last_used_at") or m.get("created_at") or ""
             try:
                 dt = datetime.strptime(str(t)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
                 if (now_ts - dt.timestamp()) / 86400.0 > dormant_days:
@@ -1362,9 +1358,9 @@ def build_snapshot(mems, cap, dormant_days, now_ts):
 
 
 # 只推中间件真正用得上的字段：字段越少，plugins.json 越小、解析越快
-SNAP_FIELDS = ("id", "project", "category", "scope_level", "scope", "client", "origin", "title", "content",
-               "tags", "related_entities", "entities", "confidence_score", "retrieval_count", "access_count", "hits",
-               "lifecycle_status", "status", "invalid_at", "created_at", "updated_at", "last_used_at", "last_accessed_at")
+SNAP_FIELDS = ("id", "project", "category", "scope_level", "client", "origin", "title", "content",
+               "tags", "related_entities", "confidence_score", "retrieval_count",
+               "lifecycle_status", "invalid_at", "created_at", "updated_at", "last_used_at")
 
 
 def slim(m):

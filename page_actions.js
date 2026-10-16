@@ -53,7 +53,7 @@ export const OPS = {
   storage_setup: "为当前数据库挂载 R2 存储（自动建 bucket 并配置 CORS）",
   init: "创建缺失的表、列、索引（只增不删，幂等）",
   reset: "删除插件三张表（结构与数据一并删除，不可恢复）",
-  status: "只读检查结构状态",
+  status: "只读检查结构状态",  // db-col-ok: UI 操作描述字典键名，非数据库列
   ncb_check: "检测 MCP Key 有效性并检查目标数据库与结构状态（只读检测）",
   r2_check: "检测 R2 凭据是否真的可用（真实上传探针，只读检测）",
   model_check: "检测本地多语言小模型是否已就绪（只读检测）",
@@ -84,7 +84,7 @@ export function startBackgroundModelDownload(cfg, action) {
       file: "准备中",
       done_bytes: 0,
       total_bytes: MODEL_SPEC.approx_bytes,
-      status: "starting",
+      status: "starting",  // db-col-ok: UI 下载进度状态，非数据库列
     },
   });
 
@@ -124,7 +124,7 @@ export function startBackgroundModelDownload(cfg, action) {
           "存储目录：" + modelDir() + "（Magpie 持久卷）",
           "离线语义压缩已就绪，请求时可按需启用多语言抽取式压缩",
         ],
-        progress: { percent: 100, status: "done" },
+        progress: { percent: 100, status: "done" },  // db-col-ok: UI 下载进度状态，非数据库列
       });
       return res;
     })
@@ -362,7 +362,7 @@ async function execute(action, cfg, fs, sp, state) {
     // 早先写成 `op === "storage_setup" ? "r2" : "ncb"`，导致 r2_check 的结果
     // 被写进 NoCodeBackend 卡片、model_check 干脆无处可去（它当时也没实现）。
     const CARD_OF_OP = {
-      provision: "ncb", init: "ncb", reset: "ncb", status: "ncb", ncb_check: "ncb",
+      provision: "ncb", init: "ncb", reset: "ncb", status: "ncb", ncb_check: "ncb",  // db-col-ok: UI 操作对应的卡片映射表，非数据库列
       storage_setup: "r2", r2_check: "r2",
       model_check: "model", model_download: "model",
     };

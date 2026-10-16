@@ -81,7 +81,7 @@ function tokenize(text) {
 /* ================= 双时态：是否仍然有效 ================= */
 function isValid(m, now) {
   if (!m) return false;
-  if (m.lifecycle_status === "superseded" || m.status === "superseded") return false;
+  if (m.lifecycle_status === "superseded") return false;
   if (m.invalid_at) {
     var t = Date.parse(String(m.invalid_at));
     if (!isNaN(t) && t <= now) return false;
@@ -94,10 +94,10 @@ function isValid(m, now) {
  * 高频核心事实半衰期长，偶发噪音快速衰减。
  */
 function retention(m, now) {
-  var rc = parseInt(m.retrieval_count != null ? m.retrieval_count : (m.access_count != null ? m.access_count : m.hits), 10);
+  var rc = parseInt(m.retrieval_count, 10);
   if (!rc || rc !== rc) rc = 0;
   var S = 1.0 * (1 + 1.5 * Math.log(1 + rc));
-  var t = Date.parse(String(m.updated_at || m.last_used_at || m.last_accessed_at || m.created_at || ""));
+  var t = Date.parse(String(m.updated_at || m.last_used_at || m.created_at || ""));
   if (isNaN(t)) return 1;
   var days = (now - t) / DAY_MS;
   if (days <= 0) return 1;
@@ -116,8 +116,8 @@ function signatureOf(memories) {
   for (var i = 0; i < n; i++) {
     var m = memories[i];
     if (!m) continue;
-    var rc = (m.retrieval_count != null ? m.retrieval_count : (m.access_count != null ? m.access_count : m.hits)) | 0;
-    var st = m.lifecycle_status || m.status;
+    var rc = m.retrieval_count | 0;
+    var st = m.lifecycle_status;
     sum = (sum + (m.id | 0) + rc * 7) | 0;
     if (st && st !== "active") inact++;
     if (m.invalid_at) inact += 2;
@@ -156,7 +156,7 @@ function buildIndex(memories, now, version) {
     var keys = {};
     if (m.project) keys[String(m.project).toLowerCase()] = 1;
     if (m.category) keys[String(m.category).toLowerCase()] = 1;
-    var entsStr = m.related_entities || m.entities;
+    var entsStr = m.related_entities;
     if (entsStr) {
       var ents = String(entsStr).toLowerCase().split(/[\s,]+/);
       for (var e = 0; e < ents.length; e++) if (ents[e].length >= 2) keys[ents[e]] = 1;
@@ -204,7 +204,7 @@ function lastUserText(messages) {
 function lexicalScore(m, tokens) {
   if (!tokens.length) return 0;
   var title = String(m.title || "").toLowerCase();
-  var ents = String(m.related_entities || m.entities || "").toLowerCase();
+  var ents = String(m.related_entities || "").toLowerCase();
   var tags = String(m.tags || "").toLowerCase();
   var body = String(m.content || "").toLowerCase();
   var score = 0;
@@ -360,8 +360,8 @@ export function onRequest(body, ctx) {
         for (var q = 0; q < cand.length; q++) {
           var cq = cand[q];
           cq._fresh = retention(cq, now);
-          cq._heat = (parseInt(cq.retrieval_count != null ? cq.retrieval_count : (cq.access_count != null ? cq.access_count : cq.hits), 10) || 0);
-          cq._scope = SCOPE_AFFINITY[cq.scope_level || cq.scope] || 2;
+          cq._heat = (parseInt(cq.retrieval_count, 10) || 0);
+          cq._scope = SCOPE_AFFINITY[cq.scope_level] || 2;
         }
         var freshSorted = cand.slice().sort(byDesc(function (x) { return x._fresh; }));
         var heatSorted = cand.slice().sort(byDesc(function (x) { return x._heat; }));
