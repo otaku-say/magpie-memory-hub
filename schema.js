@@ -11,11 +11,12 @@
  */
 
 /** 结构版本号。每次改动 TABLES 都要 +1，并在 MIGRATIONS 里补一条说明。 */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /** 各版本做了什么（给人看，也用于生成变更说明）。 */
 export const MIGRATIONS = {
   1: "初始结构：memories / pitfalls / memhub_meta 三表 + 两个唯一索引",
+  2: "新增 client 来源字段（memories / pitfalls）与 full_content 全文存储（memories）",
 };
 
 /**
@@ -34,8 +35,10 @@ export const TABLES = {
       // 在 memory_save 时报 "Unknown column 'scope' in 'field list'"。
       // 声明必须与 tools.js 的 saveMemory payload 逐字段对齐。
       { name: "scope", type: "VARCHAR", length: 32, default: "'project'" },
+      { name: "client", type: "VARCHAR", length: 64, default: "''" },
       { name: "title", type: "VARCHAR", length: 512, notNull: true },
       { name: "content", type: "TEXT", notNull: true },
+      { name: "full_content", type: "TEXT", nullable: true },
       { name: "tags", type: "VARCHAR", length: 512, default: "''" },
       { name: "entities", type: "VARCHAR", length: 512, default: "''" },
       { name: "related", type: "VARCHAR", length: 512, default: "''" },
@@ -76,6 +79,7 @@ export const TABLES = {
     columns: [
       { name: "id", type: "INT", args: "AUTO_INCREMENT", pk: true },
       { name: "project", type: "VARCHAR", length: 128, default: "'global'" },
+      { name: "client", type: "VARCHAR", length: 64, default: "''" },
       { name: "component", type: "VARCHAR", length: 128, notNull: true },
       { name: "symptom", type: "TEXT", notNull: true },
       { name: "root_cause", type: "TEXT", notNull: true },
@@ -281,7 +285,8 @@ export function detectDrift(current) {
     ok: true, reason: "",
     missingTables: [], missingColumns: [], missingIndexes: [], unknownTables: [],
   };
-  if (!cur || Object.keys(cur).length === 0) {
+  var isValidEmpty = current && !current.error && (current.tables != null || current.schema != null);
+  if ((!cur || Object.keys(cur).length === 0) && !isValidEmpty) {
     res.ok = false;
     res.reason = "读不到当前数据库结构（可能密钥无效、实例名错误或网络不通）";
     return res;

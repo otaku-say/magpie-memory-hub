@@ -395,10 +395,10 @@ export function onRequest(body, ctx) {
         if (String(it.category) === "principle") continue;  // 已在上面注入过
         var line;
         if (useCards && String(it.content || "").length > 160) {
-          /* CCR：长内容只给摘要卡 + ID，Agent 需要时调 memory_expand 展开 */
+          /* CCR：长内容只给摘要卡 + ID，Agent 需要时调 memory_get 展开 */
           line = "- [" + (it.category || "fact") + "] " + cut(it.title, 60) +
                  ": " + cut(it.content, 120) +
-                 " (id=" + it.id + "，需要完整内容可调 memory_expand)\n";
+                 " (id=" + it.id + "，需要完整内容可调 memory_get)\n";
         } else {
           line = "- [" + (it.category || "fact") + "] " + cut(it.title, 120) +
                  ": " + cut(it.content, 400) + "\n";

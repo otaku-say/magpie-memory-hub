@@ -694,17 +694,19 @@ def save_memory(ncb, cfg, m, cache):
     try:
         res = ncb.create("memories", {
             "project": project,
-        "category": category,
-        "scope": m.get("scope") if m.get("scope") in ("user", "project", "session", "turn") else "project",
-        "title": title,
-        "content": content,
-        "tags": str(m.get("tags") or "").lower(),
-        "related": str(m.get("related") or ""),
-        "source": str(m.get("source") or "harvest"),
-        "fingerprint": fp,
-        "confidence_score": int(conf),
-        "status": "active",
-        "superseded_by": 0,
+            "category": category,
+            "scope": m.get("scope") if m.get("scope") in ("user", "project", "session", "turn") else "project",
+            "client": str(m.get("client") or m.get("agent") or "unknown"),
+            "title": title,
+            "content": content,
+            "full_content": str(m.get("full_content") or content),
+            "tags": str(m.get("tags") or "").lower(),
+            "related": str(m.get("related") or ""),
+            "source": str(m.get("source") or "harvest"),
+            "fingerprint": fp,
+            "confidence_score": int(conf),
+            "status": "active",
+            "superseded_by": 0,
             "access_count": 1,
             "invalid_at": None,
             "last_accessed_at": now_str(),
@@ -745,6 +747,7 @@ def save_pitfall(ncb, cfg, p, cache):
     try:
         res = ncb.create("pitfalls", {
             "project": project,
+        "client": str(p.get("client") or p.get("agent") or "unknown"),
         "component": component,
         "symptom": symptom,
         "root_cause": str(p.get("root_cause") or "（由失败→成功相关性推断，待人工确认）"),
@@ -1341,7 +1344,7 @@ def build_snapshot(mems, cap, dormant_days, now_ts):
 
 
 # 只推中间件真正用得上的字段：字段越少，plugins.json 越小、解析越快
-SNAP_FIELDS = ("id", "project", "category", "scope", "title", "content",
+SNAP_FIELDS = ("id", "project", "category", "scope", "client", "title", "content",
                "tags", "entities", "confidence_score", "access_count", "hits",
                "status", "invalid_at", "created_at", "updated_at", "last_accessed_at")
 

@@ -293,12 +293,21 @@ function jsonOut(o) {
 /* ================================================================== *
  * 记忆写入（含指纹去重 + 时序版本链）
  * ================================================================== */
-async function saveMemory(client, cfg, m) {
+async function saveMemory(client, cfg, m, ctx) {
   const project = String(m.project || "global").trim();
   const category = CATEGORIES.includes(m.category) ? m.category : "fact";
   const scope = SCOPES.includes(m.scope) ? m.scope : "project";
+  const callerAgent = (ctx && (ctx.agent || (ctx._ctx && ctx._ctx.agent))) || "";
+  const clientVal = (m.client && String(m.client).trim())
+    || (callerAgent && String(callerAgent).trim())
+    || (m.source_client && String(m.source_client).trim())
+    || (m.agent && String(m.agent).trim())
+    || "unknown";
   const title = String(m.title || "").trim();
   const content = String(m.content || "").trim();
+  const fullContent = (m.full_content != null && String(m.full_content).trim() !== "")
+    ? String(m.full_content)
+    : content;
   const tags = String(m.tags || "").trim().toLowerCase();
   const related = String(m.related || "").trim();
   const source = String(m.source || "").trim();
@@ -349,8 +358,10 @@ async function saveMemory(client, cfg, m) {
     project,
     category,
     scope,
+    client: clientVal,
     title,
     content,
+    full_content: fullContent,
     tags,
     related,
     source,
@@ -421,8 +432,8 @@ async function saveMemory(client, cfg, m) {
  * 工具实现
  * ================================================================== */
 
-async function memorySave(client, cfg, args) {
-  const r = await saveMemory(client, cfg, Object.assign({ source: "agent" }, args));
+async function memorySave(client, cfg, args, ctx) {
+  const r = await saveMemory(client, cfg, Object.assign({ source: "agent" }, args), ctx);
   return jsonOut(r);
 }
 
@@ -435,6 +446,7 @@ async function memorySearch(client, cfg, args) {
   if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
   if (args.category) pool = pool.filter((r) => String(r.category || "") === args.category);
   if (args.scope) pool = pool.filter((r) => String(r.scope || "") === args.scope);
+  if (args.client) pool = pool.filter((r) => String(r.client || "") === String(args.client));
   // 历史版本默认不返回（Headroom：查询默认排除 superseded）
   if (args.include_history !== true) pool = pool.filter((r) => r.status !== "superseded");
 
@@ -448,6 +460,7 @@ async function memorySearch(client, cfg, args) {
     project: x.row.project,
     category: x.row.category,
     scope: x.row.scope,
+    client: x.row.client || "",
     title: x.row.title,
     content: x.row.content,
     tags: x.row.tags,
@@ -462,15 +475,17 @@ async function memorySearch(client, cfg, args) {
 
 async function memoryList(client, cfg, args) {
   const limit = Math.max(1, Math.min(Number(args.limit) || 20, 100));
-  const all = (await fetchAll(client, "memories", { status: "active" })).filter(
+  let all = (await fetchAll(client, "memories", { status: "active" })).filter(
     (r) => r.status !== "superseded"
   );
+  if (args.client) all = all.filter((r) => String(r.client || "") === String(args.client));
   const sorted = all.sort((a, b) => rankMemory(b) - rankMemory(a)).slice(0, limit);
   return jsonOut({
     total_active: all.length,
     returned: sorted.length,
     memories: sorted.map((r) => ({
       id: r.id, project: r.project, category: r.category, scope: r.scope,
+      client: r.client || "",
       title: r.title, tags: r.tags, access_count: r.access_count,
     })),
   });
@@ -503,8 +518,14 @@ async function memoryContext(client, cfg, args) {
   return jsonOut({ injected: n, chars: block.length, block: n ? block.trim() : "" });
 }
 
-async function pitfallSave(client, cfg, args) {
+async function pitfallSave(client, cfg, args, ctx) {
   const project = String(args.project || "global").trim();
+  const callerAgent = (ctx && (ctx.agent || (ctx._ctx && ctx._ctx.agent))) || "";
+  const clientVal = (args.client && String(args.client).trim())
+    || (callerAgent && String(callerAgent).trim())
+    || (args.source_client && String(args.source_client).trim())
+    || (args.agent && String(args.agent).trim())
+    || "unknown";
   const component = String(args.component || "").trim();
   const symptom = String(args.symptom || "").trim();
   const rootCause = String(args.root_cause || "").trim();
@@ -543,7 +564,7 @@ async function pitfallSave(client, cfg, args) {
   let created;
   try {
     created = await client.create("pitfalls", {
-      project, component, symptom, root_cause: rootCause, solution,
+      project, client: clientVal, component, symptom, root_cause: rootCause, solution,
       severity, error_type: errorType, tags, fingerprint: fp,
       recurrence: 1, last_occurred_at: now,
     });
@@ -570,6 +591,8 @@ async function pitfallSearch(client, cfg, args) {
 
   const all = await fetchAll(client, "pitfalls", {});
   let pool = all;
+  if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
+  if (args.client) pool = pool.filter((r) => String(r.client || "") === String(args.client));
   if (args.component) pool = pool.filter((r) => String(r.component || "") === args.component);
 
   const scored = pool
@@ -597,8 +620,23 @@ async function memoryGet(client, cfg, args) {
       last_accessed_at: new Date().toISOString().slice(0, 19).replace("T", " "),
     });
   } catch (e) { /* 计数失败不影响读取 */ }
-  return jsonOut({ id: hit.id, category: hit.category, scope: hit.scope,
-    title: hit.title, content: hit.content, tags: hit.tags, entities: hit.entities });
+  const full = (hit.full_content != null && String(hit.full_content).trim() !== "")
+    ? hit.full_content
+    : hit.content;
+  return jsonOut({
+    id: hit.id,
+    project: hit.project,
+    category: hit.category,
+    scope: hit.scope,
+    client: hit.client || "",
+    title: hit.title,
+    content: full,
+    summary: hit.content,
+    full_content: full,
+    tags: hit.tags,
+    entities: hit.entities,
+    _note: "已返回完整原文（见 full_content 与 content），summary 为注入卡片所用摘要",
+  });
 }
 
 /* 软失效：不物理删除，写 invalid_at，保留审计链 */
@@ -649,15 +687,17 @@ const TOOLS = {
         project: { type: "string", description: "项目名，默认 global" },
         category: { type: "string", enum: CATEGORIES, description: "记忆分类。principle=行为准则，会被无条件置顶注入" },
         scope: { type: "string", enum: SCOPES, description: "作用域，默认 project" },
+        client: { type: "string", description: "产生该记忆的客户端标识（如 minis、codex、claude 等，可选，默认取调用者智能体）" },
         title: { type: "string", description: "精简标题（<=40字）" },
-        content: { type: "string", description: "记忆正文，要具体、可复用" },
+        content: { type: "string", description: "记忆正文/摘要，要具体、可复用" },
+        full_content: { type: "string", description: "完整原文（可选，未提供时默认等于 content）" },
         tags: { type: "string", description: "逗号分隔的检索关键词" },
         related: { type: "string", description: "相关实体/技术栈" },
         confidence: { type: "number", description: "置信度 0~1，默认 1" },
       },
       required: ["title", "content"],
     },
-    run: (args, ctx) => memorySave(ctx._client, ctx._cfg, args),
+    run: (args, ctx) => memorySave(ctx._client, ctx._cfg, args, ctx),
   },
 
   memory_search: {
@@ -670,6 +710,7 @@ const TOOLS = {
         project: { type: "string", description: "限定项目" },
         category: { type: "string", enum: CATEGORIES, description: "限定分类" },
         scope: { type: "string", enum: SCOPES, description: "限定作用域" },
+        client: { type: "string", description: "限定客户端来源（如 minis、codex、claude）" },
         include_history: { type: "boolean", description: "是否包含已被 superseded 的历史版本" },
         limit: { type: "integer", description: "返回条数，默认 10，最大 50" },
       },
@@ -681,7 +722,10 @@ const TOOLS = {
     description: "列出活跃记忆，按综合热度降序。用于总览已积累的知识。",
     args: {
       type: "object",
-      properties: { limit: { type: "integer", description: "返回条数，默认 20，最大 100" } },
+      properties: {
+        client: { type: "string", description: "限定客户端来源（如 minis、codex、claude）" },
+        limit: { type: "integer", description: "返回条数，默认 20，最大 100" },
+      },
     },
     run: (args, ctx) => memoryList(ctx._client, ctx._cfg, args),
   },
@@ -729,6 +773,7 @@ const TOOLS = {
       type: "object",
       properties: {
         project: { type: "string", description: "项目名" },
+        client: { type: "string", description: "产生该踩坑记录的客户端标识（可选）" },
         component: { type: "string", description: "出问题的组件" },
         symptom: { type: "string", description: "错误现象或报错原文" },
         root_cause: { type: "string", description: "技术根因" },
@@ -739,7 +784,7 @@ const TOOLS = {
       },
       required: ["component", "symptom", "root_cause", "solution"],
     },
-    run: (args, ctx) => pitfallSave(ctx._client, ctx._cfg, args),
+    run: (args, ctx) => pitfallSave(ctx._client, ctx._cfg, args, ctx),
   },
 
   pitfall_search: {
@@ -748,6 +793,8 @@ const TOOLS = {
       type: "object",
       properties: {
         query: { type: "string", description: "症状/根因/解法关键词" },
+        project: { type: "string", description: "限定项目" },
+        client: { type: "string", description: "限定客户端来源" },
         component: { type: "string", description: "限定组件" },
         limit: { type: "integer", description: "返回条数，默认 10" },
       },
@@ -993,6 +1040,7 @@ export const MagpieMemoryHub = async (input, options) => {
       description: def.description,
       args: def.args,
       execute: async (args, ctx) => {
+        const callerAgent = (ctx && ctx.agent) != null ? ctx.agent : "";
         const abortSignal = (ctx && ctx.abort) || null;
         const callCfg = Object.assign({}, cfg, { signal: abortSignal });
         const callClient = makeClient(callCfg, abortSignal);
