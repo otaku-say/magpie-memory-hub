@@ -54,7 +54,9 @@ function restClient(cfg) {
   if (!secret) {
     const err = new Error(
       "未配置数据库 Secret Key。R2 的「列举 / 删除」走 NoCodeBackend 的 REST，需要 Secret Key；" +
-      "只有「创建 bucket」需要 MCP key。"
+      "只有「创建 bucket」需要 MCP key。" +
+      "解决办法：打开 NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key，" +
+      "填到本插件设置页的「数据库 Secret Key」一栏（插件无法自行取回，它只在建库时返回一次）。"
     );
     err.code = "NO_SECRET";
     throw err;
@@ -202,6 +204,20 @@ export function explainProbeFailure(err) {
           "填入新的 Account ID / Access Key / Secret。" +
           "插件无法替 NCB 覆盖它在账号层保存的旧连接 —— 这是平台边界。",
         "③ 改完后回到插件重新点「挂载 R2 存储」，本次会用真实上传验证。",
+      ],
+    };
+  }
+  /* 数据库 Secret Key 本身失效（与 Cloudflare 凭据无关）。
+   * 典型原因：数据库被删除重建，NCB 换了新密钥，而插件手里还是旧的。 */
+  if (/Invalid\s*secret[_-]?key|secret_key/i.test(m)) {
+    return {
+      kind: "BAD_SECRET_KEY",
+      title: "数据库 Secret Key 已失效",
+      detail: "插件手里的 Secret Key 被 NoCodeBackend 拒绝了。常见原因：数据库删除重建后 NCB 换了新密钥。",
+      actions: [
+        "打开 NoCodeBackend 控制台 → 找到该数据库 → 复制当前的 Secret Key。",
+        "填到本插件设置页的「数据库 Secret Key」一栏（填了就以你填的为准，不再用自动捕获的）。",
+        "也可以点「一键创建数据库」重新走一次建库流程，届时会自动捕获并覆盖为新密钥。",
       ],
     };
   }
