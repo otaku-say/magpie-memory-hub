@@ -158,9 +158,10 @@ export function buildDelete(table, id) {
  * 造一个与原来 REST 客户端**接口完全一致**的对象，
  * 这样 tools.js 的业务逻辑一行都不用改。
  */
-export function makeMcpClient(cfg) {
+export function makeMcpClient(cfg, signal) {
   const db = (cfg && (cfg.instance || cfg.ncb_instance)) || "";
-  const mcp = new NcbMcp({ apiKey: (cfg && (cfg.mcpKey || cfg.mcp_key)) || "" });
+  const sig = signal || (cfg && cfg.signal) || null;
+  const mcp = new NcbMcp({ apiKey: (cfg && (cfg.mcpKey || cfg.mcp_key)) || "", signal: sig });
 
   async function run(sql) {
     const out = await mcp.executeSql(db, sql);

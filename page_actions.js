@@ -32,6 +32,8 @@ import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
 import { dbInit, dbReset, dbStatus, dbProvision, storageSetup, ncbCheck, RESET_CONFIRM } from "./db_tools.js";
+import { r2Setup, r2Check } from "./r2.js";
+import { checkLocalModel, downloadModel, modelDir, human, MODEL_SPEC } from "./model_check.js";
 
 /** 插件目录下的状态文件路径（供 iframe 内设置页通过 script 标签加载）。 */
 export const STATUS_JS_PATH = fileURLToPath(new URL("./_status.js", import.meta.url));
@@ -53,7 +55,99 @@ export const OPS = {
   reset: "删除插件三张表（结构与数据一并删除，不可恢复）",
   status: "只读检查结构状态",
   ncb_check: "检测 MCP Key 有效性并检查目标数据库与结构状态（只读检测）",
+  r2_check: "检测 R2 凭据是否真的可用（真实上传探针，只读检测）",
+  model_check: "检测本地多语言小模型是否已就绪（只读检测）",
+  model_download: "下载并安装本地多语言小模型（LLMLingua-2 mBERT INT8，约 174MB，支持断点续传与校验）",
 };
+
+let _modelDownloadTask = null;
+
+export function isModelDownloading() {
+  return _modelDownloadTask !== null;
+}
+
+export function startBackgroundModelDownload(cfg, action) {
+  if (_modelDownloadTask) return _modelDownloadTask;
+
+  writeCardStatus("model", {
+    at: Date.now(),
+    op: "model_download",
+    ok: true,
+    title: "正在下载本地小模型…",
+    lines: [
+      "准备连接镜像站并校验已有文件…",
+      "目标模型：LLMLingua-2 mBERT（多语言 INT8，174MB）",
+      "存储目录：" + modelDir(),
+    ],
+    progress: {
+      percent: 0,
+      file: "准备中",
+      done_bytes: 0,
+      total_bytes: MODEL_SPEC.approx_bytes,
+      status: "starting",
+    },
+  });
+
+  let lastWrite = 0;
+  const onProgress = (info) => {
+    const now = Date.now();
+    if (now - lastWrite > 800 || info.percent === 100 || info.status === "verifying") {
+      lastWrite = now;
+      writeCardStatus("model", {
+        at: now,
+        op: "model_download",
+        ok: true,
+        title: info.status === "verifying"
+          ? `正在校验 ${info.file} 的 SHA-256…`
+          : `正在下载模型：${info.percent}%（${info.file}）`,
+        lines: [
+          `当前文件：${info.file}（${human(info.done_bytes)} / ${human(info.total_bytes)}）`,
+          `总体进度：${info.percent}%（已完成 ${info.file_index - 1}/${info.total_files} 个文件）`,
+          `落点目录：${modelDir()}`,
+        ],
+        progress: info,
+      });
+    }
+  };
+
+  _modelDownloadTask = downloadModel(cfg, action, onProgress)
+    .then((res) => {
+      _modelDownloadTask = null;
+      writeCardStatus("model", {
+        at: Date.now(),
+        op: "model_download",
+        ok: true,
+        title: "本地小模型下载并校验成功",
+        lines: [
+          "全部 4 个文件已完成校验并原子落地（总大小约 174.1 MB）",
+          "文件列表：model.onnx、tokenizer.json、vocab.txt、config.json",
+          "存储目录：" + modelDir() + "（Magpie 持久卷）",
+          "离线语义压缩已就绪，请求时可按需启用多语言抽取式压缩",
+        ],
+        progress: { percent: 100, status: "done" },
+      });
+      return res;
+    })
+    .catch((err) => {
+      _modelDownloadTask = null;
+      const errMsg = String((err && err.message) || err);
+      writeCardStatus("model", {
+        at: Date.now(),
+        op: "model_download",
+        ok: false,
+        title: "本地小模型下载失败",
+        lines: [
+          "失败原因：" + errMsg,
+          "旧模型文件（若存在）未受破坏，仍可继续使用",
+          "已下载的临时分块已保留，再次点击可断点续传",
+          "排查建议：检查网络连接是否可访问 hf-mirror.com 或 huggingface.co",
+        ],
+        progress: { percent: 0, status: "failed", error: errMsg },
+      });
+    });
+
+  return _modelDownloadTask;
+}
 
 function statePath(fs, os, path) {
   try {
@@ -229,6 +323,34 @@ async function execute(action, cfg, fs, sp, state) {
     else if (action.op === "init") result = await dbInit(cfg, args);
     else if (action.op === "reset") result = await dbReset(cfg, args);
     else if (action.op === "ncb_check") result = await ncbCheck(cfg, args);
+    else if (action.op === "r2_check") result = await r2Check(cfg, args);
+    else if (action.op === "model_check") result = await checkLocalModel({ checkUpstream: true });
+    else if (action.op === "model_download") {
+      if (isModelDownloading()) {
+        result = {
+          ok: true,
+          action: "IN_PROGRESS",
+          title: "本地小模型正在下载中",
+          lines: [
+            "后台下载任务已在进行中，无需重复触发",
+            "支持断点续传与 sha256 校验，请关注卡片进度条",
+            "完成后将自动就绪并更新卡片状态",
+          ],
+        };
+      } else {
+        startBackgroundModelDownload(cfg, action);
+        result = {
+          ok: true,
+          action: "STARTED",
+          title: "已开始下载本地小模型",
+          lines: [
+            "已启动后台下载任务（约 174MB，支持断点续传与 sha256 校验）",
+            "国内优先走 hf-mirror.com 镜像，失败自动回退官方 HuggingFace",
+            "下载期间不会阻塞 agent 对话，可在本卡片查看实时下载进度",
+          ],
+        };
+      }
+    }
     else result = await dbStatus(cfg, args);
   } catch (e) {
     result = { ok: false, error: String(e && e.message || e) };
@@ -236,7 +358,15 @@ async function execute(action, cfg, fs, sp, state) {
 
   // 写入卡片状态文件（供设置页读取）
   try {
-    const cardKey = action.op === "storage_setup" ? "r2" : "ncb";
+    // 结果写到哪张卡片 —— 必须逐项显式映射，不能只分两类。
+    // 早先写成 `op === "storage_setup" ? "r2" : "ncb"`，导致 r2_check 的结果
+    // 被写进 NoCodeBackend 卡片、model_check 干脆无处可去（它当时也没实现）。
+    const CARD_OF_OP = {
+      provision: "ncb", init: "ncb", reset: "ncb", status: "ncb", ncb_check: "ncb",
+      storage_setup: "r2", r2_check: "r2",
+      model_check: "model", model_download: "model",
+    };
+    const cardKey = CARD_OF_OP[action.op] || "ncb";
     writeCardStatus(cardKey, result, action.op);
   } catch (e) {
     console.error("[memory-hub] writeCardStatus execution error:", (e && e.message) || e);
@@ -288,13 +418,15 @@ export function formatCardStatus(key, rawResult, opHint) {
 
   // 若传入的已具备完整的 title 和 lines，则直接标准化后返回
   if (typeof res.title === "string" && Array.isArray(res.lines) && res.lines.length >= 2) {
-    return {
+    const card = {
       at,
       op,
       ok,
       title: res.title,
       lines: res.lines.map(String).slice(0, 5),
     };
+    if (res.progress) card.progress = res.progress;
+    return card;
   }
 
   let title = "";
@@ -421,13 +553,15 @@ export function formatCardStatus(key, rawResult, opHint) {
     lines.push(ok ? "操作已正常完成" : "请根据提示排查后重试");
   }
 
-  return {
+  const outCard = {
     at,
     op,
     ok,
     title: title || (ok ? "操作成功" : "操作失败"),
     lines: lines.slice(0, 5),
   };
+  if (res.progress) outCard.progress = res.progress;
+  return outCard;
 }
 
 /**
@@ -439,8 +573,8 @@ export function formatCardStatus(key, rawResult, opHint) {
  *   - 静默降级：只读目录或写文件报错时不抛异常，只在 console.error 里打日志
  */
 export function writeCardStatus(key, payloadOrResult, opHint, customStatusPath) {
-  if (key !== "ncb" && key !== "r2") {
-    console.error(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb" or "r2"`);
+  if (key !== "ncb" && key !== "r2" && key !== "model") {
+    console.error(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2" or "model"`);
     return false;
   }
 

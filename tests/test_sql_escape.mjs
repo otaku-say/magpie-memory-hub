@@ -6,7 +6,7 @@
  */
 import { makeMcpClient, sqlValue, buildSelect, buildInsert, buildUpdate, buildDelete, safeIdent } from "../mcp_client.js";
 
-const DB = "41694_test";
+const DB = process.env.NCB_TEST_DB || "41694_agent_memory";   // 41694_test 的 fingerprint 列曾是 CHAR(32)，而 db_init 只增不改、修不了它
 const KEY = process.env.NOCODEBACKEND_API_KEY || "";
 let fail = 0;
 const ok = (m) => console.log(`  ✓ ${m}`);

@@ -18,7 +18,7 @@ import { r2Setup, r2Upload, r2Guide } from "./r2.js";
 /** 清库需要显式确认串，避免 agent 误触。 */
 export const RESET_CONFIRM = "RESET";
 
-function mcpOf(cfg) {
+function mcpOf(cfg, signal) {
   const key = (cfg && (cfg.mcp_key || cfg.mcpKey)) || "";
   if (!key) {
     const err = new Error(
@@ -29,7 +29,7 @@ function mcpOf(cfg) {
     err.code = "NO_MCP_KEY";
     throw err;
   }
-  return new NcbMcp({ apiKey: key });
+  return new NcbMcp({ apiKey: key, signal: signal || (cfg && cfg.signal) || null });
 }
 
 function dbOf(cfg, args) {
@@ -50,13 +50,23 @@ function dbOf(cfg, args) {
  * **不需要任何凭据**就返回完整表结构（带 Secret Key 也行）。
  * 于是即使没填 MCP key，插件也能做只读的结构检查——只是不能建表。
  */
-export async function fetchPublicSchema(database) {
+export async function fetchPublicSchema(database, opts) {
+  const externalSignal = (opts && (opts.signal || (opts instanceof (typeof AbortSignal !== "undefined" ? AbortSignal : Object) ? opts : null))) || null;
+  if (externalSignal && externalSignal.aborted) {
+    return { ok: false, error: "操作已被取消 (aborted)" };
+  }
   const url = "https://app.nocodebackend.com/api/public/schema?instance=" + encodeURIComponent(database);
   const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
+  let abortListener = null;
+  if (ctrl && externalSignal) {
+    abortListener = () => ctrl.abort();
+    externalSignal.addEventListener("abort", abortListener, { once: true });
+  }
   try {
     const res = await fetch(url, { signal: ctrl ? ctrl.signal : undefined });
     if (timer) clearTimeout(timer);
+    if (externalSignal && abortListener) externalSignal.removeEventListener("abort", abortListener);
     const text = await res.text();
     let body = null;
     try { body = JSON.parse(text); } catch (e) { return { ok: false, error: "返回不是 JSON" }; }
@@ -66,7 +76,9 @@ export async function fetchPublicSchema(database) {
     return { ok: true, schema: body, via: "public-schema" };
   } catch (e) {
     if (timer) clearTimeout(timer);
-    return { ok: false, error: String(e && e.message || e) };
+    if (externalSignal && abortListener) externalSignal.removeEventListener("abort", abortListener);
+    const isAbort = externalSignal && externalSignal.aborted;
+    return { ok: false, error: isAbort ? "操作已被取消 (aborted)" : String(e && e.message || e) };
   }
 }
 
@@ -463,11 +475,21 @@ export async function ncbCheck(cfg, args) {
     };
   }
 
-  const mcp = new NcbMcp({ apiKey: key });
+  const signal = (cfg && cfg.signal) || null;
+  if (signal && signal.aborted) {
+    const abortErr = new Error("操作已被取消 (aborted)");
+    abortErr.name = "AbortError";
+    throw abortErr;
+  }
+
+  const mcp = new NcbMcp({ apiKey: key, signal });
   let dbListText = "";
   try {
     dbListText = await mcp.listDatabasesText();
   } catch (e) {
+    if (e.name === "AbortError" || (signal && signal.aborted)) {
+      throw e;
+    }
     const errMsg = String((e && e.message) || e);
     const diag = explainMcpFailure(errMsg);
     return {

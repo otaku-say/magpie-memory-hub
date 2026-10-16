@@ -743,15 +743,171 @@ code, .mono {
   }
 }
 
-/* ---------- 页面级标题 ---------- */
-.wrap > h1 {
+/* ---------- 页面级标题与介绍区 ---------- */
+.header-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin: 0 0 4px;
+}
+.header-row h1,
+.wrap > h1 {
+  margin: 0;
   font-size: 17px;
   font-weight: 600;
   color: var(--magpie-fg);
 }
+.version-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--magpie-accent-soft);
+  color: var(--magpie-accent-fg);
+  font-size: var(--fs-badge);
+  font-weight: 600;
+  font-family: var(--magpie-code);
+  border: 1px solid var(--magpie-line);
+}
 .lead {
-  margin: 0 0 20px;
+  margin: 0 0 16px;
   color: var(--magpie-muted);
   font-size: var(--fs-hint);
+  line-height: 1.5;
+}
+.intro-guide {
+  margin-bottom: 20px;
+  border: 1px solid var(--magpie-line);
+  border-radius: var(--radius);
+  background: var(--magpie-card);
+  overflow: hidden;
+}
+.intro-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--fs-label);
+  font-weight: 500;
+  color: var(--magpie-fg-2);
+}
+.intro-summary:hover {
+  background: var(--magpie-accent-soft);
+}
+.intro-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.intro-badge {
+  font-size: var(--fs-badge);
+  color: var(--magpie-muted);
+  border: 1px solid var(--magpie-line);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+}
+.intro-content {
+  padding: 10px 14px 14px;
+  border-top: 1px solid var(--magpie-line);
+  background: color-mix(in srgb, var(--magpie-card) 60%, var(--magpie-bg));
+}
+.intro-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.intro-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.step-badge {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  border-radius: 50%;
+  background: var(--magpie-accent-soft);
+  color: var(--magpie-fg);
+  font-size: 11px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+.step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-hint);
+  color: var(--magpie-fg-2);
+}
+.step-body strong {
+  color: var(--magpie-fg);
+  font-size: var(--fs-label);
+}
+.step-body code {
+  font-family: var(--magpie-code);
+  font-size: var(--fs-code);
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--magpie-fg) 8%, transparent);
+}
+
+/* ---------- 等待态：倒计时进度条 ---------- */
+.action-status-box.waiting {
+  border-color: var(--magpie-accent);
+}
+.action-status-badge.wait {
+  background: var(--magpie-accent-soft);
+  color: var(--magpie-accent);
+}
+.wait-bar {
+  height: 4px;
+  margin: 8px 0 6px;
+  border-radius: 2px;
+  background: var(--magpie-line);
+  overflow: hidden;
+}
+.wait-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--magpie-accent);
+  transition: width .9s linear;
+}
+.action-status-badge.warn {
+  background: color-mix(in srgb, var(--magpie-amber) 15%, transparent);
+  color: var(--magpie-amber);
+}
+
+/* ---------- 模型下载进度条 ---------- */
+.model-progress-box {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: var(--magpie-bg);
+  border: 1px solid var(--magpie-line);
+  border-radius: 6px;
+}
+.model-progress-bar {
+  height: 6px;
+  background: var(--magpie-line);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.model-progress-fill {
+  height: 100%;
+  background: var(--magpie-accent);
+  transition: width 0.3s ease;
+}
+.model-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--magpie-muted);
+}
+.model-progress-pct {
+  font-weight: 600;
+  color: var(--magpie-fg);
 }

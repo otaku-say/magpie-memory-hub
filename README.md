@@ -245,6 +245,24 @@ sslv3 alert handshake failure (SSL alert number 40)
 
 推荐工作流：`storage_upload` 拿 url → `memory_save` 存成 `category=file` 的记忆 → 日后 `memory_search` 找回。
 
+## 规范与官方文档
+
+- **Magpie 官方插件开发规范文档**：[https://usemagpie.ai/docs/zh/plugins](https://usemagpie.ai/docs/zh/plugins)
+- 本插件严格遵循 Magpie 官方插件协议实现，无第三方 npm 运行时依赖。
+
+### 清单字段声明（package.json）
+
+| 字段 | 含义与取值说明 |
+|---|---|
+| `main: "./tools.js"` | 插件宿主（Bun/Node）加载入口。宿主把所有模块导出的每个函数当成插件加载；本模块严格保证只导出 1 个插件函数 `MagpieMemoryHub`，所有辅助逻辑均为内部函数，杜绝多函数入口污染。 |
+| `magpie.middleware: "./memory.middleware.js"` | 网关中间件入口。在网关 Go 进程的 moejs 运行时中执行，导出 `onRequest`、`onEvent`、`onResponse` 标准钩子。遵循官方文档规范，因兼顾 Chat Completions / Responses / Anthropic 多种协议，不在模块内声明静态 `events`（Chat Completions 事件无名字，声明 events 会导致流式事件丢失）。 |
+| `magpie.maxConcurrency: 4` | 控制每个账号同时接多少个请求（1-1000 整数）。本插件的 MCP 工具层网络请求面向 NoCodeBackend REST/MCP 与 Cloudflare R2，取 `4` 与官方标准示例保持一致，既能满足日常并发需求，又可防止高并发请求触发第三方数据库速率限制或 429 报错。 |
+| `magpie.icon: "./icon.svg"` | 插件在 Magpie 发现页与已安装列表展示的矢量图标。 |
+| `magpie.page: { title, file, icon }` | 插件在 Magpie 窗口侧边栏中的独立配置页。运行在 `sandbox="allow-scripts"` 且 `connect-src 'none'` 的独立 iframe 沙盒中，仅通过 `_magpie/bridge.js` 与宿主安全通信。 |
+| `magpie.options` | 插件在 `plugins.json` 中的初始推荐选项。支持用户在设置页或通过 `magpie plugin options` 命令行进行修改。 |
+| `files: [...]` | npm 发布白名单，仅打包发布运行时所需的核心脚本、HTML、CSS、SVG 与文档，排除所有测试用例与开发辅助脚本。 |
+| `permissions` | 按照官方规范，**仅当页面调用 `magpie.read("usage:summary")` 或 `magpie.read("providers:list")` 时才需声明**。本插件设置页不读取敏感用量或供应商列表，因此**按最小权限原则不声明 permissions**。 |
+
 ## 能力清单
 
 ### 网关中间件（moejs，纯同步、每请求零 O(n)）

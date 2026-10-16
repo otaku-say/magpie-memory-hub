@@ -40,8 +40,12 @@ export const TABLES = {
       { name: "entities", type: "VARCHAR", length: 512, default: "''" },
       { name: "related", type: "VARCHAR", length: 512, default: "''" },
       { name: "source", type: "VARCHAR", length: 64, default: "''" },
-      // 指纹恒为 32 位十六进制，CHAR 定长既准确又更省索引空间
-      { name: "fingerprint", type: "CHAR", length: 32, notNull: true },
+      /* 指纹目前恰好是 32 位十六进制（tools.js 与 harvest.py 都 slice(0,32)）。
+       * 曾改成 CHAR(32) 想省索引空间，但实测立刻暴露问题：
+       * 任何稍长的值都会直接 `Data too long for column` 报错，而省下的
+       * 只有 32 字节/行 —— 这点收益完全抵不上「零余量」带来的脆弱性。
+       * 故保持 VARCHAR(64)。 */
+      { name: "fingerprint", type: "VARCHAR", length: 64, notNull: true },
       { name: "confidence_score", type: "INT", default: "100" },
       // 16 太紧（'superseded' 已占 10），留出余量给未来状态
       { name: "status", type: "VARCHAR", length: 24, default: "'active'" },
@@ -79,7 +83,7 @@ export const TABLES = {
       { name: "severity", type: "VARCHAR", length: 16, default: "'medium'" },
       { name: "error_type", type: "VARCHAR", length: 64, default: "''" },
       { name: "tags", type: "VARCHAR", length: 512, default: "''" },
-      { name: "fingerprint", type: "CHAR", length: 32, notNull: true },
+      { name: "fingerprint", type: "VARCHAR", length: 64, notNull: true },
       { name: "recurrence", type: "INT", default: "1" },
       { name: "invalid_at", type: "DATETIME", nullable: true },
       { name: "invalid_reason", type: "VARCHAR", length: 64, default: "''" },

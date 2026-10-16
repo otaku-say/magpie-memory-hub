@@ -46,6 +46,7 @@
   var current = {};
   var lastSubmitTime = 0;
   var pollingTimer = null;
+  var countdownTimer = null;
 
   function escapeHtml(str) {
     return String(str || "")
@@ -201,11 +202,59 @@
     return "";
   }
 
+  /* 卡片 key → 状态容器 id。多处共用，提成常量避免各写一份写歪。 */
+  var containerMap = {
+    ncb: "db_action_status",
+    r2: "r2_action_status",
+    model: "model_action_status"
+  };
+
   /* ---------------- 状态展示与结果回传渲染 ---------------- */
+  function updateModelButtonState(statusObj) {
+    var btn = $("btn_download_model");
+    if (!btn) return;
+    if (!statusObj) {
+      btn.textContent = "一键下载模型";
+      btn.disabled = false;
+      btn.style.display = "";
+      return;
+    }
+    var prog = statusObj.progress;
+    var isDownloading = prog && (prog.status === "downloading" || prog.status === "verifying" || prog.status === "starting");
+    if (isDownloading) {
+      btn.textContent = "正在下载…";
+      btn.disabled = true;
+      btn.style.display = "";
+      return;
+    }
+    var isUpdate = statusObj.verdict === "UPDATE_AVAILABLE" ||
+      (statusObj.title && (statusObj.title.indexOf("新版本") !== -1 || statusObj.title.indexOf("更新") !== -1));
+    if (isUpdate) {
+      btn.textContent = "更新模型";
+      btn.disabled = false;
+      btn.style.display = "";
+      return;
+    }
+    if (statusObj.ok === true) {
+      btn.textContent = "模型已就绪";
+      btn.disabled = true;
+      btn.style.display = "";
+      return;
+    }
+    // 未安装或损坏
+    btn.textContent = "一键下载模型";
+    btn.disabled = false;
+    btn.style.display = "";
+  }
+
   function renderStatusBlock(containerId, statusObj) {
     var el = $(containerId);
     if (!el) return;
     if (!statusObj || !statusObj.title) return;
+
+    if (containerId === "model_action_status") {
+      updateModelButtonState(statusObj);
+    }
 
     el.style.display = "block";
     var okClass = statusObj.ok ? "ok" : "bad";
@@ -219,6 +268,16 @@
       html += '<span class="action-status-time">' + escapeHtml(timeStr) + "</span>";
     }
     html += "</div>";
+
+    if (statusObj.progress && typeof statusObj.progress.percent === "number") {
+      var pct = Math.min(100, Math.max(0, statusObj.progress.percent));
+      var fName = statusObj.progress.file || "下载中";
+      var statTxt = statusObj.progress.status === "verifying" ? "正在校验 SHA-256…" : (pct + "%");
+      html += '<div class="model-progress-box">' +
+        '<div class="model-progress-bar"><div class="model-progress-fill" style="width:' + pct + '%;"></div></div>' +
+        '<div class="model-progress-meta"><span>' + escapeHtml(fName) + '</span><span class="model-progress-pct">' + escapeHtml(statTxt) + '</span></div>' +
+      '</div>';
+    }
 
     if (Array.isArray(statusObj.lines) && statusObj.lines.length > 0) {
       html += '<ul class="action-status-lines">';
@@ -280,52 +339,135 @@
     head.appendChild(script);
   }
 
-  function startPollingStatus(targetCard, submitTime) {
-    if (pollingTimer) {
-      clearInterval(pollingTimer);
-      pollingTimer = null;
+  /* 等待宿主动作的倒计时 + 重试。
+   *
+   * 为什么必须显式给出「倒计时 + 重试」：
+   *   宿主动作是**异步**的（页面只写一个信标，宿主在下次被调用时才执行，
+   *   结果经 _status.js 回传）。这个等待窗口最长 60 秒，期间如果只显示一句
+   *   「已提交」，用户会以为按钮坏了。所以必须把「在等什么、还要等多久、
+   *   等不到怎么办」三件事都摆在卡片里。
+   */
+  var WAIT_SECONDS = 60;
+
+  function waitingHtml(cardKey, left, totalWait) {
+    var total = totalWait || WAIT_SECONDS;
+    var pct = Math.max(0, Math.min(100, Math.round((total - left) / total * 100)));
+    var isDownload = cardKey === "model" && total > WAIT_SECONDS;
+    return '' +
+      '<div class="action-status-header">' +
+        '<span class="action-status-badge wait">⏳ ' + (isDownload ? "下载中" : "等待中") + '</span>' +
+        '<strong class="action-status-title">' + (isDownload ? "正在进行后台下载与校验…" : "正在等待宿主执行…") + '</strong>' +
+        '<span class="action-status-time">剩余 ' + left + ' 秒</span>' +
+      '</div>' +
+      '<div class="wait-bar"><i style="width:' + pct + '%"></i></div>' +
+      '<ul class="action-status-lines">' +
+        (isDownload
+          ? '<li>模型约 174MB，支持断点续传与 SHA-256 校验。</li><li>请耐心等待进度回传，完成后将自动刷新。</li>'
+          : '<li>页面只能提交任务，真正执行发生在宿主的下一次调用。</li><li>拿到结果会自动显示，无需手动刷新。</li>') +
+      '</ul>';
+  }
+
+  function timeoutHtml(cardKey, totalWait) {
+    var total = totalWait || WAIT_SECONDS;
+    return '' +
+      '<div class="action-status-header">' +
+        '<span class="action-status-badge warn">⌛ 超时</span>' +
+        '<strong class="action-status-title">宿主尚未回传结果</strong>' +
+      '</div>' +
+      '<ul class="action-status-lines">' +
+        '<li>已等待 ' + total + ' 秒。常见原因：宿主还没被调用、或 _status.js 所在目录不可写。</li>' +
+        '<li>可点下方「重新查询」，或与 agent 对话一次触发宿主加载后再查。</li>' +
+      '</ul>' +
+      '<div class="btn-row" style="margin-top:10px;">' +
+        '<button type="button" class="tiny" data-retry="' + cardKey + '">重新查询</button>' +
+      '</div>';
+  }
+
+  function startPollingStatus(targetCard, submitTime, opHint) {
+    if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; }
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+
+    var waitSec = (opHint === "model_download" || targetCard === "model") ? 600 : WAIT_SECONDS;
+    var containerId = containerMap[targetCard] || "db_action_status";
+    var el = $(containerId);
+    var deadline = Date.now() + waitSec * 1000;
+
+    // 立刻画出等待态，并每秒刷新倒计时 —— 用户点完按钮马上就有反馈
+    function tick() {
+      var box = $(containerId);
+      if (!box) return;
+      var left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      if (left <= 0) return;
+      box.style.display = "block";
+      box.className = "action-status-box waiting";
+      box.innerHTML = waitingHtml(targetCard, left, waitSec);
     }
-    var pollStart = Date.now();
-    var containerMap = {
-      ncb: "db_action_status",
-      r2: "r2_action_status",
-      model: "model_action_status"
-    };
-    var targetContainerId = containerMap[targetCard] || "db_action_status";
+    if (el) { el.style.display = "block"; el.className = "action-status-box waiting"; }
+    tick();
+    countdownTimer = setInterval(tick, 1000);
 
     pollingTimer = setInterval(function () {
-      var elapsed = Date.now() - pollStart;
       loadStatus(function (err, statusData) {
         statusData = statusData || window.__memhubStatus;
-        if (statusData && statusData[targetCard] && statusData[targetCard].at >= submitTime) {
-          clearInterval(pollingTimer);
-          pollingTimer = null;
+        var card = statusData && statusData[targetCard];
+        if (card && card.at >= submitTime) {
+          renderStatusBlock(containerId, card);
+          var prog = card.progress;
+          var inProgress = prog && (prog.status === "downloading" || prog.status === "verifying" || prog.status === "starting");
+          if (inProgress && card.ok) {
+            // 仍在下载中，保持轮询更新进度
+            return;
+          }
+          // 拿到比提交时间更新且已完成的结果 → 停止一切计时
+          clearInterval(pollingTimer); pollingTimer = null;
+          if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
           return;
         }
-
-        if (elapsed >= 60000) {
-          clearInterval(pollingTimer);
-          pollingTimer = null;
-          var el = $(targetContainerId);
-          if (el) {
-            if (typeof document !== "undefined" && document.createElement) {
-              var fallbackNote = document.createElement("div");
-              fallbackNote.className = "action-status-fallback";
-              fallbackNote.textContent = "宿主尚未回传结果。若长时间无输出，可让 agent 调用 db_status 查看。";
-              el.appendChild(fallbackNote);
-            } else {
-              el.innerHTML += '<div class="action-status-fallback">宿主尚未回传结果。若长时间无输出，可让 agent 调用 db_status 查看。</div>';
-            }
-            el.style.display = "block";
+        if (Date.now() >= deadline) {
+          clearInterval(pollingTimer); pollingTimer = null;
+          if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+          var box = $(containerId);
+          if (box) {
+            box.style.display = "block";
+            box.className = "action-status-box warn";
+            box.innerHTML = timeoutHtml(targetCard, waitSec);
+            bindRetry(box, targetCard);
           }
         }
       });
     }, 2000);
   }
 
+  /** 给「重新查询」按钮绑定一次性重试。 */
+  function bindRetry(box, cardKey) {
+    var btns = box.querySelectorAll ? box.querySelectorAll("[data-retry]") : [];
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener("click", function () {
+        var containerId = containerMap[cardKey] || "db_action_status";
+        var b = $(containerId);
+        if (b) { b.className = "action-status-box waiting"; b.textContent = "正在重新查询…"; }
+        loadStatus(function (e, data) {
+          data = data || window.__memhubStatus;
+          var card = data && data[cardKey];
+          var b2 = $(containerId);
+          if (card && b2) { renderStatusBlock(containerId, card); }
+          else if (b2) {
+            b2.className = "action-status-box warn";
+            b2.innerHTML = timeoutHtml(cardKey);
+            bindRetry(b2, cardKey);
+          }
+        });
+      });
+    }
+  }
+
   /* ---------------- 数据库管理即时状态区 ---------------- */
-  function paintDbStatus(action, feedbackMsg, feedbackKind) {
-    var el = $("db_action_status");
+  /* 把即时反馈画到「该操作所属的那张卡片」。
+   * 早先这里硬编码 db_action_status，于是点「检测 R2 密钥」「检测本地小模型」
+   * 的提示都画到了 NoCodeBackend 卡片里 —— 用户在自己点的那张卡片上什么都看不到。
+   * containerId 省略时保持原行为（写 NoCodeBackend 卡片）。 */
+  function paintDbStatus(action, feedbackMsg, feedbackKind, containerId) {
+    var el = $(containerId || "db_action_status");
     if (!el) return;
     var act = action || (current && current._action);
     if (!feedbackMsg && (!act || !act.op)) {
@@ -348,6 +490,7 @@
         storage_setup: "挂载 R2 存储",
         r2_check: "检测 R2 密钥",
         model_check: "检测本地小模型",
+        model_download: "下载本地小模型",
         init: "初始化数据库",
         reset: "清空数据库",
         status: "检查结构状态"
@@ -367,7 +510,7 @@
     var ids = [
       "btn_db_provision", "btn_check_ncb", "btn_db_storage_setup", "btn_db_status", "btn_db_reset",
       "btn_confirm_provision", "btn_confirm_reset",
-      "btn_check_r2", "btn_check_model"
+      "btn_check_r2", "btn_check_model", "btn_download_model"
     ];
     ids.forEach(function (id) {
       var el = $(id);
@@ -399,7 +542,7 @@
     var targetCard = "ncb";
     if (op === "storage_setup" || op === "r2_check") {
       targetCard = "r2";
-    } else if (op === "model_check") {
+    } else if (op === "model_check" || op === "model_download") {
       targetCard = "model";
     }
 
@@ -463,14 +606,16 @@
             msg = "已提交检测 R2 密钥任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "model_check") {
             msg = "已提交检测本地小模型任务（ID: " + action.id + "）。正在等待宿主执行…";
+          } else if (op === "model_download") {
+            msg = "已提交一键下载模型任务（ID: " + action.id + "）。正在启动后台下载…";
           } else if (op === "status") {
             msg = "已提交检查状态任务。正在等待宿主执行…";
           } else if (op === "reset") {
             msg = "已提交清空数据库任务（ID: " + action.id + "）。正在等待宿主执行…";
           }
-          paintDbStatus(action, msg, "ok");
+          paintDbStatus(action, msg, "ok", containerMap[targetCard]);
           say("信标已提交", "ok");
-          startPollingStatus(targetCard, action.at);
+          startPollingStatus(targetCard, action.at, op);
         },
         function (e) {
           setActionButtonsDisabled(false);
@@ -479,7 +624,7 @@
           var msg = is429
             ? "操作过于频繁，请稍后再试（频控限制 1 秒/次）"
             : ("提交失败：" + errStr);
-          paintDbStatus(action, msg, is429 ? "warn" : "bad");
+          paintDbStatus(action, msg, is429 ? "warn" : "bad", containerMap[targetCard]);
           say(msg, is429 ? "warn" : "bad");
         }
       );
@@ -795,6 +940,14 @@
     if (checkModelBtn) {
       checkModelBtn.addEventListener("click", function () {
         submitAction("model_check");
+      });
+    }
+
+    // 一键下载/更新本地小模型
+    var downloadModelBtn = $("btn_download_model");
+    if (downloadModelBtn) {
+      downloadModelBtn.addEventListener("click", function () {
+        submitAction("model_download");
       });
     }
 

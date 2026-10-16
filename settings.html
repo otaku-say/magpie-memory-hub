@@ -11,8 +11,44 @@
 <body>
 <div class="wrap">
 
-  <h1>记忆中枢</h1>
-  <p class="lead">把经过 Magpie 的对话沉淀为长期记忆，供所有 agent 通过 MCP 检索。</p>
+  <div class="header-row">
+    <h1>记忆中枢</h1>
+    <span class="version-tag">v6.3.0</span>
+  </div>
+  <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、上下文压缩、R2 存储。</p>
+
+  <!-- 介绍与快速上手区（克制可折叠设计，不挤占首屏操作） -->
+  <details class="intro-guide" id="intro_guide">
+    <summary class="intro-summary">
+      <span class="intro-title">💡 使用说明（快速上手三步）</span>
+      <span class="intro-badge">查看指南</span>
+    </summary>
+    <div class="intro-content">
+      <div class="intro-steps">
+        <div class="intro-step">
+          <span class="step-badge">1</span>
+          <div class="step-body">
+            <strong>填 MCP Key 与数据库名</strong>
+            <span>在下方「NoCodeBackend 数据库与密钥」卡片中填入 MCP Key（可在 NCB 后台 Developer 页面获取）与数据库名（推荐保持 <code>memory</code>）。</span>
+          </div>
+        </div>
+        <div class="intro-step">
+          <span class="step-badge">2</span>
+          <div class="step-body">
+            <strong>点击「一键创建数据库」</strong>
+            <span>点击「一键创建数据库与结构」，插件自动完成数据库、三张核心表、字段与唯一索引创建，并自动回填保存数据库密钥。</span>
+          </div>
+        </div>
+        <div class="intro-step">
+          <span class="step-badge">3</span>
+          <div class="step-body">
+            <strong>完成并开始使用</strong>
+            <span>主路径即刻就绪，所有 agent 均可通过 MCP 检索与沉淀长期记忆。可选：挂载 Cloudflare R2 存储或下载本地离线小模型；其余设置项均自带生产级推荐值，保持默认即可。</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </details>
 
   <!-- 顶部状态条 -->
   <div id="mode" class="mode warn" role="status">
@@ -409,6 +445,7 @@
         </div>
         <div class="btn-row" style="margin-top:10px;">
           <button type="button" id="btn_check_model">检测本地小模型</button>
+          <button type="button" id="btn_download_model">一键下载模型</button>
         </div>
         <div class="action-status-box" id="model_action_status" style="display:none;"></div>
       </div>

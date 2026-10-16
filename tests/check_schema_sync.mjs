@@ -86,5 +86,19 @@ for (const table of ["memories", "pitfalls"]) {
   console.log(`  迁移断言：新库建表后这 ${need.length} 列必须存在（否则写入会 400）`);
 }
 
-console.log(fail ? `\n❌ 失败 ${fail} 项` : "\n✅ schema 声明与代码写入完全对齐");
+/* ------------------------------------------------------------------ *
+ * 版本号同步校验：package.json version vs settings.html
+ * ------------------------------------------------------------------ */
+const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const html = readFileSync(new URL("../settings.html", import.meta.url), "utf8");
+const matchVer = html.match(/class="version-tag">v([^<]+)<\/span>/);
+console.log(`\n【版本号同步校验】package.json: ${pkg.version} vs settings.html: ${matchVer ? matchVer[1] : "未找到"}`);
+if (!matchVer || matchVer[1] !== pkg.version) {
+  fail++;
+  console.log(`  ✗ settings.html 中的版本号 (v${matchVer ? matchVer[1] : "null"}) 与 package.json (${pkg.version}) 不一致！`);
+} else {
+  console.log(`  ✓ 版本号完全对齐 (v${pkg.version})`);
+}
+
+console.log(fail ? `\n❌ 失败 ${fail} 项` : "\n✅ schema 声明与代码写入完全对齐，版本号严格同步");
 process.exit(fail ? 1 : 0);

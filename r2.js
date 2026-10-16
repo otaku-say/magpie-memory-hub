@@ -24,7 +24,7 @@ const REST_BASE = "https://api.nocodebackend.com";
  * 客户端
  * ------------------------------------------------------------------ */
 
-function clientOf(cfg) {
+function clientOf(cfg, signal) {
   const key = (cfg && (cfg.mcpKey || cfg.mcp_key)) || "";
   if (!key) {
     const err = new Error(
@@ -33,7 +33,7 @@ function clientOf(cfg) {
     err.code = "NO_MCP_KEY";
     throw err;
   }
-  return new NcbMcp({ apiKey: key });
+  return new NcbMcp({ apiKey: key, signal: signal || (cfg && cfg.signal) || null });
 }
 
 /** 从各种命名里取数据库名（readOptions 产出的是 instance）。 */
@@ -80,16 +80,33 @@ async function rest(cfg, method, path, opts) {
   } else if (o.form !== undefined) {
     payload = o.form;                       // FormData：让 fetch 自己设 boundary
   }
+  const externalSignal = (o && o.signal) || (cfg && cfg.signal) || null;
+  if (externalSignal && externalSignal.aborted) {
+    const abortErr = new Error("操作已被取消 (aborted)");
+    abortErr.name = "AbortError";
+    throw abortErr;
+  }
   const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timer = ctrl ? setTimeout(() => ctrl.abort(), o.timeout || 60000) : null;
+  let abortListener = null;
+  if (ctrl && externalSignal) {
+    abortListener = () => ctrl.abort();
+    externalSignal.addEventListener("abort", abortListener, { once: true });
+  }
   let res;
   try {
     res = await fetch(url, { method, headers, body: payload, signal: ctrl ? ctrl.signal : undefined });
   } catch (e) {
     if (timer) clearTimeout(timer);
-    throw new Error("连接 NoCodeBackend 失败：" + String(e && e.message || e));
+    if (externalSignal && abortListener) externalSignal.removeEventListener("abort", abortListener);
+    const isAbort = externalSignal && externalSignal.aborted;
+    const msg = isAbort ? "操作已被取消 (aborted)" : String(e && e.message || e);
+    const err = new Error("连接 NoCodeBackend 失败：" + msg);
+    if (isAbort || (e && e.name === "AbortError")) err.name = "AbortError";
+    throw err;
   }
   if (timer) clearTimeout(timer);
+  if (externalSignal && abortListener) externalSignal.removeEventListener("abort", abortListener);
   let body = null;
   const text = await res.text();
   try { body = JSON.parse(text); } catch (e) { body = text; }
@@ -111,6 +128,12 @@ async function rest(cfg, method, path, opts) {
  *       → 凭据不匹配或已删除。
  */
 export async function r2Probe(cfg, database) {
+  const signal = (cfg && cfg.signal) || null;
+  if (signal && signal.aborted) {
+    const abortErr = new Error("操作已被取消 (aborted)");
+    abortErr.name = "AbortError";
+    throw abortErr;
+  }
   const mcp = clientOf(cfg);
   const db = database || dbOf(cfg, {});
   const name = "_memhub_probe_" + Date.now() + ".txt";
@@ -126,9 +149,14 @@ export async function r2Probe(cfg, database) {
         const r = await rest(cfg, "DELETE", "/files/" + encodeURIComponent(key), {});
         cleaned = r.status < 400;
       }
-    } catch (e) { /* 忽略 */ }
+    } catch (e) {
+      if (e.name === "AbortError" || (signal && signal.aborted)) throw e;
+    }
     return { ok: true, url, cleaned };
   } catch (e) {
+    if (e.name === "AbortError" || (signal && signal.aborted)) {
+      throw e;
+    }
     return { ok: false, error: String(e && e.message || e) };
   }
 }

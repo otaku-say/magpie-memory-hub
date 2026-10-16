@@ -88,12 +88,19 @@ export function NcbMcp(opts) {
   this.apiKey = opts.apiKey || "";
   this.endpoint = opts.endpoint || MCP_ENDPOINT;
   this.timeout = opts.timeout || DEFAULT_TIMEOUT;
+  this.signal = opts.signal || null;
   this._seq = 0;
   this._sessionId = null;
 }
 
 /** 发一次 JSON-RPC。失败抛异常（含可读原因）。 */
-NcbMcp.prototype.rpc = async function (method, params, isNotification) {
+NcbMcp.prototype.rpc = async function (method, params, isNotification, callOpts) {
+  var externalSignal = (callOpts && callOpts.signal) || this.signal;
+  if (externalSignal && externalSignal.aborted) {
+    var abortErr = new Error("操作已被取消 (aborted)");
+    abortErr.name = "AbortError";
+    throw abortErr;
+  }
   if (!this.apiKey) {
     throw new Error("未配置 MCP key：初始化/清库需要 MCP key（数据库 Secret Key 只能读写数据，无法建表）");
   }
@@ -111,8 +118,13 @@ NcbMcp.prototype.rpc = async function (method, params, isNotification) {
 
   var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
   var timer = null;
+  var abortListener = null;
   if (ctrl) {
     timer = setTimeout(function () { ctrl.abort(); }, this.timeout);
+    if (externalSignal) {
+      abortListener = function () { ctrl.abort(); };
+      externalSignal.addEventListener("abort", abortListener, { once: true });
+    }
   }
 
   var resp;
@@ -125,10 +137,21 @@ NcbMcp.prototype.rpc = async function (method, params, isNotification) {
     });
   } catch (e) {
     if (timer) clearTimeout(timer);
-    var msg = e && e.name === "AbortError" ? ("请求超时（" + this.timeout + "ms）") : String(e && e.message || e);
-    throw new Error("连接 NoCodeBackend MCP 失败：" + msg);
+    if (externalSignal && abortListener) {
+      externalSignal.removeEventListener("abort", abortListener);
+    }
+    var isExternal = externalSignal && externalSignal.aborted;
+    var msg = isExternal
+      ? "操作已被取消 (aborted)"
+      : (e && e.name === "AbortError" ? ("请求超时（" + this.timeout + "ms）") : String(e && e.message || e));
+    var err = new Error("连接 NoCodeBackend MCP 失败：" + msg);
+    if (isExternal || (e && e.name === "AbortError")) err.name = "AbortError";
+    throw err;
   }
   if (timer) clearTimeout(timer);
+  if (externalSignal && abortListener) {
+    externalSignal.removeEventListener("abort", abortListener);
+  }
 
   // 记录会话（无状态端点通常不返回，返回了就用上）
   try {

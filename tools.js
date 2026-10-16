@@ -21,7 +21,8 @@ import {
 import { r2Setup, r2Upload, r2List, r2Delete, r2Guide, r2Check } from "./r2.js";
 import { lookupSecret, lookupDatabase } from "./local_state.js";
 import { makeMcpClient } from "./mcp_client.js";
-import { runPendingAction, readAction, writeCardStatus } from "./page_actions.js";
+import { checkLocalModel, MODEL_SPEC, modelDir } from "./model_check.js";
+import { runPendingAction, readAction, writeCardStatus, isModelDownloading, startBackgroundModelDownload } from "./page_actions.js";
 
 const NCB_BASE = "https://api.nocodebackend.com";
 
@@ -133,15 +134,16 @@ function fingerprint(text) {
  * 只有在【没有 MCP key、但有 Secret Key】时才退回原来的 REST 客户端，
  * 让已经配好 Secret Key 的老用户不至于中断。
  */
-function makeClient(cfg) {
+function makeClient(cfg, signal) {
+  const sig = signal || (cfg && cfg.signal) || null;
   if (cfg.mcpKey) {
-    return makeMcpClient(cfg);
+    return makeMcpClient(cfg, sig);
   }
-  return makeRestClient(cfg);
+  return makeRestClient(cfg, sig);
 }
 
-function makeRestClient(cfg) {
-  async function call(method, action, table, { data, params, id } = {}) {
+function makeRestClient(cfg, signal) {
+  async function call(method, action, table, { data, params, id, signal: callSignal } = {}) {
     const qs = new URLSearchParams(Object.assign({ Instance: cfg.instance }, params || {}));
     const suffix = id === undefined || id === null ? "" : "/" + encodeURIComponent(id);
     const url = `${NCB_BASE}/${action}/${table}${suffix}?${qs.toString()}`;
@@ -149,11 +151,29 @@ function makeRestClient(cfg) {
     const headers = { "Content-Type": "application/json" };
     if (cfg.secret) headers.Authorization = "Bearer " + cfg.secret;
 
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: data === undefined ? undefined : JSON.stringify(data),
-    });
+    const effectiveSignal = callSignal || signal || (cfg && cfg.signal) || null;
+    if (effectiveSignal && effectiveSignal.aborted) {
+      const abortErr = new Error("操作已被取消 (aborted)");
+      abortErr.name = "AbortError";
+      throw abortErr;
+    }
+
+    let res;
+    try {
+      res = await fetch(url, {
+        method,
+        headers,
+        body: data === undefined ? undefined : JSON.stringify(data),
+        signal: effectiveSignal || undefined,
+      });
+    } catch (e) {
+      if (e && (e.name === "AbortError" || (effectiveSignal && effectiveSignal.aborted))) {
+        const abortErr = new Error("操作已被取消 (aborted)");
+        abortErr.name = "AbortError";
+        throw abortErr;
+      }
+      throw e;
+    }
     const raw = await res.text();
     let json;
     try {
@@ -806,6 +826,55 @@ const TOOLS = {
 
   /* ---------------- R2 文件存储（需 MCP key） ---------------- */
 
+  model_check: {
+    description: "检测本地多语言小模型是否已就绪（离线语义压缩用）。未就绪时会给出缺失文件清单与下载指引；支持可选的 check_upstream 联网比对上游新版本。",
+    args: {
+      type: "object",
+      properties: {
+        check_upstream: { type: "boolean", description: "是否联网检查 HuggingFace / 镜像站比对最新版本（默认 false 纯本地秒级检测）" },
+      },
+    },
+    run: async (args, ctx) => {
+      const r = await checkLocalModel({
+        checkUpstream: !!(args && args.check_upstream),
+        signal: ctx && ctx.signal,
+      });
+      return jsonOut(Object.assign({}, r, { model_dir: modelDir(), spec_repo: MODEL_SPEC.repo }));
+    },
+  },
+
+  model_download: {
+    description: "后台下载并安装本地多语言小模型（LLMLingua-2 mBERT INT8，约 174MB）。优先走国内 hf-mirror.com 镜像，支持断点续传与 SHA-256 完整性校验。后台非阻塞执行，可通过 model_check 工具或设置页查看进度。",
+    args: {
+      type: "object",
+      properties: {
+        force: { type: "boolean", description: "是否强制重新下载已存在的文件（默认 false）" },
+      },
+    },
+    run: (args, ctx) => {
+      if (isModelDownloading()) {
+        return jsonOut({
+          ok: true,
+          action: "IN_PROGRESS",
+          message: "本地小模型正在后台下载中，无需重复触发",
+          model_dir: modelDir(),
+        });
+      }
+      startBackgroundModelDownload(ctx._cfg, {
+        force: !!(args && args.force),
+        signal: ctx && ctx.signal,
+      });
+      return jsonOut({
+        ok: true,
+        action: "STARTED",
+        message: "已启动本地小模型后台下载任务（约 174MB，支持断点续传与 sha256 校验）",
+        model_dir: modelDir(),
+        approx_bytes: MODEL_SPEC.approx_bytes,
+        repo: MODEL_SPEC.repo,
+      });
+    },
+  },
+
   r2_check: {
     description:
       "检测当前配置的 Cloudflare R2 凭据真实可用性：不修改任何设置，通过上传并删除一个极小探针文件进行端到端验证。返回 VERIFIED 或 FAILED，并在失败时给出可操作的排查指引。",
@@ -923,8 +992,17 @@ export const MagpieMemoryHub = async (input, options) => {
     tool[name] = {
       description: def.description,
       args: def.args,
-      execute: async (args) => {
-        const result = await def.run(args || {}, { _client: client, _cfg: cfg, _input: input });
+      execute: async (args, ctx) => {
+        const abortSignal = (ctx && ctx.abort) || null;
+        const callCfg = Object.assign({}, cfg, { signal: abortSignal });
+        const callClient = makeClient(callCfg, abortSignal);
+        const result = await def.run(args || {}, {
+          _client: callClient,
+          _cfg: callCfg,
+          _input: input,
+          _ctx: ctx,
+          signal: abortSignal,
+        });
         try {
           if (["db_provision", "db_status", "db_init", "db_reset", "ncb_check"].includes(name)) {
             const op = name.replace(/^db_/, "");
