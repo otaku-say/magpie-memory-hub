@@ -22,6 +22,9 @@
 import { compressBody } from "./compress.js";
 
 var HARVEST_TAG = "[MEMORY_HARVEST]";
+/* 插件自己的包名 —— Magpie 把插件工具注册成 <包名>_<工具名>，
+ * 所以这里要写全名，否则模型按 memory_save 去调会找不到工具。 */
+var PLUGIN_NAME = "magpie-memory-hub";
 var ANSWER_CAP = 4000;
 var PROMPT_CAP = 1500;
 var RRF_K = 60;
@@ -408,14 +411,32 @@ export function onRequest(body, ctx) {
     }
   }
 
-  /* --- ② 可选：内联提炼指令 --- */
+  /* --- ② 可选：内联提炼指令 ---
+   *
+   * 两条通路，优先走第一条：
+   *
+   *   ① 【直调工具】让 agent 用 memory_save 工具存 → 数据直接经 MCP 进库，
+   *      不依赖任何外部进程。这是主路径。
+   *
+   *   ② 【<memory> 块】agent 手里没有这个工具时的兜底。中间件剥离该块并
+   *      打印 [MEMORY_HARVEST]{json} 到网关 stdout，由 harvest.py 读走。
+   *
+   * 为什么把顺序反过来（早先只做 ②）：② 依赖「有人在跑 harvest.py」，而
+   * 在 Docker 部署里网关 stdout 是容器管道、不是文件，没有进程能 tail 它，
+   * 于是模型就算是乖乖输出了 <memory> 块，内容也永远进不了库。
+   * ① 没有这个外部依赖，是唯一在容器里能自洽跑通的路径。
+   */
   if (opts.inline_extract) {
+    var toolName = PLUGIN_NAME + "_memory_save";
     injected +=
       "\n\n[Memory Instruction]\n" +
       "若本轮产生了值得跨会话复用的持久事实（偏好/事实/决策/实体/洞察），" +
-      "在回复的最后追加一个 <memory>JSON 数组</memory> 块，元素形如 " +
+      "用 `" + toolName + "` 工具把它存下来" +
+      "（参数：category、title、content、tags、confidence）。" +
+      "\n若你的工具列表里没有它，则改为在回复的最后追加一个 " +
+      "<memory>JSON 数组</memory> 块，元素形如 " +
       '{"category":"fact|preference|context|entity|decision|insight","title":"...","content":"...","tags":"a,b","confidence":0.9}。' +
-      "没有则不要输出该块。";
+      "\n没有值得长期留存的内容时，两条都不要做（不要为了凑数而保存）。";
   }
 
   if (!injected) return body;

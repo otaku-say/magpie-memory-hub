@@ -6,7 +6,7 @@ harvest.py — 记忆抓取与提炼管线（v5.1）
 本脚本消费这些行，提炼后写入 NoCodeBackend。
 
 吸收 Headroom 的两条核心思路：
-  1. 【提炼】把对话交给「提炼模型」抽事实 → 交给「仲裁模型 clef」剔除重复/低价值
+  1. 【提炼】启发式事实抽取与规则仲裁（零外部模型）
   2. 【失败学习】成功相关性：先定位失败现象，再找它之后真正奏效的做法，
      产出「具体纠正」而不是笼统建议 —— 这类结果进 pitfalls 表
 
@@ -77,10 +77,6 @@ def load_config(args):
     cfg = {
         "ncb_instance": "41694_agent_memory",
         "ncb_secret": "",
-        "magpie_base_url": "",
-        "magpie_api_key": "",
-        "extractor_model": "",
-        "clef_model": "",
         "min_confidence": 0.6,
         "project": "global",
         # --- 快照推送（闭环）：把记忆推回网关，供中间件注入 ---
@@ -93,8 +89,6 @@ def load_config(args):
         # --- 提炼前的语义压缩（离线侧，可换模型）---
         "compress_engine": "auto",   # auto | kompress | llmlingua2 | none
         "compress_threshold": 0.5,
-        # --- 仲裁模式：rule = 纯规则（零模型）；llm = 用 clef 模型 ---
-        "clef_mode": "rule",
         # --- 任务 A: 失败学习证据门槛 ---
         "min_evidence": 5,
         "evidence_file": os.path.expanduser("~/.magpie-memory-hub-evidence.json"),
@@ -117,10 +111,6 @@ def load_config(args):
     env_map = {
         "ncb_instance": "NCB_INSTANCE",
         "ncb_secret": "NCB_SECRET_KEY",
-        "magpie_base_url": "MAGPIE_BASE_URL",
-        "magpie_api_key": "MAGPIE_API_KEY",
-        "extractor_model": "EXTRACTOR_MODEL",
-        "clef_model": "CLEF_MODEL",
         "project": "MEMORY_PROJECT",
         "magpie_bin": "MAGPIE_BIN",
         "compress_engine": "KOMPRESS_ENGINE",
@@ -143,8 +133,8 @@ def load_config(args):
     # 插件 options 作为一层来源（优先级低于命令行，高于文件与环境变量）。
     # 设置页里的实例/密钥/模型/阈值都会被这里读到，避免两处配置漂移。
     po = plugin_options(cfg, log)
-    for k in ("ncb_instance", "ncb_secret", "magpie_base_url", "magpie_api_key",
-              "extractor_model", "clef_model", "min_confidence",
+    for k in ("ncb_instance", "ncb_secret",
+              "min_confidence",
               "min_evidence", "evidence_file", "enable_promotion",
               "promotion_min_hits", "promotion_batch_limit"):
         v = po.get(k)
@@ -154,8 +144,8 @@ def load_config(args):
 
     if getattr(args, "compress_threshold", None):
         cfg["compress_threshold"] = args.compress_threshold
-    for k in ("ncb_instance", "magpie_base_url", "extractor_model", "clef_model",
-              "project", "magpie_bin", "compress_engine", "clef_mode",
+    for k in ("ncb_instance",
+              "project", "magpie_bin", "compress_engine",
               "evidence_file"):
         v = getattr(args, k, None)
         if v:
@@ -258,72 +248,6 @@ def fingerprint(text):
 def now_str():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-
-# ------------------------------------------------------------- LLM 调用
-
-
-def chat(cfg, model, system, user, max_tokens=1500):
-    base = (cfg.get("magpie_base_url") or "").rstrip("/")
-    if not base:
-        raise RuntimeError("未配置 magpie_base_url")
-    if not model:
-        raise RuntimeError("未配置模型 ID（extractor_model / clef_model）")
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": 0,
-        "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {"Content-Type": "application/json"}
-    if cfg.get("magpie_api_key"):
-        headers["Authorization"] = f"Bearer {cfg['magpie_api_key']}"
-    req = urllib.request.Request(
-        f"{base}/chat/completions", data=json.dumps(payload).encode(),
-        headers=headers, method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            data = json.loads(r.read().decode())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"调用模型「{model}」失败 HTTP {e.code}: {e.read().decode(errors='ignore')[:200]}")
-    choice = (data.get("choices") or [{}])[0]
-    content = (choice.get("message") or {}).get("content", "")
-    if isinstance(content, list):
-        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
-    return str(content or "").strip()
-
-
-def parse_json_loose(text):
-    s = str(text or "").strip()
-    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", s, re.I)
-    if m:
-        s = m.group(1).strip()
-    try:
-        return json.loads(s)
-    except Exception:
-        pass
-    m = re.search(r"[\[{][\s\S]*[\]}]", s)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            pass
-    return None
-
-
-EXTRACT_SYSTEM = """你是长期记忆提炼器。从对话中提取值得跨会话复用的持久事实，丢弃寒暄、一次性调试细节和临时状态。
-分类只能是：preference(偏好) / fact(稳定事实) / context(当前目标) / entity(实体信息) / decision(技术决策) / insight(规律性认识)。
-title 精简(<=40字)，content 具体(可含路径/命令/版本号)，tags 为逗号分隔关键词，confidence 为 0~1。
-没有值得记住的内容就返回空数组。
-只输出 JSON：{"memories":[{"category":"...","scope":"user|project|session|turn","title":"...","content":"...","tags":"...","confidence":0.9}]}"""
-
-CLEF_SYSTEM = """你是记忆仲裁器，判断候选记忆是否值得写入长期库。
-drop 的标准：重复、过于笼统、临时性、或随时能在代码/文档里查到。
-只输出 JSON：{"verdicts":[{"index":0,"keep":true,"confidence":0.9,"reason":"简短理由"}]}"""
 
 # ------------------------------------------------- 失败学习（Headroom 式）
 
@@ -1486,102 +1410,21 @@ def process_turn(cfg, ncb, turn, caches, dry_run):
     except Exception as e:
         stats["errors"].append(f"失败学习: {e}")
 
-    # ---- ①-B 环境事实与架构决策提取（零 LLM 成本，纯规则）----
+    # ---- ①-B 环境事实与架构决策提取（零 LLM 成本，纯规则 + rule_judge 仲裁）----
     try:
-        min_conf = float(cfg.get("min_confidence") or 0.6)
         heuristic_mems = mine_environment_facts(convo) + mine_architectural_decisions(convo)
-        for cand in heuristic_mems:
-            try:
-                conf = float(cand.get("confidence", 1.0))
-            except Exception:
-                conf = 1.0
-            if conf < min_conf:
-                continue
-            item = dict(cand, project=cfg["project"], source="harvest:heuristic")
-            if dry_run:
-                stats["memories"].append({"action": "DRYRUN", **item})
-            else:
-                stats["memories"].append(save_memory(ncb, cfg, item, caches["memory"]))
+        if heuristic_mems:
+            cands = rule_judge(cfg, ncb, heuristic_mems, cfg["project"], stats)
+            for cand in cands:
+                item = dict(cand, project=cfg["project"], source="harvest:heuristic")
+                if dry_run:
+                    stats["memories"].append({"action": "DRYRUN", **item})
+                else:
+                    stats["memories"].append(save_memory(ncb, cfg, item, caches["memory"]))
     except Exception as e:
         stats["errors"].append(f"启发式记忆提取: {e}")
 
-    # ---- ② LLM 提炼（仅在配置了模型时）----
-    # 没有提炼模型时：仍然可以靠「内联提炼」由网关侧完成事实抽取，
-    # 这里只做失败学习。这就是完全不需要外部 LLM 的运行方式。
-    if not cfg.get("extractor_model"):
-        return stats
-
-    # 送进提炼模型的是【压缩后】的文本；失败学习用的是原文（正则需要真实报错行）
-    for_llm = convo[:12000]
-    comp = get_compressor(cfg, log)
-    if comp is not None:
-        try:
-            squeezed = comp.compress(for_llm)
-            if isinstance(squeezed, str) and 0 < len(squeezed) < len(for_llm):
-                stats["compressed"] = {"before": len(for_llm), "after": len(squeezed)}
-                for_llm = squeezed
-        except Exception as e:
-            stats["errors"].append(f"压缩: {e}")
-
-    try:
-        raw = chat(cfg, cfg["extractor_model"], EXTRACT_SYSTEM, for_llm)
-        parsed = parse_json_loose(raw)
-        cands = parsed.get("memories") if isinstance(parsed, dict) else parsed
-        if not isinstance(cands, list):
-            cands = []
-    except Exception as e:
-        stats["errors"].append(f"提炼: {e}")
-        return stats
-
-    if not cands:
-        return stats
-
-    # ---- ③ 仲裁：规则优先，配了模型且模式为 llm 时才调模型 ----
-    mode = (cfg.get("clef_mode") or "rule").lower()
-    use_llm_clef = (mode == "llm" and cfg.get("clef_model"))
-    if not use_llm_clef:
-        before = len(cands)
-        cands = rule_judge(cfg, ncb, cands, cfg["project"], stats)
-        if before != len(cands):
-            stats["errors"].append(f"规则仲裁剔除 {before - len(cands)} 条")
-
-    if use_llm_clef:
-        try:
-            listing = "\n".join(
-                f"{i}. [{c.get('category', 'fact')}] {c.get('title')}: {c.get('content')}"
-                for i, c in enumerate(cands)
-            )
-            raw_j = chat(cfg, cfg["clef_model"], CLEF_SYSTEM, listing, max_tokens=1000)
-            parsed_j = parse_json_loose(raw_j)
-            verdicts = (parsed_j or {}).get("verdicts") if isinstance(parsed_j, dict) else None
-            if isinstance(verdicts, list) and verdicts:
-                kept = []
-                for i, c in enumerate(cands):
-                    v = next((x for x in verdicts if int(x.get("index", -1)) == i), None)
-                    if v is None or v.get("keep"):
-                        if v and v.get("confidence") is not None:
-                            c["confidence"] = v["confidence"]
-                        kept.append(c)
-                cands = kept
-        except Exception as e:
-            stats["errors"].append(f"仲裁: {e}")
-
-    min_conf = float(cfg.get("min_confidence") or 0.6)
-    for c in cands:
-        try:
-            conf = float(c.get("confidence", 1.0))
-        except Exception:
-            conf = 1.0
-        if conf < min_conf:
-            continue
-        item = dict(c, project=cfg["project"], source="harvest:" + cfg["extractor_model"])
-        if dry_run:
-            stats["memories"].append({"action": "DRYRUN", **item})
-        else:
-            try:
-                stats["memories"].append(save_memory(ncb, cfg, item, caches["memory"]))
-            except Exception as e:
-                stats["errors"].append(f"入库: {e}")
+    # ---- ② 外部模型提炼与仲裁已移除：默认免模型，依赖启发式规则与内联提炼 ----
     return stats
 
 
@@ -1611,16 +1454,11 @@ def main():
     ap.add_argument("--config", help="配置文件路径（默认 ~/.magpie-memory-hub.json）")
     ap.add_argument("--dry-run", action="store_true", help="只展示提炼结果，不写库")
     ap.add_argument("--ncb-instance")
-    ap.add_argument("--magpie-base-url", dest="magpie_base_url")
-    ap.add_argument("--extractor-model", dest="extractor_model")
-    ap.add_argument("--clef-model", dest="clef_model")
     ap.add_argument("--project")
     ap.add_argument("--magpie-bin", dest="magpie_bin", help="magpie 可执行文件路径")
     ap.add_argument("--no-push", action="store_true", help="不把快照推回网关")
     ap.add_argument("--push-once", action="store_true", help="只推一次快照就退出")
     ap.add_argument("--snapshot-cap", dest="snapshot_cap", type=int, help="快照最多多少条")
-    ap.add_argument("--clef-mode", dest="clef_mode", choices=["rule", "llm"],
-                    help="仲裁方式：rule=纯规则(零模型) / llm=用 clef 模型")
     ap.add_argument("--compress-engine", dest="compress_engine",
                     choices=["auto", "kompress", "llmlingua2", "none"],
                     help="提炼前的语义压缩引擎（none 关闭）")
@@ -1659,9 +1497,8 @@ def main():
 
     if cfg.get("_from_plugin_options"):
         log("配置来源：已合并插件 options（设置页）")
-    log(f"实例={cfg['ncb_instance']} 提炼模型={cfg['extractor_model'] or '(未启用)'} "
-        f"仲裁模型={cfg['clef_model'] or '(未启用)'} 推送快照={cfg.get('push_snapshot')} "
-        f"dry_run={args.dry_run}")
+    log(f"实例={cfg['ncb_instance']} 推送快照={cfg.get('push_snapshot')} "
+        f"压缩引擎={cfg.get('compress_engine')} dry_run={args.dry_run}")
 
     # 只推一次快照就退出（配 cron / 计划任务用）
     if args.push_once:

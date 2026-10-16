@@ -389,3 +389,176 @@ export function storageGuide(cfg) {
   return r2Guide();
 }
 
+/* ------------------------------------------------------------------ *
+ * ncb_check —— 检测 MCP Key 有效性与数据库/结构状态（只读）
+ * ------------------------------------------------------------------ */
+
+export function explainMcpFailure(err) {
+  const m = String(err || "");
+  if (/Unauthorized|401|403|Forbidden|invalid api key|invalid token|auth|user email|access to user profile/i.test(m)) {
+    return {
+      kind: "INVALID_MCP_KEY",
+      title: "MCP Key 无效或未授权",
+      detail: "NoCodeBackend 拒绝了 MCP 认证请求，通常是 API Token 填写有误、已过期或已被删除。",
+      actions: [
+        "① 登录 NoCodeBackend 控制台 → 顶部 Developer 菜单",
+        "② 复制有效的 API Token 并注意去除首尾空格",
+        "③ 粘贴到插件设置页「MCP Key」输入框中并保存",
+      ],
+    };
+  }
+  if (/timeout|abort|ECONNREFUSED|ENOTFOUND|fetch failed|network/i.test(m)) {
+    return {
+      kind: "NETWORK_ERROR",
+      title: "无法连接 NoCodeBackend 服务",
+      detail: "请求 NoCodeBackend 服务端超时或网络无法连通：" + m.slice(0, 100),
+      actions: [
+        "① 检查当前网络与 DNS 设置是否正常",
+        "② 确认能够正常访问 https://app.nocodebackend.com",
+      ],
+    };
+  }
+  return {
+    kind: "MCP_CALL_FAILED",
+    title: "NoCodeBackend MCP 调用失败",
+    detail: m.slice(0, 150),
+    actions: [
+      "① 请检查 NoCodeBackend 控制台服务状态",
+      "② 重新生成 API Token 并重试",
+    ],
+  };
+}
+
+export async function ncbCheck(cfg, args) {
+  const a = args || {};
+  const key = (a && a.mcp_key) || (cfg && (cfg.mcp_key || cfg.mcpKey)) || "";
+  const want = (a && a.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "";
+
+  if (!key) {
+    const diag = {
+      kind: "NO_MCP_KEY",
+      title: "未配置 MCP Key",
+      detail: "当前未提供 MCP Key，无法与 NoCodeBackend 进行控制面通信。",
+      actions: [
+        "① 登录 NoCodeBackend 控制台 → 顶部 Developer 菜单",
+        "② 生成或复制 API Token",
+        "③ 填写到插件设置页的 MCP Key 输入框并保存",
+      ],
+    };
+    return {
+      ok: false,
+      verdict: "FAILED",
+      database: want,
+      database_exists: false,
+      database_count: 0,
+      schema: null,
+      foreign_tables: [],
+      title: diag.title,
+      lines: [
+        "未配置 MCP Key（字段为空）",
+        "无法调用 NoCodeBackend 的控制面接口",
+        "请在设置页配置 MCP Key 后重试",
+      ],
+      diagnosis: diag,
+    };
+  }
+
+  const mcp = new NcbMcp({ apiKey: key });
+  let dbListText = "";
+  try {
+    dbListText = await mcp.listDatabasesText();
+  } catch (e) {
+    const errMsg = String((e && e.message) || e);
+    const diag = explainMcpFailure(errMsg);
+    return {
+      ok: false,
+      verdict: "FAILED",
+      database: want,
+      database_exists: false,
+      database_count: 0,
+      schema: null,
+      foreign_tables: [],
+      title: diag.title,
+      lines: [
+        "验证 MCP Key 失败：无法列举数据库",
+        `错误明细：${errMsg.slice(0, 100)}`,
+        diag.actions[0] || "请检查 MCP Key 是否正确",
+      ],
+      diagnosis: diag,
+    };
+  }
+
+  const existing = parseDatabases(dbListText);
+  const count = existing.length;
+  const account = inferAccount(existing);
+  const full = account ? account + "_" + logicalName(want, account) : want;
+  const found = existing.find(
+    (x) => x === want || x === full || (account && logicalName(x, account) === logicalName(want, account))
+  ) || "";
+
+  if (!found) {
+    return {
+      ok: true,
+      verdict: "VERIFIED",
+      database: want || full || "",
+      database_exists: false,
+      database_count: count,
+      schema: null,
+      foreign_tables: [],
+      title: "MCP Key 有效，目标库尚未创建",
+      lines: [
+        `密钥可用，账号下已有 ${count} 个数据库`,
+        `目标库 ${want || "(未指定)"} 尚未存在`,
+        "可点击「一键创建」自动建库并配置表结构",
+      ],
+      diagnosis: null,
+    };
+  }
+
+  // 目标库存在：获取结构并检测 drift
+  let schemaRes = null;
+  let foreignTables = [];
+  try {
+    const rawSchema = await mcp.getSchema(found);
+    const drift = detectDrift(rawSchema);
+    const initialized = drift.ok && drift.missingTables.length === 0 &&
+      drift.missingColumns.length === 0 && drift.missingIndexes.length === 0;
+    schemaRes = {
+      initialized,
+      missing_tables: drift.missingTables || [],
+      missing_columns: (drift.missingColumns || []).map((x) => `${x.table}.${x.column.name}`),
+      missing_indexes: (drift.missingIndexes || []).map((x) => `${x.table}.${x.index.name || (x.index.columns && x.index.columns.join("_")) || "idx"}`),
+    };
+    foreignTables = (drift.unknownTables || []).map((x) => ({
+      table: x.table,
+      columns: Array.isArray(x.columns) ? x.columns.length : (typeof x.columns === "object" && x.columns ? Object.keys(x.columns).length : Number(x.columns) || 0),
+    }));
+  } catch (e) {
+    schemaRes = { initialized: false, error: String((e && e.message) || e) };
+  }
+
+  const isInit = schemaRes && schemaRes.initialized;
+  const lines = [
+    `密钥可用，账号下有 ${count} 个数据库`,
+    `目标库 ${found} 存在`,
+  ];
+  if (isInit) {
+    lines.push("结构完整，3 张核心表与索引均已就绪");
+  } else {
+    lines.push("核心表或索引存在缺失，建议点击「初始化结构」");
+  }
+
+  return {
+    ok: true,
+    verdict: "VERIFIED",
+    database: found,
+    database_exists: true,
+    database_count: count,
+    schema: schemaRes,
+    foreign_tables: foreignTables,
+    title: isInit ? "MCP Key 有效，数据库已就绪" : "MCP Key 有效，目标库结构待补齐",
+    lines,
+    diagnosis: null,
+  };
+}
+

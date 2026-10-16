@@ -6,7 +6,6 @@ import assert from "node:assert";
 import { fileURLToPath } from "node:url";
 process.chdir(fileURLToPath(new URL("..", import.meta.url)));  // 不依赖调用者的工作目录
 
-
 const DIR = fs.existsSync("settings.html") ? "." : "..";
 const htmlPath = path.join(DIR, "settings.html");
 const cssPath = path.join(DIR, "settings.css");
@@ -99,6 +98,16 @@ class MockElement {
     this.placeholder = "";
     this.listeners = {};
   }
+  get innerText() {
+    if (this._innerText !== undefined) return this._innerText;
+    if (this.innerHTML) {
+      return this.innerHTML.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    }
+    return this.textContent || "";
+  }
+  set innerText(v) {
+    this._innerText = v;
+  }
   addEventListener(evt, fn) {
     if (!this.listeners[evt]) this.listeners[evt] = [];
     this.listeners[evt].push(fn);
@@ -121,9 +130,9 @@ function createDOMStub(initialOptions) {
   for (const id of idInHtml) {
     let tag = "div";
     if (id.startsWith("btn_") || id === "save" || id === "copy" || id === "toggle_mcp_key") tag = "button";
-    else if (id.includes("model") || id.includes("instance") || id.includes("secret") || id.includes("key") || id.includes("chars") || id.includes("count") || id.includes("url") || id.includes("principles") || id.includes("confidence") || id.includes("account") || id.includes("bucket")) tag = "input";
-    else if (id.includes("mode") || id.includes("engine") || id === "on_exist") tag = "select";
-    else if (id.includes("compress") || id.includes("disabled") || id.includes("cards") || id.includes("principles") || id.includes("dedup") || id.includes("extract")) tag = "input";
+    else if (id.includes("instance") || id.includes("secret") || id.includes("key") || id.includes("chars") || id.includes("count") || id.includes("url") || id.includes("principles") || id.includes("confidence") || id.includes("account") || id.includes("bucket")) tag = "input";
+    else if (id === "on_exist") tag = "select";
+    else if (id.includes("compress") || id.includes("disabled") || id.includes("cards") || id.includes("principles") || id.includes("dedup") || id.includes("extract") || id === "auto_init") tag = "input";
     elements[id] = new MockElement(id, tag);
   }
 
@@ -134,6 +143,7 @@ function createDOMStub(initialOptions) {
   if (elements.disabled) elements.disabled.type = "checkbox";
   if (elements.ccr_cards) elements.ccr_cards.type = "checkbox";
   if (elements.inject_principles) elements.inject_principles.type = "checkbox";
+  if (elements.auto_init) elements.auto_init.type = "checkbox";
   if (elements.mcp_key) elements.mcp_key.type = "password";
   if (elements.ncb_secret) elements.ncb_secret.type = "password";
   if (elements.r2_secret_access_key) elements.r2_secret_access_key.type = "password";
@@ -181,6 +191,8 @@ function createDOMStub(initialOptions) {
     location: { origin: "https://magpie-web.example.com" },
     setTimeout,
     clearTimeout,
+    setInterval,
+    clearInterval,
     Date,
     parseFloat,
     isNaN,
@@ -205,15 +217,15 @@ async function runTests() {
     ncb_secret: "",              // 留空，由插件创建后自动获取
     mcp_key: "mcp_sec_key_xyz",  // 唯一必填的 MCP 密钥
     on_exist: "reuse",           // 重名策略
-    magpie_base_url: "http://127.0.0.1:8000/v1",
-    magpie_api_key: "mag_key_abc",
-    extractor_model: "group/flash",
-    clef_model: "group/clef",
+    auto_init: false,
+    r2_account_id: "r2_acc_123",
+    r2_access_key_id: "{{SECRET_lkwmrmvd}}",
+    r2_secret_access_key: "{{SECRET_tftpt17h}}",
+    r2_bucket_name: "",
+    r2_public_url: "",
     min_confidence: 0.8,
-    clef_mode: "rule",
     compress: true,
     cross_turn_dedup: true,
-    compress_engine: "auto",
     compress_max_chars: 3000,
     compress_min_chars: 1200,
     max_inject_count: 5,
@@ -242,6 +254,7 @@ async function runTests() {
   assert.strictEqual(env.elements.mcp_key.value, "mcp_sec_key_xyz");
   assert.strictEqual(env.elements.on_exist.value, "reuse");
   assert.strictEqual(env.elements.ncb_secret.value, "");
+  assert.strictEqual(env.elements.auto_init.checked, false);
   console.log("PASS: 表单字段 fill() 初始填充正确（ncb_secret 留空，mcp_key 已填）");
 
   // ==========================================
@@ -268,8 +281,7 @@ async function runTests() {
   assert.strictEqual(provisionPayload.ncb_instance, "agent_memory");
   assert.strictEqual(provisionPayload.mcp_key, "mcp_sec_key_xyz");
   assert.strictEqual(provisionPayload.on_exist, "reuse");
-  assert.strictEqual(provisionPayload.magpie_base_url, "http://127.0.0.1:8000/v1");
-  assert.strictEqual(provisionPayload.extractor_model, "group/flash");
+  assert.strictEqual(provisionPayload.auto_init, false);
   assert.strictEqual(provisionPayload.min_confidence, 0.8);
   assert.strictEqual(provisionPayload.compress, true);
   assert.strictEqual(provisionPayload.custom_external_field, "do_not_lose_me", "外部自定义字段不能被冲掉");
@@ -368,35 +380,57 @@ async function runTests() {
   env.magpie.options.set = origSet;
 
   // ==========================================
-  // 测试 6: 复制 SQL 功能与 CSP 降级
+  // 测试 6: 点击「检测 R2 密钥」提交信标 op: 'r2_check'
   // ==========================================
-  console.log("\n--- 测试 6: 复制 SQL 功能（包含 CSP 拦截降级） ---");
-  env.elements.btn_copy_init_sql.click();
-  await new Promise((r) => setTimeout(r, 20));
-  assert.ok(env.clipboardWrites.length > 0, "剪贴板应收到文本");
-  assert.ok(env.clipboardWrites[0].includes("CREATE TABLE IF NOT EXISTS memories"), "应写入建表 SQL");
+  console.log("\n--- 测试 6: 点击「检测 R2 密钥」提交信标 op: 'r2_check' ---");
+  await new Promise((r) => setTimeout(r, 1100));
+  env.elements.r2_account_id.value = "acc-check-001";
+  env.elements.r2_access_key_id.value = "{{SECRET_8r9j03u4}}";
+  env.elements.r2_secret_access_key.value = "{{SECRET_z6x9m5y2}}";
+  env.elements.r2_bucket_name.value = "bkt-check-001";
+  env.elements.r2_public_url.value = "https://r2-check.example.com";
 
-  env.elements.btn_copy_reset_sql.click();
-  await new Promise((r) => setTimeout(r, 20));
-  assert.ok(env.clipboardWrites[1].includes("DROP TABLE IF EXISTS"), "应写入清库 SQL");
+  env.elements.btn_check_r2.click();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.strictEqual(env.setCalls.length, 4, "options.set 应被调用第 4 次");
 
-  // 模拟 CSP 阻断
-  env.sandbox.navigator.clipboard.writeText = async () => {
-    throw new Error("Blocked by CSP");
-  };
-  env.elements.btn_copy_init_sql.click();
-  await new Promise((r) => setTimeout(r, 20));
-  assert.strictEqual(env.elements.sql_fallback_wrap.style.display, "block", "CSP 拦截时降级展示框应显示");
-  assert.ok(env.elements.sql_fallback_text.value.includes("CREATE TABLE IF NOT EXISTS memories"), "降级框内应有 SQL");
-
-  env.elements.btn_close_sql.click();
-  assert.strictEqual(env.elements.sql_fallback_wrap.style.display, "none", "点击关闭按钮后降级框应隐藏");
-  console.log("PASS: 复制初始化 SQL / 清库 SQL 均正确生效，且 CSP 拦截降级展示框工作正常");
+  const r2CheckPayload = env.setCalls[3];
+  assert.ok(r2CheckPayload._action, "必须包含 _action");
+  assert.strictEqual(r2CheckPayload._action.op, "r2_check", "信标 op 必须为 r2_check");
+  assert.strictEqual(r2CheckPayload._action.account_id, "acc-check-001", "必须带上 account_id");
+  assert.strictEqual(r2CheckPayload._action.access_key_id, "{{SECRET_8r9j03u4}}", "必须带上 access_key_id");
+  assert.strictEqual(r2CheckPayload._action.secret_access_key, "{{SECRET_z6x9m5y2}}", "必须带上 secret_access_key");
+  assert.strictEqual(r2CheckPayload._action.bucket_name, "bkt-check-001", "必须带上 bucket_name");
+  assert.strictEqual(r2CheckPayload._action.public_url, "https://r2-check.example.com", "必须带上 public_url");
+  assert.strictEqual(r2CheckPayload.custom_external_field, "do_not_lose_me", "原有配置不丢失");
+  assert.deepStrictEqual(r2CheckPayload.memories, [{ id: 101, title: "important memory" }], "memories 数组不丢失");
+  console.log("PASS: 点击「检测 R2 密钥」提交信标 op='r2_check' 且带齐 R2 凭据字段，原有配置不丢失");
 
   // ==========================================
-  // 测试 7: MCP Key 显隐切换
+  // 测试 7: 点击「检测 MCP Key」与「检测本地小模型」信标
   // ==========================================
-  console.log("\n--- 测试 7: MCP Key 密码显隐切换 ---");
+  console.log("\n--- 测试 7: 点击「检测 MCP Key」与「检测本地小模型」提交信标 ---");
+  await new Promise((r) => setTimeout(r, 1100));
+  env.elements.btn_check_ncb.click();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.strictEqual(env.setCalls.length, 5, "options.set 应被调用第 5 次");
+  const ncbCheckPayload = env.setCalls[4];
+  assert.strictEqual(ncbCheckPayload._action.op, "ncb_check", "op 必须为 ncb_check");
+  assert.strictEqual(ncbCheckPayload._action.database, "agent_memory");
+  console.log("PASS: 点击「检测 MCP Key」提交信标 op='ncb_check'");
+
+  await new Promise((r) => setTimeout(r, 1100));
+  env.elements.btn_check_model.click();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.strictEqual(env.setCalls.length, 6, "options.set 应被调用第 6 次");
+  const modelCheckPayload = env.setCalls[5];
+  assert.strictEqual(modelCheckPayload._action.op, "model_check", "op 必须为 model_check");
+  console.log("PASS: 点击「检测本地小模型」提交信标 op='model_check'");
+
+  // ==========================================
+  // 测试 8: MCP Key 显隐切换
+  // ==========================================
+  console.log("\n--- 测试 8: MCP Key 密码显隐切换 ---");
   assert.strictEqual(env.elements.mcp_key.type, "password");
   env.elements.toggle_mcp_key.click();
   assert.strictEqual(env.elements.mcp_key.type, "text");
@@ -406,9 +440,68 @@ async function runTests() {
   assert.strictEqual(env.elements.toggle_mcp_key.textContent, "显示");
   console.log("PASS: MCP Key 密码显隐切换工作正常");
 
+  // ==========================================
+  // 测试 9: 状态回传渲染测试 (window.__memhubStatus)
+  // ==========================================
+  console.log("\n--- 测试 9: 状态回传渲染测试 (window.__memhubStatus) ---");
+  const mockStatus = {
+    ncb: {
+      at: 1792129607020, op: "provision", ok: true,
+      title: "一键创建完成",
+      lines: ["数据库：41694_memory", "新增 3 表 / 4 索引"]
+    },
+    r2: {
+      at: 1792129608000, op: "storage_setup", ok: false,
+      title: "R2 挂载未生效",
+      lines: ["TLS 握手被拒（凭据陈旧）", "请到 NCB 控制台更新 Cloudflare 连接"]
+    },
+    model: {
+      at: 1792129609000, op: "model_check", ok: true,
+      title: "本地模型就绪",
+      lines: ["模型路径：models/multilingual.onnx", "大小：48MB"]
+    }
+  };
+
+  env.sandbox.window.__memhubStatus = mockStatus;
+  env.sandbox.window.renderStatus(mockStatus);
+
+  const ncbText = env.elements.db_action_status.innerText;
+  assert.ok(ncbText.includes("一键创建完成"), "db_action_status 包含 ncb.title");
+  assert.ok(ncbText.includes("数据库：41694_memory"), "db_action_status 包含 ncb line 1");
+  assert.ok(ncbText.includes("新增 3 表 / 4 索引"), "db_action_status 包含 ncb line 2");
+
+  const r2Text = env.elements.r2_action_status.innerText;
+  assert.ok(r2Text.includes("R2 挂载未生效"), "r2_action_status 包含 r2.title");
+  assert.ok(r2Text.includes("TLS 握手被拒（凭据陈旧）"), "r2_action_status 包含 r2 line 1");
+  assert.ok(r2Text.includes("请到 NCB 控制台更新 Cloudflare 连接"), "r2_action_status 包含 r2 line 2");
+
+  const modelText = env.elements.model_action_status.innerText;
+  assert.ok(modelText.includes("本地模型就绪"), "model_action_status 包含 model.title");
+  assert.ok(modelText.includes("models/multilingual.onnx"), "model_action_status 包含 model line 1");
+  assert.ok(modelText.includes("48MB"), "model_action_status 包含 model line 2");
+  console.log("PASS: 状态回传正确渲染到 #db_action_status、#r2_action_status 与 #model_action_status，innerText 均包含标题与每一行明细！");
+
+  // ==========================================
+  // 测试 10: 静态校验 22 个可配置项独立徽章完整性
+  // ==========================================
+  console.log("\n--- 测试 10: 全部 22 个可配置项独立徽章校验 ---");
+  const all22Fields = [
+    "ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init",
+    "r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url",
+    "inline_extract", "min_confidence",
+    "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
+    "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"
+  ];
+  for (const f of all22Fields) {
+    const rowRegex = new RegExp(`for=["']${f}["'][\\s\\S]*?<span class="badge (?:rec|req)"`, "i");
+    assert.ok(rowRegex.test(html), `字段 ${f} 所在行必须有推荐值或必填徽章`);
+  }
+  console.log(`PASS: 全部 ${all22Fields.length} 个可配置项独立徽章均校验通过！`);
+
   console.log("\n==========================================");
   console.log("新需求全部验收项 100% 通过！");
   console.log("==========================================");
+  process.exit(0);
 }
 
 runTests().catch((e) => {

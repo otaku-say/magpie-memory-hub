@@ -12,93 +12,40 @@
   var $ = function (id) { return document.getElementById(id); };
 
   var CARD_FIELDS = {
-    ncb: ["ncb_instance", "mcp_key", "ncb_secret", "on_exist"],
+    ncb: ["ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init"],
     r2: ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"],
-    extract: ["inline_extract", "clef_mode", "extractor_model", "clef_model", "min_confidence"],
-    inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles"],
-    compress: ["compress", "cross_turn_dedup", "compress_engine", "compress_max_chars", "compress_min_chars"],
-    gateway: ["magpie_base_url", "magpie_api_key", "auto_init", "disabled"]
+    extract: ["inline_extract", "min_confidence"],
+    inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"],
+    compress: ["compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"]
   };
 
   var TEXT = [
-    "ncb_instance", "ncb_secret", "magpie_base_url", "magpie_api_key",
-    "extractor_model", "clef_model", "mcp_key",
+    "ncb_instance", "ncb_secret", "mcp_key",
     "r2_account_id", "r2_access_key_id", "r2_secret_access_key",
     "r2_bucket_name", "r2_public_url"
   ];
-  var SELECT = ["clef_mode", "compress_engine", "on_exist"];
-  var NUM = { min_confidence: 0.6, max_inject_count: 5, max_budget_chars: 2048,
-              compress_max_chars: 3000, compress_min_chars: 1200, max_principles: 2 };
-  var BOOL = ["inline_extract", "disabled", "compress", "cross_turn_dedup", "ccr_cards", "inject_principles", "auto_init"];
+  var SELECT = ["on_exist"];
+  var NUM = {
+    min_confidence: 0.6,
+    max_inject_count: 5,
+    max_budget_chars: 2048,
+    compress_max_chars: 3000,
+    compress_min_chars: 1200,
+    max_principles: 2
+  };
+  var BOOL = [
+    "auto_init",
+    "inline_extract",
+    "disabled",
+    "compress",
+    "cross_turn_dedup",
+    "ccr_cards",
+    "inject_principles"
+  ];
 
   var current = {};
   var lastSubmitTime = 0;
-
-  var INIT_SQL =
-"-- 1. 创建 memories 表\n" +
-"CREATE TABLE IF NOT EXISTS memories (\n" +
-"  id INT AUTO_INCREMENT PRIMARY KEY,\n" +
-"  project VARCHAR(128) NULL DEFAULT 'global',\n" +
-"  category VARCHAR(64) NULL DEFAULT 'fact',\n" +
-"  scope VARCHAR(32) NULL DEFAULT 'project',\n" +
-"  title VARCHAR(512) NOT NULL,\n" +
-"  content TEXT NOT NULL,\n" +
-"  tags VARCHAR(512) NULL DEFAULT '',\n" +
-"  entities VARCHAR(512) NULL DEFAULT '',\n" +
-"  related VARCHAR(512) NULL DEFAULT '',\n" +
-"  source VARCHAR(64) NULL DEFAULT '',\n" +
-"  fingerprint VARCHAR(64) NOT NULL,\n" +
-"  confidence_score INT NULL DEFAULT 100,\n" +
-"  status VARCHAR(16) NULL DEFAULT 'active',\n" +
-"  superseded_by INT NULL DEFAULT 0,\n" +
-"  version INT NULL DEFAULT 1,\n" +
-"  hits INT NULL DEFAULT 0,\n" +
-"  access_count INT NULL DEFAULT 1,\n" +
-"  invalid_at DATETIME,\n" +
-"  last_accessed_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,\n" +
-"  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,\n" +
-"  updated_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP\n" +
-");\n\n" +
-"-- 2. 创建 memories 索引\n" +
-"CREATE UNIQUE INDEX idx_memories_uniq_fp ON memories (project, fingerprint);\n" +
-"CREATE INDEX idx_memories_scope ON memories (project, status);\n\n" +
-"-- 3. 创建 pitfalls 表\n" +
-"CREATE TABLE IF NOT EXISTS pitfalls (\n" +
-"  id INT AUTO_INCREMENT PRIMARY KEY,\n" +
-"  project VARCHAR(128) NULL DEFAULT 'global',\n" +
-"  component VARCHAR(128) NOT NULL,\n" +
-"  symptom TEXT NOT NULL,\n" +
-"  root_cause TEXT NOT NULL,\n" +
-"  solution TEXT NOT NULL,\n" +
-"  severity VARCHAR(16) NULL DEFAULT 'medium',\n" +
-"  error_type VARCHAR(64) NULL DEFAULT '',\n" +
-"  tags VARCHAR(512) NULL DEFAULT '',\n" +
-"  fingerprint VARCHAR(64) NOT NULL,\n" +
-"  recurrence INT NULL DEFAULT 1,\n" +
-"  invalid_at DATETIME,\n" +
-"  last_occurred_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,\n" +
-"  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,\n" +
-"  updated_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP\n" +
-");\n\n" +
-"-- 4. 创建 pitfalls 索引\n" +
-"CREATE UNIQUE INDEX idx_pitfalls_uniq_fp ON pitfalls (project, fingerprint);\n\n" +
-"-- 5. 创建 memhub_meta 元数据表\n" +
-"CREATE TABLE IF NOT EXISTS memhub_meta (\n" +
-"  id INT AUTO_INCREMENT PRIMARY KEY,\n" +
-"  k VARCHAR(64) NOT NULL,\n" +
-"  v TEXT,\n" +
-"  updated_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP\n" +
-");\n\n" +
-"-- 6. 创建 memhub_meta 索引\n" +
-"CREATE UNIQUE INDEX idx_memhub_meta_k ON memhub_meta (k);\n\n" +
-"-- 7. 写入初始结构版本\n" +
-"INSERT INTO memhub_meta (k, v) VALUES ('schema_version', '1') ON DUPLICATE KEY UPDATE v = '1';";
-
-  var RESET_SQL =
-"-- 清空并删除插件三张表（表结构与全部数据一并删除，不可恢复）\n" +
-"DROP TABLE IF EXISTS memhub_meta;\n" +
-"DROP TABLE IF EXISTS pitfalls;\n" +
-"DROP TABLE IF EXISTS memories;";
+  var pollingTimer = null;
 
   function escapeHtml(str) {
     return String(str || "")
@@ -205,7 +152,7 @@
     var secret = String(o.ncb_secret || "").trim();
     if (!db || (!key && !secret)) {
       if (!db && !key && !secret) {
-        return "⚠️ 未完成配置：请填写 MCP Key 与数据库名称，然后点击「一键创建数据库」";
+        return "⚠️ 未完成配置：请填写下方 MCP Key 与数据库名称，然后点击「一键创建数据库」";
       }
       if (!db) {
         return "⚠️ 未完成配置：请填写数据库名称，然后点击「一键创建数据库」";
@@ -213,14 +160,16 @@
       return "⚠️ 未完成配置：请填写 MCP Key，然后点击「一键创建数据库」";
     }
 
-    var noLlm = o.inline_extract !== false && !String(o.extractor_model || "").trim();
     var parts = [];
-    parts.push(noLlm
-      ? "✅ 零外部模型：提炼由正在跑的那个模型顺手完成"
-      : "ℹ️ 外部提炼模型：" + (String(o.extractor_model || "").trim() || "（未填）"));
-    parts.push(o.clef_mode === "llm" ? "clef 模型仲裁" : "规则仲裁");
-    if (o.compress === false) parts.push("请求压缩已关");
-    else parts.push("请求压缩开");
+    parts.push("数据库：" + db);
+    parts.push("内联提炼 " + (o.inline_extract !== false ? "开" : "关"));
+    var conf = (o.min_confidence != null && !isNaN(parseFloat(o.min_confidence))) ? o.min_confidence : 0.6;
+    parts.push("入库门槛 " + conf);
+    if (o.compress === false) {
+      parts.push("请求压缩关");
+    } else {
+      parts.push("请求压缩开");
+    }
     if (o.disabled) parts.push("网关注入已停用");
     return parts.join(" · ");
   }
@@ -233,35 +182,156 @@
     var key = String(o.mcp_key || "").trim();
     var secret = String(o.ncb_secret || "").trim();
     var notConfigured = !db || (!key && !secret);
-    var noLlm = o.inline_extract !== false && !String(o.extractor_model || "").trim();
     var textEl = $("mode_text");
     if (textEl) {
       textEl.textContent = describeMode(o);
     } else {
       el.textContent = describeMode(o);
     }
-    el.className = "mode" + (notConfigured ? " warn" : (noLlm ? " ok" : ""));
+    el.className = "mode" + (notConfigured ? " warn" : " ok");
   }
 
   function check(o) {
     if (!o.ncb_instance) return "数据库名称为空，记忆将无法存取";
     if (!o.ncb_secret && !o.mcp_key) return "未填 Secret Key 或 MCP Key：新建库请填写 MCP Key";
-    if (!o.magpie_base_url && o.extractor_model) return "填了提炼模型，但没填 Magpie 地址";
-    if (o.magpie_base_url && !o.extractor_model && !o.clef_model)
-      return "未填任何模型 ID，memory_extract 将不可用";
+    if (o.min_confidence != null && (o.min_confidence < 0 || o.min_confidence > 1))
+      return "最低入库置信度应在 0~1 之间";
     if (o.compress && o.compress_min_chars >= o.compress_max_chars)
       return "压缩阈值不合理：『小于此长度不动』应小于『单块压缩后上限』";
     return "";
   }
 
-  /* ---------------- 数据库管理状态区 ---------------- */
+  /* ---------------- 状态展示与结果回传渲染 ---------------- */
+  function renderStatusBlock(containerId, statusObj) {
+    var el = $(containerId);
+    if (!el) return;
+    if (!statusObj || !statusObj.title) return;
+
+    el.style.display = "block";
+    var okClass = statusObj.ok ? "ok" : "bad";
+    el.className = "action-status-box " + okClass;
+
+    var html = '<div class="action-status-header">';
+    html += '<span class="action-status-badge ' + okClass + '">' + (statusObj.ok ? "✓ 成功" : "✗ 失败") + "</span>";
+    html += '<strong class="action-status-title">' + escapeHtml(statusObj.title) + "</strong>";
+    if (statusObj.at) {
+      var timeStr = new Date(statusObj.at).toLocaleString("zh-CN", { hour12: false });
+      html += '<span class="action-status-time">' + escapeHtml(timeStr) + "</span>";
+    }
+    html += "</div>";
+
+    if (Array.isArray(statusObj.lines) && statusObj.lines.length > 0) {
+      html += '<ul class="action-status-lines">';
+      statusObj.lines.forEach(function (line) {
+        html += "<li>" + escapeHtml(line) + "</li>";
+      });
+      html += "</ul>";
+    }
+
+    el.innerHTML = html;
+  }
+
+  function renderAllStatus(statusData) {
+    statusData = statusData || window.__memhubStatus;
+    if (!statusData || typeof statusData !== "object") return;
+    if (statusData.ncb) renderStatusBlock("db_action_status", statusData.ncb);
+    if (statusData.r2) renderStatusBlock("r2_action_status", statusData.r2);
+    if (statusData.model) renderStatusBlock("model_action_status", statusData.model);
+  }
+
+  function loadStatus(callback) {
+    if (typeof document === "undefined" || !document.createElement) {
+      if (window.__memhubStatus) renderAllStatus(window.__memhubStatus);
+      if (typeof callback === "function") callback(null, window.__memhubStatus);
+      return;
+    }
+    var head = document.head || (document.getElementsByTagName && document.getElementsByTagName("head")[0]) || document.body || document.documentElement;
+    if (!head) {
+      if (window.__memhubStatus) renderAllStatus(window.__memhubStatus);
+      if (typeof callback === "function") callback(null, window.__memhubStatus);
+      return;
+    }
+
+    var oldScript = (document.querySelector && document.querySelector("script[data-memhub-status]")) || null;
+    if (oldScript && oldScript.parentNode) {
+      oldScript.parentNode.removeChild(oldScript);
+    }
+
+    var script = document.createElement("script");
+    script.setAttribute("data-memhub-status", "true");
+    script.src = "_status.js?t=" + Date.now();
+
+    var done = false;
+    var finish = function (data) {
+      if (done) return;
+      done = true;
+      if (script.parentNode) script.parentNode.removeChild(script);
+      if (data) renderAllStatus(data);
+      if (typeof callback === "function") callback(null, data);
+    };
+
+    script.onload = function () {
+      finish(window.__memhubStatus || null);
+    };
+    script.onerror = function () {
+      finish(null);
+    };
+
+    head.appendChild(script);
+  }
+
+  function startPollingStatus(targetCard, submitTime) {
+    if (pollingTimer) {
+      clearInterval(pollingTimer);
+      pollingTimer = null;
+    }
+    var pollStart = Date.now();
+    var containerMap = {
+      ncb: "db_action_status",
+      r2: "r2_action_status",
+      model: "model_action_status"
+    };
+    var targetContainerId = containerMap[targetCard] || "db_action_status";
+
+    pollingTimer = setInterval(function () {
+      var elapsed = Date.now() - pollStart;
+      loadStatus(function (err, statusData) {
+        statusData = statusData || window.__memhubStatus;
+        if (statusData && statusData[targetCard] && statusData[targetCard].at >= submitTime) {
+          clearInterval(pollingTimer);
+          pollingTimer = null;
+          return;
+        }
+
+        if (elapsed >= 60000) {
+          clearInterval(pollingTimer);
+          pollingTimer = null;
+          var el = $(targetContainerId);
+          if (el) {
+            if (typeof document !== "undefined" && document.createElement) {
+              var fallbackNote = document.createElement("div");
+              fallbackNote.className = "action-status-fallback";
+              fallbackNote.textContent = "宿主尚未回传结果。若长时间无输出，可让 agent 调用 db_status 查看。";
+              el.appendChild(fallbackNote);
+            } else {
+              el.innerHTML += '<div class="action-status-fallback">宿主尚未回传结果。若长时间无输出，可让 agent 调用 db_status 查看。</div>';
+            }
+            el.style.display = "block";
+          }
+        }
+      });
+    }, 2000);
+  }
+
+  /* ---------------- 数据库管理即时状态区 ---------------- */
   function paintDbStatus(action, feedbackMsg, feedbackKind) {
     var el = $("db_action_status");
     if (!el) return;
     var act = action || (current && current._action);
     if (!feedbackMsg && (!act || !act.op)) {
-      el.style.display = "none";
-      el.innerHTML = "";
+      if (!el.innerHTML) {
+        el.style.display = "none";
+      }
       return;
     }
     el.style.display = "block";
@@ -274,7 +344,10 @@
     if (act && act.op) {
       var opLabels = {
         provision: "一键创建数据库",
+        ncb_check: "检测 MCP Key",
         storage_setup: "挂载 R2 存储",
+        r2_check: "检测 R2 密钥",
+        model_check: "检测本地小模型",
         init: "初始化数据库",
         reset: "清空数据库",
         status: "检查结构状态"
@@ -284,7 +357,7 @@
       html += '<div class="db-status-detail">';
       html += '当前任务：<strong>' + escapeHtml(opName) + '</strong>（op: <code>' + escapeHtml(act.op) + '</code>，id: <code>' + escapeHtml(act.id) + '</code>）<br>';
       html += '提交时间：' + escapeHtml(timeStr) + '<br>';
-      html += '说明：宿主将在下次被调用时读取并执行；由于沙箱限制，执行结果无法在本页直接读回，请让 agent 调用 <code>db_provision</code> / <code>db_status</code> 查看最新状态。';
+      html += '说明：宿主将在下次被调用时读取并执行；已启动结果轮询。若长时间无输出，可让 agent 调用 <code>db_status</code> 查看。';
       html += '</div>';
     }
     el.innerHTML = html;
@@ -292,8 +365,9 @@
 
   function setActionButtonsDisabled(disabled) {
     var ids = [
-      "btn_db_provision", "btn_db_storage_setup", "btn_db_status", "btn_db_reset",
-      "btn_confirm_provision", "btn_confirm_reset"
+      "btn_db_provision", "btn_check_ncb", "btn_db_storage_setup", "btn_db_status", "btn_db_reset",
+      "btn_confirm_provision", "btn_confirm_reset",
+      "btn_check_r2", "btn_check_model"
     ];
     ids.forEach(function (id) {
       var el = $(id);
@@ -322,6 +396,13 @@
     paintDbStatus(null, "正在提交信标任务…", "");
     say("正在提交…");
 
+    var targetCard = "ncb";
+    if (op === "storage_setup" || op === "r2_check") {
+      targetCard = "r2";
+    } else if (op === "model_check") {
+      targetCard = "model";
+    }
+
     // 全量替换防丢：必须先 get() 获取远端全部 options，再合并写入
     Promise.resolve(window.magpie.options.get()).then(function (remote) {
       if (remote && typeof remote === "object") {
@@ -349,6 +430,17 @@
         if (payload.r2_account_id) action.account_id = payload.r2_account_id;
         if (payload.r2_access_key_id) action.access_key_id = payload.r2_access_key_id;
         if (payload.r2_secret_access_key) action.secret_access_key = payload.r2_secret_access_key;
+      } else if (op === "r2_check") {
+        var acc = payload.r2_account_id || ($("r2_account_id") ? $("r2_account_id").value.trim() : "");
+        var ak = payload.r2_access_key_id || ($("r2_access_key_id") ? $("r2_access_key_id").value.trim() : "");
+        var sk = payload.r2_secret_access_key || ($("r2_secret_access_key") ? $("r2_secret_access_key").value.trim() : "");
+        var bkt = payload.r2_bucket_name || ($("r2_bucket_name") ? $("r2_bucket_name").value.trim() : "");
+        var pub = payload.r2_public_url || ($("r2_public_url") ? $("r2_public_url").value.trim() : "");
+        action.account_id = acc;
+        action.access_key_id = ak;
+        action.secret_access_key = sk;
+        action.bucket_name = bkt;
+        action.public_url = pub;
       }
 
       if (extra && extra.confirm) action.confirm = extra.confirm;
@@ -362,16 +454,23 @@
           paintMode(current);
           var msg = "";
           if (op === "provision") {
-            msg = "已提交一键创建任务（ID: " + action.id + "）。宿主将在下次被调用时自动执行建库建表与存储挂载；结果请让 agent 调用 db_provision / db_status 查看。";
+            msg = "已提交一键创建任务（ID: " + action.id + "）。宿主将在执行后回传结果…";
+          } else if (op === "ncb_check") {
+            msg = "已提交检测 MCP Key 任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "storage_setup") {
-            msg = "已提交挂载 R2 存储任务（ID: " + action.id + "）。宿主将在下次被调用时执行；结果请让 agent 调用 db_status 查看。";
+            msg = "已提交挂载 R2 存储任务（ID: " + action.id + "）。正在等待宿主执行…";
+          } else if (op === "r2_check") {
+            msg = "已提交检测 R2 密钥任务（ID: " + action.id + "）。正在等待宿主执行…";
+          } else if (op === "model_check") {
+            msg = "已提交检测本地小模型任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "status") {
-            msg = "已提交检查状态任务。宿主将在下次被调用时执行，结果请让 agent 调用 db_status 工具查看。";
+            msg = "已提交检查状态任务。正在等待宿主执行…";
           } else if (op === "reset") {
-            msg = "已提交清空数据库任务（ID: " + action.id + "）。宿主将在下次被调用时执行；由于沙箱限制，结果无法在本页直接读回。";
+            msg = "已提交清空数据库任务（ID: " + action.id + "）。正在等待宿主执行…";
           }
           paintDbStatus(action, msg, "ok");
           say("信标已提交", "ok");
+          startPollingStatus(targetCard, action.at);
         },
         function (e) {
           setActionButtonsDisabled(false);
@@ -508,9 +607,9 @@
           fill(current);
           paintMode(current);
           if (filled === 0) {
-            r2Say("已保存，但 R2 凭据全为空 —— 挂载时 NCB 会用它账号里缓存的连接", "warn");
+            r2Say("已保存本卡片（凭据留空，挂载时 NCB 将复用已有连接）", "warn");
           } else {
-            r2Say("已保存 " + filled + "/" + any + " 个 R2 字段；现在可以去点「挂载 R2 存储」", "ok");
+            r2Say("已保存本卡片（已填 " + filled + "/" + any + " 项）", "ok");
           }
         },
         function (e) {
@@ -542,31 +641,6 @@
     el.select();
     document.execCommand("copy");
     done();
-  }
-
-  function copySql(text, title) {
-    var showFallback = function () {
-      var wrap = $("sql_fallback_wrap");
-      var area = $("sql_fallback_text");
-      var tEl = $("sql_fallback_title");
-      if (wrap && area) {
-        if (tEl) tEl.textContent = title || "SQL 语句";
-        area.value = text;
-        wrap.style.display = "block";
-        area.focus();
-        area.select();
-        say("剪贴板不可用，已在下方展开 SQL，请手动复制", "warn");
-      }
-    };
-
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(
-        function () { say("已复制 " + (title || "SQL") + " 到剪贴板", "ok"); },
-        function () { showFallback(); }
-      );
-    } else {
-      showFallback();
-    }
   }
 
   /* ---------------- 弹窗与确认交互 ---------------- */
@@ -659,13 +733,6 @@
       });
     }
 
-    var saveCardGatewayBtn = $("btn_save_card_gateway");
-    if (saveCardGatewayBtn) {
-      saveCardGatewayBtn.addEventListener("click", function () {
-        saveCard("gateway", "btn_save_card_gateway", "status_card_gateway");
-      });
-    }
-
     // MCP Key 切换密码显隐
     var toggleMcpBtn = $("toggle_mcp_key");
     if (toggleMcpBtn) {
@@ -699,11 +766,35 @@
       });
     }
 
+    // 检测 MCP Key
+    var checkNcbBtn = $("btn_check_ncb");
+    if (checkNcbBtn) {
+      checkNcbBtn.addEventListener("click", function () {
+        submitAction("ncb_check");
+      });
+    }
+
     // 挂载 R2 存储
     var storageBtn = $("btn_db_storage_setup");
     if (storageBtn) {
       storageBtn.addEventListener("click", function () {
         submitAction("storage_setup");
+      });
+    }
+
+    // 检测 R2 密钥
+    var checkR2Btn = $("btn_check_r2");
+    if (checkR2Btn) {
+      checkR2Btn.addEventListener("click", function () {
+        submitAction("r2_check");
+      });
+    }
+
+    // 检测本地小模型
+    var checkModelBtn = $("btn_check_model");
+    if (checkModelBtn) {
+      checkModelBtn.addEventListener("click", function () {
+        submitAction("model_check");
       });
     }
 
@@ -757,37 +848,23 @@
       });
     }
 
-    // 复制 SQL
-    var copyInitSqlBtn = $("btn_copy_init_sql");
-    if (copyInitSqlBtn) {
-      copyInitSqlBtn.addEventListener("click", function () {
-        copySql(INIT_SQL, "初始化 SQL");
-      });
-    }
-
-    var copyResetSqlBtn = $("btn_copy_reset_sql");
-    if (copyResetSqlBtn) {
-      copyResetSqlBtn.addEventListener("click", function () {
-        copySql(RESET_SQL, "清库 SQL");
-      });
-    }
-
-    var closeSqlBtn = $("btn_close_sql");
-    if (closeSqlBtn) {
-      closeSqlBtn.addEventListener("click", function () {
-        var wrap = $("sql_fallback_wrap");
-        if (wrap) wrap.style.display = "none";
-      });
-    }
-
-    ["extractor_model", "clef_mode", "compress", "disabled", "inline_extract", "ncb_instance", "mcp_key", "ncb_secret"].forEach(function (k) {
+    ["compress", "disabled", "inline_extract", "ncb_instance", "mcp_key", "ncb_secret", "min_confidence"].forEach(function (k) {
       var el = $(k);
       if (el) el.addEventListener("change", function () { paintMode(collect()); });
-      if (el && (el.type === "text" || el.type === "password")) el.addEventListener("input", function () { paintMode(collect()); });
+      if (el && (el.type === "text" || el.type === "password" || el.type === "number")) {
+        el.addEventListener("input", function () { paintMode(collect()); });
+      }
     });
+
+    // 状态回传暴露，供测试与动态调用
+    window.loadStatus = loadStatus;
+    window.renderStatus = renderAllStatus;
+    window.renderAllStatus = renderAllStatus;
+    window.__renderMemhubStatus = renderAllStatus;
 
     if (!window.magpie || !window.magpie.options) {
       say("桥接脚本未加载", "bad");
+      loadStatus();
       return;
     }
 
@@ -800,6 +877,7 @@
         paintDbStatus(current._action);
         var warn = check(current);
         if (warn) say(warn, "warn");
+        loadStatus();
       })
       .catch(function (e) {
         say("读取配置失败：" + (e && e.message ? e.message : e), "bad");

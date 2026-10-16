@@ -18,6 +18,21 @@
   --magpie-amber: DarkOrange;
   --magpie-font: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --magpie-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* 统一字号与尺寸规范 */
+  --fs-title: 14px;     /* 卡片标题 */
+  --fs-label: 13px;     /* 设置项标签 */
+  --fs-hint: 12.5px;    /* 说明文字 */
+  --fs-badge: 11px;     /* 徽章 */
+  --fs-btn: 12.5px;     /* 按钮 */
+  --fs-input: 13px;     /* 输入框字体 */
+  --fs-code: 12.5px;    /* 代码等宽文字 */
+  --btn-h: 30px;        /* 按钮高度统一 */
+  --btn-h-sm: 24px;     /* 小按钮高度统一 */
+  --radius: 8px;        /* 基础圆角 */
+  --radius-sm: 6px;     /* 小圆角 */
+  --radius-card: 12px;  /* 卡片圆角 */
+  --gap-row: 18px;      /* 行间距 */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -45,7 +60,7 @@ body {
   background: var(--magpie-bg);
   color: var(--magpie-fg);
   font-family: var(--magpie-font);
-  font-size: 13.5px;
+  font-size: var(--fs-label);
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
@@ -61,12 +76,13 @@ body {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 12px 14px;
-  margin-bottom: 22px;
+  padding: 12px 16px;
+  margin-bottom: 24px;
   border: 1px solid var(--magpie-line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--magpie-card);
   color: var(--magpie-fg-2);
+  font-size: var(--fs-hint);
 }
 
 #mode .dot {
@@ -104,33 +120,27 @@ body {
 
 /* ---------- 分组与卡片 ---------- */
 section {
-  margin-bottom: 26px;
+  margin-bottom: 28px;
 }
 
 h2 {
-  font-size: 12px;
+  font-size: var(--fs-title);
   font-weight: 600;
-  letter-spacing: .08em;
-  text-transform: uppercase;
+  letter-spacing: .04em;
   color: var(--magpie-muted);
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   padding: 0 2px;
 }
 
 .card {
   border: 1px solid var(--magpie-line);
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   background: var(--magpie-card);
-  padding: 4px 16px;
+  padding: 4px 20px;
 }
 
-.card > .row {
-  padding: 14px 0;
-  border-bottom: 1px solid var(--magpie-line);
-}
-
-.card > .row:last-child {
-  border-bottom: 0;
+.wrap > details.card {
+  margin-bottom: 24px;
 }
 
 details.card {
@@ -138,52 +148,64 @@ details.card {
 }
 
 details.card > summary {
-  padding: 13px 16px;
+  padding: 16px 20px;
 }
 
 details.card > .body {
-  padding: 0 16px;
+  padding: 0 20px 14px;
 }
 
-details.card > .body > .row:last-child {
-  border-bottom: 0;
+/* ---------- 设置行排版与加宽间距 ---------- */
+.card > .row,
+details.card > .body > .row {
+  padding: var(--gap-row) 0;
+  border-bottom: 1px solid var(--magpie-line);
 }
 
-/* ---------- 设置行排版 ---------- */
+.card > .row:last-of-type,
+details.card > .body > .row:last-of-type {
+  border-bottom: 1px solid var(--magpie-line);
+}
+
 .row {
   display: block;
 }
 
 .row-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
 
 .row-head label {
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--magpie-fg);
 }
 
-.req {
-  color: var(--magpie-red);
-  font-weight: 700;
-  font-size: 11px;
-}
-
 .hint {
   color: var(--magpie-muted);
-  font-size: 12.5px;
-  margin-top: 2px;
+  font-size: var(--fs-hint);
+  line-height: 1.55;
+  margin-top: 5px;
 }
 
-.hint.small {
-  font-size: 12px;
+.hint-desc {
+  margin-bottom: 4px;
+}
+
+.hint-diff {
+  color: var(--magpie-fg-2);
+}
+
+.hint-diff strong {
+  color: var(--magpie-fg);
+  font-weight: 600;
 }
 
 .control {
-  margin-top: 8px;
+  margin-top: 10px;
 }
 
 .row.split {
@@ -206,11 +228,12 @@ details.card > .body > .row:last-child {
 .badge {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   font-family: var(--magpie-code);
-  font-size: 11px;
+  font-size: var(--fs-badge);
   line-height: 1;
-  padding: 4px 7px;
-  border-radius: 6px;
+  padding: 3px 7px;
+  border-radius: var(--radius-sm);
   color: var(--magpie-fg-2);
   background: var(--magpie-accent-soft);
   border: 1px solid var(--magpie-line);
@@ -218,13 +241,15 @@ details.card > .body > .row:last-child {
 }
 
 .badge.rec {
-  opacity: .9;
+  opacity: .95;
   font-family: var(--magpie-font);
 }
 
 .badge.req {
   color: var(--magpie-red);
   border-color: var(--magpie-red);
+  background: color-mix(in srgb, var(--magpie-red) 10%, transparent);
+  font-weight: 600;
 }
 
 .badge.warn {
@@ -239,13 +264,15 @@ input[type=number],
 select {
   width: 100%;
   font-family: var(--magpie-font);
-  font-size: 13px;
+  font-size: var(--fs-input);
   color: var(--magpie-fg);
   background: var(--magpie-bg);
   border: 1px solid var(--magpie-line);
-  border-radius: 8px;
-  padding: 7px 10px;
+  border-radius: var(--radius);
+  height: var(--btn-h);
+  padding: 0 10px;
   outline: none;
+  box-sizing: border-box;
 }
 
 input:focus,
@@ -255,7 +282,7 @@ select:focus {
 
 input.mono {
   font-family: var(--magpie-code);
-  font-size: 12.5px;
+  font-size: var(--fs-code);
 }
 
 select {
@@ -267,32 +294,39 @@ select {
 .input-group {
   display: flex;
   gap: 8px;
-  align-items: stretch;
+  align-items: center;
 }
 
 .input-group input {
   flex: 1 1 auto;
   min-width: 0;
+  height: var(--btn-h);
 }
 
-/* 输入框旁的按钮不能被压缩，否则两个字的文案会竖排折行 */
 .input-group button {
   flex: none;
+  height: var(--btn-h);
   white-space: nowrap;
 }
 
-/* ---------- 按钮 ---------- */
+/* ---------- 统一按钮规范 ---------- */
 button {
   font-family: var(--magpie-font);
-  font-size: 12.5px;
+  font-size: var(--fs-btn);
   font-weight: 500;
   color: var(--magpie-fg);
   background: var(--magpie-bg);
   border: 1px solid var(--magpie-line);
-  border-radius: 8px;
-  padding: 7px 13px;
+  border-radius: var(--radius);
+  height: var(--btn-h);
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   transition: opacity .12s ease;
+  box-sizing: border-box;
+  white-space: nowrap;
 }
 
 button:hover {
@@ -318,15 +352,17 @@ button.danger {
 }
 
 button.tiny {
-  padding: 4px 9px;
-  font-size: 11.5px;
-  border-radius: 6px;
+  height: var(--btn-h-sm);
+  padding: 0 8px;
+  font-size: var(--fs-badge);
+  border-radius: var(--radius-sm);
 }
 
 button.btn-card-save {
-  font-size: 12px;
-  padding: 5px 13px;
-  border-radius: 6px;
+  height: var(--btn-h);
+  font-size: var(--fs-btn);
+  padding: 0 14px;
+  border-radius: var(--radius);
   background: var(--magpie-bg);
   color: var(--magpie-fg);
   border: 1px solid var(--magpie-line);
@@ -342,20 +378,20 @@ button.btn-card-save:hover {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: var(--gap-row);
 }
 
 .card-save-row {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 14px;
-  padding: 12px 0 14px;
+  margin-top: var(--gap-row);
+  padding: var(--gap-row) 0 8px;
   border-top: 1px dashed var(--magpie-line);
 }
 
 .card-save-row .status {
-  font-size: 12px;
+  font-size: var(--fs-hint);
   flex: 1 1 auto;
 }
 
@@ -420,7 +456,7 @@ summary {
   list-style: none;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   user-select: none;
 }
 
@@ -444,74 +480,129 @@ details[open] > summary .chev {
 
 summary .t {
   font-weight: 600;
-  font-size: 14px;
+  font-size: var(--fs-title);
   color: var(--magpie-fg);
 }
 
 summary .sub {
-  font-size: 12px;
+  font-size: var(--fs-hint);
   color: var(--magpie-muted);
 }
 
 code, .mono {
   font-family: var(--magpie-code);
+  font-size: var(--fs-code);
 }
 
 .divider-note {
-  font-size: 12px;
+  font-size: var(--fs-hint);
   color: var(--magpie-muted);
-  margin: 14px 0 0;
-  padding: 10px 12px;
-  border: 1px dashed var(--magpie-line);
-  border-radius: 8px;
-}
-
-/* ---------- 数据库管理状态区 ---------- */
-.status-line {
-  margin-top: 10px;
-  font-size: 12px;
-  color: var(--magpie-muted);
-  min-height: 1em;
-}
-
-.db-status-box {
-  margin-top: 12px;
+  margin: var(--gap-row) 0 0;
   padding: 10px 14px;
-  border-radius: 8px;
+  border: 1px dashed var(--magpie-line);
+  border-radius: var(--radius);
+}
+
+/* ---------- 醒目的操作状态区 ---------- */
+.action-status-box,
+.db-status-box {
+  margin-top: 14px;
+  padding: 12px 16px;
+  border-radius: var(--radius);
   border: 1px solid var(--magpie-line);
   background: var(--magpie-bg);
-  font-size: 12.5px;
+  font-size: var(--fs-hint);
   color: var(--magpie-fg-2);
 }
 
+.action-status-box.ok,
 .db-status-box.ok {
   border-color: var(--magpie-green);
 }
 
-.db-status-box.warn {
-  border-color: var(--magpie-amber);
-  color: var(--magpie-amber);
-}
-
+.action-status-box.bad,
 .db-status-box.bad {
   border-color: var(--magpie-red);
   color: var(--magpie-red);
 }
 
+.action-status-box.warn,
+.db-status-box.warn {
+  border-color: var(--magpie-amber);
+  color: var(--magpie-amber);
+}
+
+.action-status-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.action-status-badge {
+  font-size: var(--fs-badge);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+
+.action-status-badge.ok {
+  background: color-mix(in srgb, var(--magpie-green) 15%, transparent);
+  color: var(--magpie-green);
+}
+
+.action-status-badge.bad {
+  background: color-mix(in srgb, var(--magpie-red) 15%, transparent);
+  color: var(--magpie-red);
+}
+
+.action-status-title {
+  font-size: var(--fs-label);
+  font-weight: 600;
+  color: var(--magpie-fg);
+}
+
+.action-status-time {
+  font-size: var(--fs-badge);
+  color: var(--magpie-muted);
+  margin-left: auto;
+}
+
+.action-status-lines {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: var(--fs-hint);
+  line-height: 1.55;
+  color: var(--magpie-fg-2);
+}
+
+.action-status-lines li {
+  margin-bottom: 4px;
+}
+
+.action-status-fallback {
+  margin-top: 8px;
+  font-size: var(--fs-hint);
+  color: var(--magpie-muted);
+  font-style: italic;
+}
+
+/* 兼容现有 paintDbStatus 结构 */
 .db-status-title {
+  font-size: var(--fs-label);
   font-weight: 600;
   margin-bottom: 4px;
 }
 
 .db-status-detail {
-  font-size: 12px;
+  font-size: var(--fs-hint);
   line-height: 1.55;
   color: var(--magpie-muted);
 }
 
 /* ---------- 状态反馈文字 ---------- */
 .status {
-  font-size: 12.5px;
+  font-size: var(--fs-hint);
   color: var(--magpie-muted);
 }
 
@@ -528,41 +619,6 @@ code, .mono {
   color: var(--magpie-red);
 }
 
-/* ---------- SQL 降级展示区 ---------- */
-.sql-fallback {
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid var(--magpie-line);
-  border-radius: 8px;
-  background: var(--magpie-bg);
-}
-
-.sql-fallback-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-  font-weight: 600;
-  font-size: 12.5px;
-}
-
-.sql-fallback textarea {
-  width: 100%;
-  font-family: var(--magpie-code);
-  font-size: 12px;
-  padding: 8px 10px;
-  background: var(--magpie-bg);
-  color: var(--magpie-fg);
-  border: 1px solid var(--magpie-line);
-  border-radius: 6px;
-  resize: vertical;
-  outline: none;
-}
-
-.sql-fallback textarea:focus {
-  border-color: var(--magpie-accent);
-}
-
 /* ---------- 底部全局保存栏 ---------- */
 .footer-bar {
   display: flex;
@@ -570,13 +626,14 @@ code, .mono {
   gap: 14px;
   position: sticky;
   bottom: 0;
-  padding: 14px 0 0;
+  padding: 16px 0 0;
   background: var(--magpie-bg);
 }
 
 .footer-bar #save {
-  padding: 8px 24px;
-  font-size: 13.5px;
+  padding: 0 24px;
+  height: var(--btn-h);
+  font-size: var(--fs-btn);
   font-weight: 600;
 }
 
@@ -603,10 +660,10 @@ code, .mono {
   background: var(--magpie-card);
   color: var(--magpie-fg);
   border: 1px solid var(--magpie-line);
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   max-width: 520px;
   width: 100%;
-  padding: 20px 22px;
+  padding: 22px 24px;
   box-shadow: 0 12px 32px color-mix(in srgb, var(--magpie-line) 40%, transparent);
 }
 
@@ -617,7 +674,7 @@ code, .mono {
 }
 
 .modal-body {
-  font-size: 13px;
+  font-size: var(--fs-label);
   line-height: 1.6;
   color: var(--magpie-fg-2);
   margin-bottom: 20px;
@@ -644,16 +701,16 @@ code, .mono {
 
 .danger-banner {
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   border: 1px solid var(--magpie-red);
   color: var(--magpie-red);
   background: var(--magpie-bg);
   margin-bottom: 12px;
-  font-size: 12.5px;
+  font-size: var(--fs-hint);
 }
 
 .reset-prompt {
-  font-size: 13px;
+  font-size: var(--fs-label);
   margin-bottom: 10px;
 }
 
@@ -663,9 +720,9 @@ code, .mono {
   margin-top: 4px;
   background: var(--magpie-bg);
   border: 1px solid var(--magpie-line);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-family: var(--magpie-code);
-  font-size: 13px;
+  font-size: var(--fs-code);
 }
 
 .field {
@@ -686,6 +743,15 @@ code, .mono {
   }
 }
 
-.wrap > details.card {
-  margin-bottom: 22px;
+/* ---------- 页面级标题 ---------- */
+.wrap > h1 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--magpie-fg);
+}
+.lead {
+  margin: 0 0 20px;
+  color: var(--magpie-muted);
+  font-size: var(--fs-hint);
 }

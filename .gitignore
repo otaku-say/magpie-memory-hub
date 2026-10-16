@@ -6,3 +6,7 @@ __pycache__/
 
 # 测试残留
 .magpie-memory-hub/
+
+# 运行时状态产物（宿主执行动作后生成，含上次执行结果）
+_status.js
+_status.json

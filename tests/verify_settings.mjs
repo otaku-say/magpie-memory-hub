@@ -15,6 +15,14 @@ function makeEl(id, tag = "input") {
     id, tagName: tag.toUpperCase(), _events: {}, _attrs: {},
     value: "", checked: false, disabled: false, type: tag === "input" ? "text" : "",
     textContent: "", innerHTML: "", style: {}, placeholder: "",
+    get innerText() {
+      if (this._innerText !== undefined) return this._innerText;
+      if (this.innerHTML) {
+        return this.innerHTML.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      }
+      return this.textContent || "";
+    },
+    set innerText(v) { this._innerText = v; },
     classList: { add() {}, remove() {}, contains() { return false; } },
     addEventListener(ev, fn) { (this._events[ev] = this._events[ev] || []).push(fn); },
     removeEventListener() {},
@@ -44,18 +52,29 @@ global.window = global;
 
 /* ---------- 桥接 stub：记录 options.set 的 payload ---------- */
 const REMOTE = {
-  // 用户的现有配置（含必须保留的关键字段）
+  // 用户的现有配置（含必须保留的关键字段，共 22 项）
   ncb_instance: "my_memory",
   ncb_secret: "SECRET-KEEP-ME",
   mcp_key: "MCP-KEY-KEEP-ME",
-  compress: true,
-  cross_turn_dedup: true,
+  on_exist: "reuse",
+  auto_init: false,
+  r2_account_id: "r2-acc-keep",
+  r2_access_key_id: "r2-ak-keep",
+  r2_secret_access_key: "r2-sk-keep",
+  r2_bucket_name: "r2-bkt-keep",
+  r2_public_url: "https://r2-keep.dev",
   inline_extract: true,
+  min_confidence: 0.75,
+  inject_principles: true,
+  ccr_cards: false,
   max_inject_count: 7,
   max_budget_chars: 3333,
-  min_confidence: 0.75,
-  clef_mode: "rule",
-  compress_engine: "auto",
+  max_principles: 2,
+  disabled: false,
+  compress: true,
+  cross_turn_dedup: true,
+  compress_max_chars: 3000,
+  compress_min_chars: 1200,
   memories: [{ id: 1, title: "宿主推进来的快照，绝不能被覆盖掉" }],
   some_future_field: "未来新增的字段也必须在",
 };
@@ -73,7 +92,6 @@ global.magpie = {
 try {
   await import("data:text/javascript;base64," + Buffer.from(JS, "utf8").toString("base64"));
 } catch (e) {
-  // 某些 stub 缺方法可能抛错，只要 boot 跑过就继续
   console.log(`  （导入时抛错，已忽略：${String(e && e.message).slice(0, 80)}）`);
 }
 await new Promise((r) => setTimeout(r, 60));   // 等 promise 链跑完
@@ -148,8 +166,13 @@ console.log("\n=== 3. 清空按钮：实例名不匹配必须拒绝 ===");
   }
 }
 
-console.log("\n=== 4. 检查状态 / 挂载 R2 信标 ===");
-for (const [btnId, op] of [["btn_db_status", "status"], ["btn_db_storage_setup", "storage_setup"]]) {
+console.log("\n=== 4. 检查状态 / 挂载 R2 信标 / 检测 MCP Key / 检测小模型 ===");
+for (const [btnId, op] of [
+  ["btn_db_status", "status"],
+  ["btn_db_storage_setup", "storage_setup"],
+  ["btn_check_ncb", "ncb_check"],
+  ["btn_check_model", "model_check"]
+]) {
   await new Promise((r) => setTimeout(r, 1100));   // 绕开页面自身 1 秒频控
   lastSet = null; setCalls = 0;
   const b = els[btnId];
@@ -163,8 +186,7 @@ for (const [btnId, op] of [["btn_db_status", "status"], ["btn_db_storage_setup",
   }
 }
 
-
-console.log("\n=== 5. 独立「保存 R2 设置」按钮（不触发挂载）===");
+console.log("\n=== 5. 独立「保存本卡片」按钮（R2 卡片不触发挂载）===");
 {
   await new Promise((r) => setTimeout(r, 1100));   // 绕开频控
   lastSet = null; setCalls = 0;
@@ -197,45 +219,52 @@ console.log("\n=== 6. 静态检查：卡片标题与表格逐字一致 ===");
   const expectedTitles = [
     "NoCodeBackend 数据库与密钥",
     "Cloudflare R2 对象存储",
-    "模型提炼与仲裁",
+    "记忆提炼与入库门槛",
     "网关注入与上下文预算",
     "上下文压缩与去重",
-    "Magpie 网关连接与运行策略",
     "MCP 接入地址",
   ];
   for (const title of expectedTitles) {
-    // 标题可以出现在 <h2>（非折叠卡片）或 <span class="t">（折叠卡片）里，
-    // 断言只关心「这段文字在页面上」，不绑定具体标签
-    const hasTitle = HTML.includes(`>${title}<`) || html.includes(`>${title} `);
+    const hasTitle = HTML.includes(`>${title}<`) || HTML.includes(`>${title} `);
     check(hasTitle, `卡片标题匹配：${title}`);
   }
 }
 
-console.log("\n=== 7. 静态检查：推荐值徽章齐备 (>= 28 处) ===");
+console.log("\n=== 7. 静态检查：全部 22 个可配置项均包含推荐值或必填徽章 ===");
 {
-  const badgeMatches = [...HTML.matchAll(/class="[^"]*badge[^"]*rec[^"]*"[^>]*>([^<]*推荐[^<]*)</g)];
-  check(badgeMatches.length >= 28, `推荐值徽章齐备（共 ${badgeMatches.length} 处，>= 28）`);
+  const all22Fields = [
+    "ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init",
+    "r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url",
+    "inline_extract", "min_confidence",
+    "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
+    "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"
+  ];
+  let allHaveBadge = true;
+  for (const f of all22Fields) {
+    const rowRegex = new RegExp(`for=["']${f}["'][\\s\\S]*?<span class="badge (?:rec|req)"`, "i");
+    if (!rowRegex.test(HTML)) {
+      allHaveBadge = false;
+      no(`字段 ${f} 所在行未找到推荐值或必填徽章`);
+    }
+  }
+  check(allHaveBadge, `全部 22 个可配置项独立徽章均校验通过`);
 }
 
 console.log("\n=== 8. 独立卡片保存测试（只改本卡片字段，其它字段及 memories 逐字段不变）===");
 {
   await new Promise((r) => setTimeout(r, 1100)); // 绕开频控
   lastSet = null; setCalls = 0;
-  // 修改卡片 3（模型提炼与仲裁）字段
-  els.clef_mode.value = "llm";
+  // 修改卡片 3（记忆提炼与入库门槛）字段
+  els.inline_extract.checked = false;
   els.min_confidence.value = "0.95";
-  els.extractor_model.value = "custom-extractor";
   const b = els.btn_save_card_extract;
   check(!!b, "找到卡片 3 保存按钮 btn_save_card_extract");
   if (b) b.fire("click");
   await new Promise((r) => setTimeout(r, 140));
   check(setCalls > 0, `options.set 被调用 ${setCalls} 次`);
   if (lastSet) {
-    // 本卡片字段改动
-    check(lastSet.clef_mode === "llm", "卡片 3 clef_mode 已更新为 llm");
+    check(lastSet.inline_extract === false, "卡片 3 inline_extract 已更新为 false");
     check(lastSet.min_confidence === 0.95, "卡片 3 min_confidence 已更新为 0.95");
-    check(lastSet.extractor_model === "custom-extractor", "卡片 3 extractor_model 已更新");
-    // 其它卡片字段未变
     check(lastSet.ncb_instance === REMOTE.ncb_instance, "卡片 1 ncb_instance 未被改动");
     check(lastSet.mcp_key === REMOTE.mcp_key, "卡片 1 mcp_key 未被改动");
     check(lastSet.compress === REMOTE.compress, "卡片 5 compress 未被改动");
@@ -245,7 +274,7 @@ console.log("\n=== 8. 独立卡片保存测试（只改本卡片字段，其它�
   }
 }
 
-console.log("\n=== 9. 底部整体保存测试（全部字段都在）===");
+console.log("\n=== 9. 底部整体保存测试（全部 22 个字段都在）===");
 {
   await new Promise((r) => setTimeout(r, 1100)); // 绕开频控
   lastSet = null; setCalls = 0;
@@ -256,20 +285,87 @@ console.log("\n=== 9. 底部整体保存测试（全部字段都在）===");
   check(setCalls > 0, `options.set 被调用 ${setCalls} 次`);
   if (lastSet) {
     const allRequired = [
-      "ncb_instance", "mcp_key", "ncb_secret", "on_exist",
+      "ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init",
       "r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url",
-      "inline_extract", "clef_mode", "extractor_model", "clef_model", "min_confidence",
-      "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles",
-      "compress", "cross_turn_dedup", "compress_engine", "compress_max_chars", "compress_min_chars",
-      "magpie_base_url", "magpie_api_key", "auto_init", "disabled"
+      "inline_extract", "min_confidence",
+      "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
+      "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"
     ];
     let allPresent = true;
     for (const f of allRequired) {
       if (lastSet[f] === undefined) { allPresent = false; no(`字段 ${f} 缺失`); }
     }
-    check(allPresent, `全部 28 个可配置项字段均在保存 payload 中完整存在`);
+    check(allPresent, `全部 22 个可配置项字段均在保存 payload 中完整存在`);
     check(JSON.stringify(lastSet.memories) === JSON.stringify(REMOTE.memories), "底部保存同样不丢 memories 快照");
   }
+}
+
+console.log("\n=== 10. 检测 R2 密钥信标测试（btn_check_r2 携带凭据与库名）===");
+{
+  await new Promise((r) => setTimeout(r, 1100)); // 绕开频控
+  lastSet = null; setCalls = 0;
+  els.r2_account_id.value = "acc-chk-999";
+  els.r2_access_key_id.value = "ak-chk-888";
+  els.r2_secret_access_key.value = "sk-chk-777";
+  els.r2_bucket_name.value = "bkt-chk-666";
+  els.r2_public_url.value = "https://pub-chk.dev";
+
+  const b = els.btn_check_r2;
+  check(!!b, "找到按钮 btn_check_r2");
+  if (b) b.fire("click");
+  await new Promise((r) => setTimeout(r, 140));
+  check(setCalls > 0, `options.set 被调用 ${setCalls} 次`);
+  if (lastSet && lastSet._action) {
+    check(lastSet._action.op === "r2_check", `_action.op = ${lastSet._action.op}`);
+    check(lastSet._action.account_id === "acc-chk-999", "带上 account_id");
+    check(lastSet._action.access_key_id === "ak-chk-888", "带上 access_key_id");
+    check(lastSet._action.secret_access_key === "sk-chk-777", "带上 secret_access_key");
+    check(lastSet._action.bucket_name === "bkt-chk-666", "带上 bucket_name");
+    check(lastSet._action.public_url === "https://pub-chk.dev", "带上 public_url");
+    check(lastSet._action.database === "my_memory", "带上 database");
+    check(lastSet.ncb_instance === "my_memory", "原有配置字段未被冲掉");
+    check(JSON.stringify(lastSet.memories) === JSON.stringify(REMOTE.memories), "memories 数组完整保留");
+  }
+}
+
+console.log("\n=== 11. 状态回传渲染测试（伪造 window.__memhubStatus 验证 innerText）===");
+{
+  const mockStatus = {
+    ncb: {
+      at: 1792129607020, op: "provision", ok: true,
+      title: "一键创建完成",
+      lines: ["数据库：41694_memory", "新增 3 表 / 4 索引"]
+    },
+    r2: {
+      at: 1792129608000, op: "storage_setup", ok: false,
+      title: "R2 挂载未生效",
+      lines: ["TLS 握手被拒（凭据陈旧）", "请到 NCB 控制台更新 Cloudflare 连接"]
+    },
+    model: {
+      at: 1792129609000, op: "model_check", ok: true,
+      title: "本地模型就绪",
+      lines: ["模型文件存在：models/kompress-v1.onnx", "模型权重完整，校验耗时 12ms"]
+    }
+  };
+
+  global.window.__memhubStatus = mockStatus;
+  if (typeof global.window.renderStatus === "function") {
+    global.window.renderStatus(mockStatus);
+  }
+
+  const ncbText = (els.db_action_status && els.db_action_status.innerText) || "";
+  check(ncbText.includes("一键创建完成"), "db_action_status 包含 ncb.title");
+  check(ncbText.includes("数据库：41694_memory"), "db_action_status 包含 ncb.lines[0]");
+  check(ncbText.includes("新增 3 表 / 4 索引"), "db_action_status 包含 ncb.lines[1]");
+
+  const r2Text = (els.r2_action_status && els.r2_action_status.innerText) || "";
+  check(r2Text.includes("R2 挂载未生效"), "r2_action_status 包含 r2.title");
+  check(r2Text.includes("TLS 握手被拒（凭据陈旧）"), "r2_action_status 包含 r2.lines[0]");
+  check(r2Text.includes("请到 NCB 控制台更新 Cloudflare 连接"), "r2_action_status 包含 r2.lines[1]");
+
+  const modelText = (els.model_action_status && els.model_action_status.innerText) || "";
+  check(modelText.includes("本地模型就绪"), "model_action_status 包含 model.title");
+  check(modelText.includes("models/kompress-v1.onnx"), "model_action_status 包含 model.lines[0]");
 }
 
 console.log(fail ? `\n❌ 失败 ${fail} 项` : "\n✅ 设置页行为验收全部通过");

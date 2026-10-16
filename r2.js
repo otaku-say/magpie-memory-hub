@@ -228,6 +228,66 @@ export async function r2Setup(cfg, args) {
   };
 }
 
+/**
+ * r2_check —— 真实探针检测 R2 凭据是否可用（只读探测，不做任何写配置操作）：
+ * 上传极小探针文件，成功则删除并返回 VERIFIED，
+ * 失败则用 explainProbeFailure 给出清晰排查步骤并返回 FAILED。
+ */
+export async function r2Check(cfg, args) {
+  const a = args || {};
+  let db = "";
+  try {
+    db = dbOf(cfg, a);
+  } catch (e) {
+    return {
+      ok: false,
+      verdict: "FAILED",
+      database: "",
+      bucket_name: "",
+      public_url: "",
+      credentials_source: "未配置数据库",
+      probe: { error: e.message },
+      diagnosis: {
+        kind: "NO_DATABASE",
+        title: "未指定数据库名",
+        detail: "必须先指定或配置一个数据库实例，才能探测该库关联的 R2 存储。",
+        actions: ["请在设置页填写 ncb_instance 或给工具传入 database 参数"],
+      },
+      note: "未指定数据库名，无法进行探针测试。",
+    };
+  }
+
+  const pick = (kArg, kCfg) => (a[kArg] != null && a[kArg] !== "" ? a[kArg] : (cfg && cfg[kCfg]) || "");
+  const bucketName = pick("bucket_name", "r2BucketName");
+  const publicUrl = pick("public_url", "r2PublicUrl");
+  const hasInputCreds = Boolean(a.account_id || a.access_key_id || a.secret_access_key);
+  const hasSavedCreds = Boolean(cfg && (cfg.r2AccountId || cfg.r2AccessKeyId || cfg.r2SecretAccessKey));
+  const credentialsSource = hasInputCreds
+    ? "本次调用传入"
+    : hasSavedCreds
+    ? "插件设置页保存的"
+    : "未提供任何凭据（使用 NCB 缓存连接）";
+
+  // 不做 setupR2Storage，直接用真实探针判断凭据是否可用
+  const probe = await r2Probe(cfg, db);
+  const explained = probe.ok ? null : explainProbeFailure(probe.error);
+  const ok = !!probe.ok;
+
+  return {
+    ok,
+    verdict: ok ? "VERIFIED" : "FAILED",
+    database: db,
+    bucket_name: bucketName,
+    public_url: publicUrl,
+    credentials_source: credentialsSource,
+    probe: probe.ok ? { uploaded: true, cleaned: probe.cleaned } : { error: probe.error },
+    diagnosis: explained,
+    note: ok
+      ? "R2 凭据已通过真实探针验证：上传与删除探针文件均正常，当前存储可用。"
+      : "R2 凭据验证失败：无法完成探针文件写入。" + (explained ? " 原因：" + explained.title : ""),
+  };
+}
+
 /* ------------------------------------------------------------------ *
  * 上传 / 列举 / 删除
  * ------------------------------------------------------------------ */

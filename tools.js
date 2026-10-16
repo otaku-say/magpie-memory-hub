@@ -16,12 +16,12 @@
  */
 
 import {
-  dbStatus, dbInit, dbProvision, dbReset, storageSetup, storageUpload, storageGuide, RESET_CONFIRM,
+  dbStatus, dbInit, dbProvision, dbReset, storageSetup, storageUpload, storageGuide, ncbCheck, RESET_CONFIRM,
 } from "./db_tools.js";
-import { r2Setup, r2Upload, r2List, r2Delete, r2Guide } from "./r2.js";
+import { r2Setup, r2Upload, r2List, r2Delete, r2Guide, r2Check } from "./r2.js";
 import { lookupSecret, lookupDatabase } from "./local_state.js";
 import { makeMcpClient } from "./mcp_client.js";
-import { runPendingAction, readAction } from "./page_actions.js";
+import { runPendingAction, readAction, writeCardStatus } from "./page_actions.js";
 
 const NCB_BASE = "https://api.nocodebackend.com";
 
@@ -43,6 +43,14 @@ const SNAPSHOT_CAP = 500;
 const _recent = new Map();
 const RECENT_WINDOW_MS = 6000;
 const RECENT_CAP = 5000;
+
+/** 按作用域给过期时间：session 7 天、turn 1 天，其余（project/user）永不过期。 */
+function expiresAtFor(scope) {
+  var days = scope === "turn" ? 1 : (scope === "session" ? 7 : 0);
+  if (!days) return null;
+  var d = new Date(Date.now() + days * 86400000);
+  return d.toISOString().slice(0, 19).replace("T", " ");
+}
 
 function markRecent(fp) {
   if (_recent.size >= RECENT_CAP) _recent.clear();
@@ -85,10 +93,6 @@ function readOptions(options) {
     r2SecretAccessKey: o.r2_secret_access_key || "",
     r2BucketName: o.r2_bucket_name || "",
     r2PublicUrl: o.r2_public_url || "",
-    baseUrl: (o.magpie_base_url || "").replace(/\/+$/, ""),
-    apiKey: o.magpie_api_key || "",
-    extractor: o.extractor_model || "",
-    clef: o.clef_model || "",
     minConfidence: Number(o.min_confidence) || 0.6,
     maxInject: Number(o.max_inject_count) || 5,
     maxBudget: Number(o.max_budget_chars) || 2048,
@@ -266,60 +270,6 @@ function jsonOut(o) {
   return JSON.stringify(o, null, 2);
 }
 
-/* ---------------- Magpie LLM 调用（模型 ID 全部来自配置） ---------------- */
-async function chat(cfg, model, messages, { json = false, maxTokens = 1500 } = {}) {
-  if (!cfg.baseUrl) throw new Error("未配置 Magpie 服务地址（magpie_base_url），无法调用提炼模型。");
-  if (!model) throw new Error("未配置模型 ID。请在设置页填写「提炼模型」或「仲裁模型」。");
-
-  const url = cfg.baseUrl + "/chat/completions";
-  const headers = { "Content-Type": "application/json" };
-  if (cfg.apiKey) headers.Authorization = "Bearer " + cfg.apiKey;
-
-  const body = { model, messages, temperature: 0, max_tokens: maxTokens };
-  if (json) body.response_format = { type: "json_object" };
-
-  const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
-  const raw = await res.text();
-  if (!res.ok) {
-    throw new Error(`调用 Magpie 模型「${model}」失败 (HTTP ${res.status}): ${raw.slice(0, 300)}`);
-  }
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    throw new Error("Magpie 返回的不是 JSON: " + raw.slice(0, 200));
-  }
-  const choice = data.choices && data.choices[0];
-  let text = choice && choice.message ? choice.message.content : "";
-  if (Array.isArray(text)) {
-    text = text.map((p) => (p && p.text) || "").join("");
-  }
-  return String(text || "").trim();
-}
-
-/** 从模型输出里抠出 JSON（容忍 ```json 围栏与前后废话） */
-function parseJsonLoose(text) {
-  let s = String(text || "").trim();
-  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) s = fence[1].trim();
-  try {
-    return JSON.parse(s);
-  } catch {
-    /* 继续尝试截取 */
-  }
-  const arr = s.match(/\[[\s\S]*\]/);
-  const obj = s.match(/\{[\s\S]*\}/);
-  const cand = arr && (!obj || arr.index < obj.index) ? arr[0] : obj && obj[0];
-  if (cand) {
-    try {
-      return JSON.parse(cand);
-    } catch {
-      /* 放弃 */
-    }
-  }
-  return null;
-}
-
 /* ================================================================== *
  * 记忆写入（含指纹去重 + 时序版本链）
  * ================================================================== */
@@ -389,10 +339,16 @@ async function saveMemory(client, cfg, m) {
     confidence_score: confidence,
     status: "active",
     superseded_by: 0,
-    version: 1,
+    /* 版本号 = 被取代那批里最大的版本 + 1。
+     * 原先硬编码 1，导致 version 恒为 1、完全名存实亡（superseded_by 链是通的，
+     * 但看不出这是第几代）。没有旧版时就是 1。 */
+    version: superseded.reduce(function (mx, r) { return Math.max(mx, Number(r.version) || 1); }, 0) + 1,
     hits: 0,
     access_count: 1,
     invalid_at: null,
+    invalid_reason: '',
+    // 会话级/轮次级记忆带 TTL（默认 7 / 1 天）；project/user 级永不过期
+    expires_at: expiresAtFor(scope),
     last_accessed_at: new Date().toISOString().slice(0, 19).replace("T", " "),
   };
 
@@ -426,7 +382,11 @@ async function saveMemory(client, cfg, m) {
   if (superseded.length && newId) {
     const oldId = superseded[0].id;
     try {
-      await client.update("memories", oldId, { status: "superseded", superseded_by: newId });
+      await client.update("memories", oldId, {
+        status: "superseded", superseded_by: newId,
+        invalid_at: new Date().toISOString().slice(0, 19).replace("T", " "),
+        invalid_reason: "superseded",
+      });
       return { action: "UPDATE", id: newId, superseded_id: oldId, superseded_count: superseded.length };
     } catch (e) {
       if (!/404|not found/i.test(String(e.message))) throw e;
@@ -645,132 +605,14 @@ async function memoryForget(client, cfg, args) {
   const done = [];
   for (const t of targets) {
     try {
-      await client.update("memories", t.id, { invalid_at: now, status: "invalid" });
+      await client.update("memories", t.id, {
+        invalid_at: now, status: "invalid", invalid_reason: "user_forgot",
+      });
       done.push({ id: t.id, title: t.title });
     } catch (e) { /* 单条失败不影响其余 */ }
   }
   return jsonOut({ action: "SOFT_DELETE", forgotten: done.length, items: done,
     note: "已软失效（写 invalid_at），记录保留可追溯，中间件不再注入" });
-}
-
-/* ---------------- LLM 提炼管线（Headroom 式：提炼 + 仲裁） ---------------- */
-
-const EXTRACT_SYSTEM = `你是长期记忆提炼器。从对话中提取【值得跨会话复用】的持久事实，丢弃寒暄、一次性调试细节和临时状态。
-
-分类只能是以下之一：
-- preference：用户的偏好、厌恶、倾向的做法
-- fact：身份、角色、约束等稳定事实
-- context：当前目标、进行中的任务
-- entity：关于具体实体（项目/服务/团队成员）的信息
-- decision：已做出的技术选型或决策
-- insight：推导出的规律性认识
-
-要求：
-- 每条独立、自洽，脱离原对话也能读懂
-- title 精简（<=40字），content 具体（可含路径、命令、版本号）
-- tags 用逗号分隔的检索关键词
-- confidence 为 0~1 的小数，表示这条事实的确定程度
-- 没有值得记住的内容就返回空数组
-
-只输出 JSON：{"memories":[{"category":"...","scope":"user|project|session|turn","title":"...","content":"...","tags":"...","confidence":0.9}]}`;
-
-const CLEF_SYSTEM = `你是记忆仲裁器，负责判断候选记忆是否值得写入长期库。
-
-对每一条给出裁决：
-- drop：重复、过于笼统、临时性、或可在代码/文档里随时查到
-- keep：确实有长期价值且不与既有记忆重复
-
-只输出 JSON：{"verdicts":[{"index":0,"keep":true,"confidence":0.9,"reason":"简短理由"}]}`;
-
-async function memoryExtract(client, cfg, args) {
-  const text = String(args.text || "").trim();
-  if (!text) throw new Error("text 不能为空：请传入需要提炼的对话或文本。");
-
-  const project = String(args.project || "global").trim();
-  const extractor = String(args.model || cfg.extractor || "").trim();
-  const clef = String(args.clef_model || cfg.clef || "").trim();
-
-  // 1) 提炼
-  const raw = await chat(
-    cfg,
-    extractor,
-    [
-      { role: "system", content: EXTRACT_SYSTEM },
-      { role: "user", content: cut(text, 12000) },
-    ],
-    { json: true, maxTokens: 1500 }
-  );
-  const parsed = parseJsonLoose(raw);
-  let cands = parsed && (Array.isArray(parsed) ? parsed : parsed.memories);
-  if (!Array.isArray(cands)) cands = [];
-  if (!cands.length) {
-    return jsonOut({ stage: "extract", model: extractor, candidates: 0, stored: 0, note: "模型未提炼出可入库内容" });
-  }
-
-  // 2) 仲裁（若配置了 clef 模型；同一模型也可）
-  let kept = cands;
-  let dropped = [];
-  if (clef) {
-    const list = cands
-      .map((c, i) => `${i}. [${c.category || "fact"}] ${c.title}: ${c.content}`)
-      .join("\n");
-    const rawJudge = await chat(
-      cfg,
-      clef,
-      [
-        { role: "system", content: CLEF_SYSTEM },
-        { role: "user", content: list },
-      ],
-      { json: true, maxTokens: 1000 }
-    );
-    const judged = parseJsonLoose(rawJudge);
-    const verdicts = (judged && judged.verdicts) || [];
-    if (Array.isArray(verdicts) && verdicts.length) {
-      kept = [];
-      cands.forEach((c, i) => {
-        const v = verdicts.find((x) => Number(x.index) === i);
-        if (!v || v.keep) {
-          if (v && v.confidence !== undefined) c.confidence = v.confidence;
-          kept.push(c);
-        } else {
-          dropped.push({ index: i, title: c.title, reason: v.reason || "" });
-        }
-      });
-    }
-  }
-
-  // 3) 过滤低置信度 + 入库
-  const results = [];
-  for (const c of kept) {
-    const conf = Number(c.confidence);
-    if (conf && conf < cfg.minConfidence) {
-      dropped.push({ title: c.title, reason: `置信度 ${conf} 低于阈值 ${cfg.minConfidence}` });
-      continue;
-    }
-    const saved = await saveMemory(client, cfg, {
-      project,
-      category: c.category,
-      scope: c.scope,
-      title: c.title,
-      content: c.content,
-      tags: c.tags,
-      related: c.related,
-      confidence: conf,
-      source: "extract:" + (extractor || "?"),
-    });
-    results.push(Object.assign({ title: c.title }, saved));
-  }
-
-  return jsonOut({
-    stage: "done",
-    extractor_model: extractor,
-    clef_model: clef || null,
-    candidates: cands.length,
-    stored: results.length,
-    dropped: dropped.length,
-    stored_detail: results,
-    dropped_detail: dropped,
-  });
 }
 
 /* ================================================================== *
@@ -838,22 +680,6 @@ const TOOLS = {
     run: (args, ctx) => memoryContext(ctx._client, ctx._cfg, args),
   },
 
-  memory_extract: {
-    description:
-      "把一段对话/文本交给配置的提炼模型提炼成记忆，再用仲裁模型(clef)筛掉重复与低价值项，最后写入长期库。模型 ID 在插件设置里手动填写。",
-    args: {
-      type: "object",
-      properties: {
-        text: { type: "string", description: "需要提炼的对话文本（会截断到 12000 字符）" },
-        project: { type: "string", description: "归属项目，默认 global" },
-        model: { type: "string", description: "临时覆盖提炼模型 ID" },
-        clef_model: { type: "string", description: "临时覆盖仲裁模型 ID" },
-      },
-      required: ["text"],
-    },
-    run: (args, ctx) => memoryExtract(ctx._client, ctx._cfg, args),
-  },
-
   memory_get: {
     description: "按 id 取出某条记忆的完整内容。注入里出现摘要卡（带 id）时用它展开全文。",
     args: {
@@ -911,6 +737,19 @@ const TOOLS = {
 
   /* ---------------- 数据库结构管理（需 MCP key） ---------------- */
 
+  ncb_check: {
+    description:
+      "检测当前配置的 NoCodeBackend MCP Key 是否有效，并检查目标数据库是否存在以及核心表结构完整度。只读检测，不修改任何数据或结构。",
+    args: {
+      type: "object",
+      properties: {
+        database: { type: "string", description: "目标数据库实例名，默认取插件配置的 ncb_instance" },
+        mcp_key: { type: "string", description: "待检测的 MCP Key（可选，默认取插件配置）" },
+      },
+    },
+    run: (args, ctx) => ncbCheck(ctx._cfg, args),
+  },
+
   db_status: {
     description: "检查记忆库结构是否就绪：报告缺哪些表/列/索引，以及库里有没有插件不认识的外来表（外来表只报告、绝不触碰）。只读，可随意调用。",
     args: {
@@ -966,6 +805,23 @@ const TOOLS = {
   },
 
   /* ---------------- R2 文件存储（需 MCP key） ---------------- */
+
+  r2_check: {
+    description:
+      "检测当前配置的 Cloudflare R2 凭据真实可用性：不修改任何设置，通过上传并删除一个极小探针文件进行端到端验证。返回 VERIFIED 或 FAILED，并在失败时给出可操作的排查指引。",
+    args: {
+      type: "object",
+      properties: {
+        database: { type: "string", description: "数据库实例名，默认取插件配置" },
+        bucket_name: { type: "string", description: "自定义 bucket 名（可选）" },
+        public_url: { type: "string", description: "自定义域名或公开 URL（可选）" },
+        account_id: { type: "string", description: "临时测试的 Cloudflare 账号 ID（可选）" },
+        access_key_id: { type: "string", description: "临时测试的 Cloudflare Access Key ID（可选）" },
+        secret_access_key: { type: "string", description: "临时测试的 Cloudflare Secret Access Key（可选）" },
+      },
+    },
+    run: (args, ctx) => r2Check(ctx._cfg, args),
+  },
 
   storage_setup: {
     description: "为当前数据库配置 Cloudflare R2 文件存储：创建 bucket 并配置 CORS。⚠️ 关键：NoCodeBackend 会在**实际失败时也返回 ok:true**，所以本工具**不采信它的返回值**，而是紧接着做一次真实上传探测；请以返回的 verdict 为准（VERIFIED=真的可用 / FAILED_VERIFY=NCB 说成功但实际没生效）。挂载时会把插件里保存的 R2 凭据**显式传给 NCB**——若你在 Cloudflare 轮换过密钥，必须先在设置页填好新凭据并点「保存 R2 设置」，否则 NCB 会用缓存的旧连接导致 TLS 握手被拒。失败时返回的 diagnosis 里有可操作的处理步骤。",
@@ -1067,7 +923,20 @@ export const MagpieMemoryHub = async (input, options) => {
     tool[name] = {
       description: def.description,
       args: def.args,
-      execute: (args) => def.run(args || {}, { _client: client, _cfg: cfg, _input: input }),
+      execute: async (args) => {
+        const result = await def.run(args || {}, { _client: client, _cfg: cfg, _input: input });
+        try {
+          if (["db_provision", "db_status", "db_init", "db_reset", "ncb_check"].includes(name)) {
+            const op = name.replace(/^db_/, "");
+            writeCardStatus("ncb", result, op);
+          } else if (name === "storage_setup" || name === "r2_check") {
+            writeCardStatus("r2", result, name);
+          }
+        } catch (e) {
+          console.error("[memory-hub] writeCardStatus tool hook error:", (e && e.message) || e);
+        }
+        return result;
+      },
     };
   }
 

@@ -40,14 +40,20 @@ export const TABLES = {
       { name: "entities", type: "VARCHAR", length: 512, default: "''" },
       { name: "related", type: "VARCHAR", length: 512, default: "''" },
       { name: "source", type: "VARCHAR", length: 64, default: "''" },
-      { name: "fingerprint", type: "VARCHAR", length: 64, notNull: true },
+      // 指纹恒为 32 位十六进制，CHAR 定长既准确又更省索引空间
+      { name: "fingerprint", type: "CHAR", length: 32, notNull: true },
       { name: "confidence_score", type: "INT", default: "100" },
-      { name: "status", type: "VARCHAR", length: 16, default: "'active'" },
+      // 16 太紧（'superseded' 已占 10），留出余量给未来状态
+      { name: "status", type: "VARCHAR", length: 24, default: "'active'" },
       { name: "superseded_by", type: "INT", default: "0" },
       { name: "version", type: "INT", default: "1" },
       { name: "hits", type: "INT", default: "0" },
       { name: "access_count", type: "INT", default: "1" },
       { name: "invalid_at", type: "DATETIME", nullable: true },
+      // 软失效的原因，便于审计（superseded / user_forgot / duplicate / expired）
+      { name: "invalid_reason", type: "VARCHAR", length: 64, default: "''" },
+      // 会话级/轮次级记忆的到期时间；NULL = 永不过期
+      { name: "expires_at", type: "DATETIME", nullable: true },
       { name: "last_accessed_at", type: "DATETIME", default: "CURRENT_TIMESTAMP" },
       { name: "created_at", type: "DATETIME", default: "CURRENT_TIMESTAMP" },
       { name: "updated_at", type: "DATETIME", default: "CURRENT_TIMESTAMP", onUpdate: "CURRENT_TIMESTAMP" },
@@ -56,6 +62,8 @@ export const TABLES = {
       // 去重的最终保证：NCB 有约 2 秒写后读延迟，靠「先读后写」会漏掉紧邻/并发重复
       { name: "idx_memories_uniq_fp", unique: true, columns: ["project", "fingerprint"] },
       { name: "idx_memories_scope", columns: ["project", "status"] },
+      // 供「清理已过期记忆」用
+      { name: "idx_memories_expires", columns: ["expires_at"] },
     ],
   },
 
@@ -71,9 +79,10 @@ export const TABLES = {
       { name: "severity", type: "VARCHAR", length: 16, default: "'medium'" },
       { name: "error_type", type: "VARCHAR", length: 64, default: "''" },
       { name: "tags", type: "VARCHAR", length: 512, default: "''" },
-      { name: "fingerprint", type: "VARCHAR", length: 64, notNull: true },
+      { name: "fingerprint", type: "CHAR", length: 32, notNull: true },
       { name: "recurrence", type: "INT", default: "1" },
       { name: "invalid_at", type: "DATETIME", nullable: true },
+      { name: "invalid_reason", type: "VARCHAR", length: 64, default: "''" },
       { name: "last_occurred_at", type: "DATETIME", default: "CURRENT_TIMESTAMP" },
       { name: "created_at", type: "DATETIME", default: "CURRENT_TIMESTAMP" },
       { name: "updated_at", type: "DATETIME", default: "CURRENT_TIMESTAMP", onUpdate: "CURRENT_TIMESTAMP" },
@@ -143,8 +152,8 @@ export const VERSION_KEY = "schema_version";
  * ------------------------------------------------------------------ */
 
 function columnDDL(col) {
-  var parts = [col.name, col.type];
-  if (col.length) parts.push("(" + col.length + ")");
+  // 类型与长度必须紧贴：VARCHAR(128)，不能是 VARCHAR (128)
+  var parts = [col.name, col.type + (col.length ? "(" + col.length + ")" : "")];
   if (col.args) parts.push(col.args);
   if (col.pk) parts.push("PRIMARY KEY");
   if (col.notNull) parts.push("NOT NULL");
