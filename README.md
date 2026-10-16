@@ -203,13 +203,45 @@ NoCodeBackend 有**两种不同权限的凭据**，插件按用途分开使用�
 
 | 操作 | 走哪条路 |
 |---|---|
-| 创建 bucket + CORS | MCP `setup_r2_storage` |
+| 创建 bucket + CORS | MCP `setup_r2_storage`（**必须显式传凭据**，否则用 NCB 缓存的旧连接） |
 | 上传 | **REST multipart（优先）**，无 Secret Key 时退回 MCP base64 |
 | 列举对象 | REST `GET /files` |
 | 删除对象 | REST `DELETE /files/{key}`（需 `confirm:"DELETE"`） |
 | 下载 | 靠 bucket 的公开域名（NCB 不提供文件流代理） |
 
-**如实标注做不到的**：服务端生成**下载**用的 presigned URL；读取底层 Cloudflare 凭据。
+**如实标注做不到的**：服务端生成**下载**用的 presigned URL；**覆盖 NoCodeBackend 在账号层保存的 Cloudflare 连接**（平台边界，见下）。
+
+### ⚠️ R2 有一个静默失败的坑（务必知道）
+
+`setup_r2_storage` **在实际失败时也会返回 `ok: true`**。实测用故意写错的凭据调用：
+
+```json
+{ "ok": true, "reused_existing_connection": false,
+  "bucket_created": false, "cors_configured": true }
+```
+
+连 bucket 都没建出来（`bucket_created: false`），却报告成功。**所以绝不能用它的返回值判断成败。**
+
+本插件的对策：**挂载后立刻做一次真实上传探测**，以真实操作为准：
+
+- `verdict: "VERIFIED"` —— 真的传上去了，可用
+- `verdict: "FAILED_VERIFY"` —— NCB 说成功但真实上传失败，**这个挂载没生效**
+
+最常见的失败是 **在 Cloudflare 轮换密钥之后**：
+
+```
+sslv3 alert handshake failure (SSL alert number 40)
+→ 判定 STALE_CREDENTIALS
+```
+
+含义：NCB 手里那份 Cloudflare 凭据已经失效（或新令牌权限不足），Cloudflare 在 TLS 握手阶段就拒绝。
+
+**处理步骤**（插件只能提示，改不了 NCB 账号层的凭据）：
+
+1. 新的 R2 API Token 权限必须选 **Admin Read & Write**——只选 `Object Read & Write` 时 NCB 无法自动建桶与配 CORS，而且**会静默失败**。
+2. 到 NoCodeBackend 控制台的 **R2 Storage** 页面，把该库的 Cloudflare 连接**更新**或**删除后重建**。
+3. 回到插件：在 R2 折叠区填好新凭据 → 点 **「保存 R2 设置」**（只落凭据，不触发挂载）→ 再点 **「挂载 R2 存储」**。
+   挂载时插件会把这份凭据**显式传给 NCB**，避免它继续用缓存的旧连接。
 
 推荐工作流：`storage_upload` 拿 url → `memory_save` 存成 `category=file` 的记忆 → 日后 `memory_search` 找回。
 

@@ -968,7 +968,7 @@ const TOOLS = {
   /* ---------------- R2 文件存储（需 MCP key） ---------------- */
 
   storage_setup: {
-    description: "为当前数据库配置 Cloudflare R2 文件存储：自动创建 bucket 并配置 CORS。账号已有 Cloudflare 连接时会自动复用凭据。配置后即可用 storage_upload 上传文件。",
+    description: "为当前数据库配置 Cloudflare R2 文件存储：创建 bucket 并配置 CORS。⚠️ 关键：NoCodeBackend 会在**实际失败时也返回 ok:true**，所以本工具**不采信它的返回值**，而是紧接着做一次真实上传探测；请以返回的 verdict 为准（VERIFIED=真的可用 / FAILED_VERIFY=NCB 说成功但实际没生效）。挂载时会把插件里保存的 R2 凭据**显式传给 NCB**——若你在 Cloudflare 轮换过密钥，必须先在设置页填好新凭据并点「保存 R2 设置」，否则 NCB 会用缓存的旧连接导致 TLS 握手被拒。失败时返回的 diagnosis 里有可操作的处理步骤。",
     args: {
       type: "object",
       properties: {

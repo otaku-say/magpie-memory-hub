@@ -11,6 +11,15 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
+  var CARD_FIELDS = {
+    ncb: ["ncb_instance", "mcp_key", "ncb_secret", "on_exist"],
+    r2: ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"],
+    extract: ["inline_extract", "clef_mode", "extractor_model", "clef_model", "min_confidence"],
+    inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles"],
+    compress: ["compress", "cross_turn_dedup", "compress_engine", "compress_max_chars", "compress_min_chars"],
+    gateway: ["magpie_base_url", "magpie_api_key", "auto_init", "disabled"]
+  };
+
   var TEXT = [
     "ncb_instance", "ncb_secret", "magpie_base_url", "magpie_api_key",
     "extractor_model", "clef_model", "mcp_key",
@@ -20,7 +29,7 @@
   var SELECT = ["clef_mode", "compress_engine", "on_exist"];
   var NUM = { min_confidence: 0.6, max_inject_count: 5, max_budget_chars: 2048,
               compress_max_chars: 3000, compress_min_chars: 1200, max_principles: 2 };
-  var BOOL = ["inline_extract", "disabled", "compress", "cross_turn_dedup", "ccr_cards", "inject_principles"];
+  var BOOL = ["inline_extract", "disabled", "compress", "cross_turn_dedup", "ccr_cards", "inject_principles", "auto_init"];
 
   var current = {};
   var lastSubmitTime = 0;
@@ -107,7 +116,7 @@
     return o.replace(/\/+$/, "") + "/mcp/magpie/tools";
   }
 
-  /* ---------------- 状态行 ---------------- */
+  /* ---------------- 状态行与各卡片反馈 ---------------- */
   var statusTimer = null;
   function say(msg, kind) {
     var el = $("status");
@@ -123,7 +132,22 @@
     }
   }
 
-  /* ---------------- 表单 ---------------- */
+  var cardStatusTimers = {};
+  function cardSay(statusId, msg, kind) {
+    var el = $(statusId);
+    if (!el) return;
+    el.textContent = msg || "";
+    el.className = "status" + (kind ? " " + kind : "");
+    if (cardStatusTimers[statusId]) clearTimeout(cardStatusTimers[statusId]);
+    if (msg) {
+      cardStatusTimers[statusId] = setTimeout(function () {
+        el.textContent = "";
+        el.className = "status";
+      }, 4000);
+    }
+  }
+
+  /* ---------------- 表单填充与收集 ---------------- */
   function fill(o) {
     o = o || {};
     TEXT.forEach(function (k) {
@@ -151,7 +175,7 @@
 
   function collect() {
     var next = {};
-    // 保留外部写入的字段（memories 缓存数组、_action 等），避免保存时被抹掉
+    // 保留外部写入的字段（memories 缓存数组、_action、custom 字段等），避免保存时被冲掉
     Object.keys(current).forEach(function (k) { next[k] = current[k]; });
     TEXT.forEach(function (k) {
       var el = $(k); if (!el) return;
@@ -176,14 +200,27 @@
 
   function describeMode(o) {
     o = o || {};
+    var db = String(o.ncb_instance || "").trim();
+    var key = String(o.mcp_key || "").trim();
+    var secret = String(o.ncb_secret || "").trim();
+    if (!db || (!key && !secret)) {
+      if (!db && !key && !secret) {
+        return "⚠️ 未完成配置：请填写 MCP Key 与数据库名称，然后点击「一键创建数据库」";
+      }
+      if (!db) {
+        return "⚠️ 未完成配置：请填写数据库名称，然后点击「一键创建数据库」";
+      }
+      return "⚠️ 未完成配置：请填写 MCP Key，然后点击「一键创建数据库」";
+    }
+
     var noLlm = o.inline_extract !== false && !String(o.extractor_model || "").trim();
     var parts = [];
     parts.push(noLlm
-      ? "零外部模型：提炼由正在跑的那个模型顺手完成"
-      : "使用外部提炼模型：" + (String(o.extractor_model || "").trim() || "（未填）"));
-    parts.push(o.clef_mode === "llm" ? "仲裁走 clef 模型" : "仲裁走规则（零模型）");
+      ? "✅ 零外部模型：提炼由正在跑的那个模型顺手完成"
+      : "ℹ️ 外部提炼模型：" + (String(o.extractor_model || "").trim() || "（未填）"));
+    parts.push(o.clef_mode === "llm" ? "clef 模型仲裁" : "规则仲裁");
     if (o.compress === false) parts.push("请求压缩已关");
-    else parts.push("请求压缩开（网关内纯 JS）");
+    else parts.push("请求压缩开");
     if (o.disabled) parts.push("网关注入已停用");
     return parts.join(" · ");
   }
@@ -191,14 +228,23 @@
   function paintMode(o) {
     var el = $("mode");
     if (!el) return;
-    var noLlm = o && o.inline_extract !== false && !String(o.extractor_model || "").trim();
-    el.textContent = describeMode(o);
-    el.className = "mode" + (noLlm ? " ok" : "");
+    o = o || {};
+    var db = String(o.ncb_instance || "").trim();
+    var key = String(o.mcp_key || "").trim();
+    var secret = String(o.ncb_secret || "").trim();
+    var notConfigured = !db || (!key && !secret);
+    var noLlm = o.inline_extract !== false && !String(o.extractor_model || "").trim();
+    var textEl = $("mode_text");
+    if (textEl) {
+      textEl.textContent = describeMode(o);
+    } else {
+      el.textContent = describeMode(o);
+    }
+    el.className = "mode" + (notConfigured ? " warn" : (noLlm ? " ok" : ""));
   }
 
   function check(o) {
     if (!o.ncb_instance) return "数据库名称为空，记忆将无法存取";
-    // ncb_secret 改为可选，若填了 mcp_key 则自动创建并取得，无需手填
     if (!o.ncb_secret && !o.mcp_key) return "未填 Secret Key 或 MCP Key：新建库请填写 MCP Key";
     if (!o.magpie_base_url && o.extractor_model) return "填了提炼模型，但没填 Magpie 地址";
     if (o.magpie_base_url && !o.extractor_model && !o.clef_model)
@@ -350,7 +396,7 @@
     });
   }
 
-  /* ---------------- 动作 ---------------- */
+  /* ---------------- 底部整体保存 ---------------- */
   function save() {
     if (!window.magpie || !window.magpie.options) {
       say("桥接未就绪", "bad");
@@ -370,7 +416,7 @@
         paintDbStatus(current._action);
         if (btn) btn.disabled = false;
         if (warn) say("已保存（" + warn + "）", "warn");
-        else say("已保存", "ok");
+        else say("已保存全部设置", "ok");
       },
       function (e) {
         if (btn) btn.disabled = false;
@@ -379,19 +425,59 @@
     );
   }
 
-  /* ---------------- 独立保存 R2 设置 ----------------
-   * 只把 R2 那几个字段写进配置，**不触发挂载**。
-   * 为什么要单独一个按钮：用户可能在 Cloudflare 轮换过密钥，
-   * 必须先把新凭据落到插件配置里，「挂载 R2 存储」时才会把它们显式传给 NCB。
-   * 注意 options.set 是【全量替换】，所以必须先 get 再合并。
-   */
-  var R2_FIELDS = ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"];
+  /* ---------------- 单卡片独立保存 ---------------- */
+  function saveCard(cardKey, btnId, statusId) {
+    if (!window.magpie || !window.magpie.options) {
+      cardSay(statusId, "桥接未就绪", "bad");
+      return;
+    }
+    var btn = $(btnId);
+    if (btn) btn.disabled = true;
+    cardSay(statusId, "保存中…");
 
+    Promise.resolve(window.magpie.options.get()).then(function (remote) {
+      // 先拿到远端全量配置，只覆盖该卡片专属字段，其它卡片与 memories 快照逐字段保留
+      var next = Object.assign({}, remote || {});
+      var fields = CARD_FIELDS[cardKey] || [];
+      fields.forEach(function (k) {
+        var el = $(k);
+        if (!el) return;
+        if (BOOL.indexOf(k) !== -1) {
+          next[k] = el.checked;
+        } else if (NUM[k] !== undefined) {
+          var v = parseFloat(el.value);
+          next[k] = isNaN(v) ? NUM[k] : v;
+        } else if (SELECT.indexOf(k) !== -1) {
+          next[k] = el.value;
+        } else {
+          next[k] = el.value.trim();
+        }
+      });
+
+      return window.magpie.options.set(next).then(
+        function (written) {
+          if (btn) btn.disabled = false;
+          current = written || next;
+          fill(current);
+          paintMode(current);
+          cardSay(statusId, "已保存本卡片", "ok");
+        },
+        function (e) {
+          if (btn) btn.disabled = false;
+          var m = String((e && e.message) || e);
+          var is429 = /429|too many requests/i.test(m);
+          cardSay(statusId, is429 ? "操作过于频繁，请稍后再试（频控 1 秒/次）" : ("保存失败：" + m), is429 ? "warn" : "bad");
+        }
+      );
+    }).catch(function (e) {
+      if (btn) btn.disabled = false;
+      cardSay(statusId, "读取配置失败：" + String((e && e.message) || e), "bad");
+    });
+  }
+
+  /* ---------------- 独立保存 R2 设置（卡片 2） ---------------- */
   function r2Say(msg, kind) {
-    var el = $("r2_status");
-    if (!el) return;
-    el.textContent = msg || "";
-    el.className = "status" + (kind ? " " + kind : "");
+    cardSay("r2_status", msg, kind);
   }
 
   function saveR2() {
@@ -404,9 +490,9 @@
     r2Say("保存中…");
 
     Promise.resolve(window.magpie.options.get()).then(function (remote) {
-      // 先拿远端全量，再只覆盖 R2 那几个字段 → 其它配置（含 memories 快照）不受影响
       var next = Object.assign({}, remote || {});
       var filled = 0, any = 0;
+      var R2_FIELDS = CARD_FIELDS.r2;
       R2_FIELDS.forEach(function (k) {
         var el = $(k);
         if (!el) return;
@@ -419,6 +505,8 @@
         function (written) {
           if (btn) btn.disabled = false;
           current = written || next;
+          fill(current);
+          paintMode(current);
           if (filled === 0) {
             r2Say("已保存，但 R2 凭据全为空 —— 挂载时 NCB 会用它账号里缓存的连接", "warn");
           } else {
@@ -428,7 +516,8 @@
         function (e) {
           if (btn) btn.disabled = false;
           var m = String((e && e.message) || e);
-          r2Say(/429|too many requests/i.test(m) ? "操作过于频繁，请稍后再试（频控 1 秒/次）" : ("保存失败：" + m), "bad");
+          var is429 = /429|too many requests/i.test(m);
+          r2Say(is429 ? "操作过于频繁，请稍后再试（频控 1 秒/次）" : ("保存失败：" + m), is429 ? "warn" : "bad");
         }
       );
     }).catch(function (e) {
@@ -530,15 +619,52 @@
     var mcpUrlEl = $("mcp_url");
     if (mcpUrlEl) mcpUrlEl.value = mcpUrl();
 
+    // 底部全局保存
     var saveBtn = $("save");
     if (saveBtn) saveBtn.addEventListener("click", save);
 
+    // MCP 地址复制
     var copyBtn = $("copy");
     if (copyBtn) copyBtn.addEventListener("click", copyMcpUrl);
 
-    // 独立保存 R2 设置（不触发挂载）
+    // 各卡片独立保存按钮绑定
+    var saveCardNcbBtn = $("btn_save_card_ncb");
+    if (saveCardNcbBtn) {
+      saveCardNcbBtn.addEventListener("click", function () {
+        saveCard("ncb", "btn_save_card_ncb", "status_card_ncb");
+      });
+    }
+
     var saveR2Btn = $("btn_save_r2");
     if (saveR2Btn) saveR2Btn.addEventListener("click", saveR2);
+
+    var saveCardExtractBtn = $("btn_save_card_extract");
+    if (saveCardExtractBtn) {
+      saveCardExtractBtn.addEventListener("click", function () {
+        saveCard("extract", "btn_save_card_extract", "status_card_extract");
+      });
+    }
+
+    var saveCardInjectBtn = $("btn_save_card_inject");
+    if (saveCardInjectBtn) {
+      saveCardInjectBtn.addEventListener("click", function () {
+        saveCard("inject", "btn_save_card_inject", "status_card_inject");
+      });
+    }
+
+    var saveCardCompressBtn = $("btn_save_card_compress");
+    if (saveCardCompressBtn) {
+      saveCardCompressBtn.addEventListener("click", function () {
+        saveCard("compress", "btn_save_card_compress", "status_card_compress");
+      });
+    }
+
+    var saveCardGatewayBtn = $("btn_save_card_gateway");
+    if (saveCardGatewayBtn) {
+      saveCardGatewayBtn.addEventListener("click", function () {
+        saveCard("gateway", "btn_save_card_gateway", "status_card_gateway");
+      });
+    }
 
     // MCP Key 切换密码显隐
     var toggleMcpBtn = $("toggle_mcp_key");
@@ -654,10 +780,10 @@
       });
     }
 
-    ["extractor_model", "clef_mode", "compress", "disabled", "inline_extract"].forEach(function (k) {
+    ["extractor_model", "clef_mode", "compress", "disabled", "inline_extract", "ncb_instance", "mcp_key", "ncb_secret"].forEach(function (k) {
       var el = $(k);
       if (el) el.addEventListener("change", function () { paintMode(collect()); });
-      if (el && el.type === "text") el.addEventListener("input", function () { paintMode(collect()); });
+      if (el && (el.type === "text" || el.type === "password")) el.addEventListener("input", function () { paintMode(collect()); });
     });
 
     if (!window.magpie || !window.magpie.options) {

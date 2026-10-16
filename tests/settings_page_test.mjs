@@ -3,7 +3,11 @@ import path from "node:path";
 import vm from "node:vm";
 import assert from "node:assert";
 
-const DIR = "..";
+import { fileURLToPath } from "node:url";
+process.chdir(fileURLToPath(new URL("..", import.meta.url)));  // 不依赖调用者的工作目录
+
+
+const DIR = fs.existsSync("settings.html") ? "." : "..";
 const htmlPath = path.join(DIR, "settings.html");
 const cssPath = path.join(DIR, "settings.css");
 const jsPath = path.join(DIR, "settings.js");

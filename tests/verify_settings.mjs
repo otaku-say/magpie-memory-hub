@@ -192,5 +192,85 @@ console.log("\n=== 5. 独立「保存 R2 设置」按钮（不触发挂载）===
   }
 }
 
+console.log("\n=== 6. 静态检查：卡片标题与表格逐字一致 ===");
+{
+  const expectedTitles = [
+    "NoCodeBackend 数据库与密钥",
+    "Cloudflare R2 对象存储",
+    "模型提炼与仲裁",
+    "网关注入与上下文预算",
+    "上下文压缩与去重",
+    "Magpie 网关连接与运行策略",
+    "MCP 接入地址",
+  ];
+  for (const title of expectedTitles) {
+    // 标题可以出现在 <h2>（非折叠卡片）或 <span class="t">（折叠卡片）里，
+    // 断言只关心「这段文字在页面上」，不绑定具体标签
+    const hasTitle = HTML.includes(`>${title}<`) || html.includes(`>${title} `);
+    check(hasTitle, `卡片标题匹配：${title}`);
+  }
+}
+
+console.log("\n=== 7. 静态检查：推荐值徽章齐备 (>= 28 处) ===");
+{
+  const badgeMatches = [...HTML.matchAll(/class="[^"]*badge[^"]*rec[^"]*"[^>]*>([^<]*推荐[^<]*)</g)];
+  check(badgeMatches.length >= 28, `推荐值徽章齐备（共 ${badgeMatches.length} 处，>= 28）`);
+}
+
+console.log("\n=== 8. 独立卡片保存测试（只改本卡片字段，其它字段及 memories 逐字段不变）===");
+{
+  await new Promise((r) => setTimeout(r, 1100)); // 绕开频控
+  lastSet = null; setCalls = 0;
+  // 修改卡片 3（模型提炼与仲裁）字段
+  els.clef_mode.value = "llm";
+  els.min_confidence.value = "0.95";
+  els.extractor_model.value = "custom-extractor";
+  const b = els.btn_save_card_extract;
+  check(!!b, "找到卡片 3 保存按钮 btn_save_card_extract");
+  if (b) b.fire("click");
+  await new Promise((r) => setTimeout(r, 140));
+  check(setCalls > 0, `options.set 被调用 ${setCalls} 次`);
+  if (lastSet) {
+    // 本卡片字段改动
+    check(lastSet.clef_mode === "llm", "卡片 3 clef_mode 已更新为 llm");
+    check(lastSet.min_confidence === 0.95, "卡片 3 min_confidence 已更新为 0.95");
+    check(lastSet.extractor_model === "custom-extractor", "卡片 3 extractor_model 已更新");
+    // 其它卡片字段未变
+    check(lastSet.ncb_instance === REMOTE.ncb_instance, "卡片 1 ncb_instance 未被改动");
+    check(lastSet.mcp_key === REMOTE.mcp_key, "卡片 1 mcp_key 未被改动");
+    check(lastSet.compress === REMOTE.compress, "卡片 5 compress 未被改动");
+    check(!lastSet._action, "单卡片保存不触发任何 _action 信标");
+    check(JSON.stringify(lastSet.memories) === JSON.stringify(REMOTE.memories), "memories 快照完全保留");
+    check(lastSet.some_future_field === REMOTE.some_future_field, "未知扩展字段保留");
+  }
+}
+
+console.log("\n=== 9. 底部整体保存测试（全部字段都在）===");
+{
+  await new Promise((r) => setTimeout(r, 1100)); // 绕开频控
+  lastSet = null; setCalls = 0;
+  const b = els.save;
+  check(!!b, "找到底部保存按钮 save");
+  if (b) b.fire("click");
+  await new Promise((r) => setTimeout(r, 140));
+  check(setCalls > 0, `options.set 被调用 ${setCalls} 次`);
+  if (lastSet) {
+    const allRequired = [
+      "ncb_instance", "mcp_key", "ncb_secret", "on_exist",
+      "r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url",
+      "inline_extract", "clef_mode", "extractor_model", "clef_model", "min_confidence",
+      "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles",
+      "compress", "cross_turn_dedup", "compress_engine", "compress_max_chars", "compress_min_chars",
+      "magpie_base_url", "magpie_api_key", "auto_init", "disabled"
+    ];
+    let allPresent = true;
+    for (const f of allRequired) {
+      if (lastSet[f] === undefined) { allPresent = false; no(`字段 ${f} 缺失`); }
+    }
+    check(allPresent, `全部 28 个可配置项字段均在保存 payload 中完整存在`);
+    check(JSON.stringify(lastSet.memories) === JSON.stringify(REMOTE.memories), "底部保存同样不丢 memories 快照");
+  }
+}
+
 console.log(fail ? `\n❌ 失败 ${fail} 项` : "\n✅ 设置页行为验收全部通过");
 process.exit(fail ? 1 : 0);
