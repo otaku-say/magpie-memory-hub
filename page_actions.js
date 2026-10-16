@@ -19,7 +19,7 @@
  *      工具（Magpie 枚举工具会拉起宿主）时才真正执行。
  *   2. **宿主无法把执行结果写回 options**（没有写 API），所以页面无法显示
  *      「执行成功/失败」。结果落在三处：本地状态文件、宿主日志、
- *      memhub_meta 表（可用 db_status 工具查看）。
+ *      schema_meta 表（可用 db_status 工具查看）。
  *   3. options.set 有频控：每秒至多 1 次，超频 HTTP 429。
  *
  * 幂等保证：
@@ -490,12 +490,12 @@ export function formatCardStatus(key, rawResult, opHint) {
       if (res.action === "CONFIRM_REQUIRED") {
         title = "清库需要二次确认";
         lines.push(`目标数据库：${res.database || "当前库"}`);
-        lines.push("操作将永久删除 memories/pitfalls/memhub_meta 及其数据");
+        lines.push("操作将永久删除 memories/pitfalls/schema_meta 及其数据");
         lines.push("若确认清空，请在工具或信标中传入 confirm='RESET'");
       } else if (ok) {
         title = "记忆库三表已清空";
         lines.push(`数据库：${res.database || "当前库"}`);
-        lines.push(`已删除表：${(res.dropped || []).join(", ") || "memories, pitfalls, memhub_meta"}`);
+        lines.push(`已删除表：${(res.dropped || []).join(", ") || "memories, pitfalls, schema_meta"}`);
         lines.push("表结构与数据已彻底清除，可随时点击「初始化」重建");
       } else {
         title = "清空数据库失败";

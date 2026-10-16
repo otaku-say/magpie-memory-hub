@@ -14,6 +14,7 @@
   var CARD_FIELDS = {
     ncb: ["ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init"],
     r2: ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"],
+    harvest: ["auto_harvest"],
     extract: ["inline_extract", "min_confidence"],
     inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"],
     compress: ["compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"]
@@ -35,6 +36,7 @@
   };
   var BOOL = [
     "auto_init",
+    "auto_harvest",
     "inline_extract",
     "disabled",
     "compress",
@@ -212,7 +214,8 @@
   var containerMap = {
     ncb: "db_action_status",
     r2: "r2_action_status",
-    model: "model_action_status"
+    model: "model_action_status",
+    gateway: "harvest_action_status"
   };
 
   /* ---------------- 状态展示与结果回传渲染 ---------------- */
@@ -293,6 +296,16 @@
       html += "</ul>";
     }
 
+    if (containerId === "harvest_action_status") {
+      var isMissing = !statusObj.ok || (statusObj.title && statusObj.title.indexOf("未检测到") !== -1) ||
+        (Array.isArray(statusObj.lines) && statusObj.lines.some(function (l) { return l.indexOf("未检测到") !== -1; }));
+      if (isMissing) {
+        html += '<div class="harvest-guide-tip">' +
+          '<strong>💡 开启指引：</strong>打开 <strong>设置 → 插件</strong>，找到内置插件 <strong>「会话」</strong> 把它打开（显示 <strong>「正在记录网关对话」</strong>）。插件本页<strong>无法代你开启</strong>，需先在 Magpie 插件页打开。' +
+        '</div>';
+      }
+    }
+
     el.innerHTML = html;
   }
 
@@ -303,6 +316,7 @@
       ["ncb", "db_action_status"],
       ["r2", "r2_action_status"],
       ["model", "model_action_status"],
+      ["gateway", "harvest_action_status"],
     ];
     for (var i = 0; i < map.length; i++) {
       var key = map[i][0], cid = map[i][1];
@@ -512,7 +526,8 @@
         model_download: "下载本地小模型",
         init: "初始化数据库",
         reset: "清空数据库",
-        status: "检查结构状态"
+        status: "检查结构状态",
+        harvest_gateway: "立即扫描对话录制"
       };
       var opName = opLabels[act.op] || act.op;
       var timeStr = act.at ? new Date(act.at).toLocaleString("zh-CN", { hour12: false }) : "未知时间";
@@ -529,7 +544,8 @@
     var ids = [
       "btn_db_provision", "btn_check_ncb", "btn_db_storage_setup", "btn_db_status", "btn_db_reset",
       "btn_confirm_provision", "btn_confirm_reset",
-      "btn_check_r2", "btn_check_model", "btn_download_model"
+      "btn_check_r2", "btn_check_model", "btn_download_model",
+      "btn_harvest_gateway"
     ];
     ids.forEach(function (id) {
       var el = $(id);
@@ -563,6 +579,8 @@
       targetCard = "r2";
     } else if (op === "model_check" || op === "model_download") {
       targetCard = "model";
+    } else if (op === "harvest_gateway") {
+      targetCard = "gateway";
     }
 
     // 全量替换防丢：必须先 get() 获取远端全部 options，再合并写入
@@ -631,6 +649,8 @@
             msg = "已提交检查状态任务。正在等待宿主执行…";
           } else if (op === "reset") {
             msg = "已提交清空数据库任务（ID: " + action.id + "）。正在等待宿主执行…";
+          } else if (op === "harvest_gateway") {
+            msg = "已提交扫描对话录制任务（ID: " + action.id + "）。正在等待宿主执行…";
           }
           paintDbStatus(action, msg, "ok", containerMap[targetCard]);
           say("信标已提交", "ok");
@@ -701,6 +721,7 @@
     Promise.resolve(window.magpie.options.get()).then(function (remote) {
       // 先拿到远端全量配置，只覆盖该卡片专属字段，其它卡片与 memories 快照逐字段保留
       var next = Object.assign({}, remote || {});
+      delete next._action;
       var fields = CARD_FIELDS[cardKey] || [];
       fields.forEach(function (k) {
         var el = $(k);
@@ -876,6 +897,13 @@
     var saveR2Btn = $("btn_save_r2");
     if (saveR2Btn) saveR2Btn.addEventListener("click", saveR2);
 
+    var saveCardHarvestBtn = $("btn_save_card_harvest");
+    if (saveCardHarvestBtn) {
+      saveCardHarvestBtn.addEventListener("click", function () {
+        saveCard("harvest", "btn_save_card_harvest", "status_card_harvest");
+      });
+    }
+
     var saveCardExtractBtn = $("btn_save_card_extract");
     if (saveCardExtractBtn) {
       saveCardExtractBtn.addEventListener("click", function () {
@@ -970,6 +998,14 @@
       });
     }
 
+    // 立即扫描对话录制
+    var harvestGatewayBtn = $("btn_harvest_gateway");
+    if (harvestGatewayBtn) {
+      harvestGatewayBtn.addEventListener("click", function () {
+        submitAction("harvest_gateway");
+      });
+    }
+
     // 检查状态
     var statusBtn = $("btn_db_status");
     if (statusBtn) {
@@ -1020,7 +1056,7 @@
       });
     }
 
-    ["compress", "disabled", "inline_extract", "ncb_instance", "mcp_key", "ncb_secret", "min_confidence"].forEach(function (k) {
+    ["compress", "disabled", "inline_extract", "auto_harvest", "ncb_instance", "mcp_key", "ncb_secret", "min_confidence"].forEach(function (k) {
       var el = $(k);
       if (el) el.addEventListener("change", function () { paintMode(collect()); });
       if (el && (el.type === "text" || el.type === "password" || el.type === "number")) {

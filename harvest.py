@@ -665,18 +665,14 @@ def save_memory(ncb, cfg, m, cache):
         return {"action": "NOOP", "cached": True}
     cache.add(fp)
 
-    same = [r for r in ncb.all("memories", {"project": project}) if r.get("fingerprint") == fp]
+    same = [r for r in ncb.all("memories", {"project": project}) if (r.get("content_fingerprint") == fp or r.get("fingerprint") == fp)]
     if same:
         rid = same[0]["id"]
-        ncb.update("memories", rid, {
-            "access_count": int(same[0].get("access_count") or 1) + 1,
-            "last_accessed_at": now_str(),
-        })
         return {"action": "NOOP", "id": rid}
 
     superseded = [
         r for r in ncb.all("memories", {"project": project})
-        if r.get("status") == "active"
+        if (r.get("lifecycle_status") == "active" or r.get("status") == "active")
         and str(r.get("title") or "").strip().lower() == title.lower()
         and str(r.get("category") or "") == category
     ]
@@ -689,27 +685,31 @@ def save_memory(ncb, cfg, m, cache):
     if conf <= 1:
         conf = round(conf * 100)
 
-    # (project, fingerprint) 上有唯一索引，它是去重的最终保证：
+    # (project, content_fingerprint) 上有唯一索引，它是去重的最终保证：
     # NCB 的读有约 2 秒写后可见延迟，靠「先读后写」会漏掉紧邻的重复写入。
     try:
+        scope_val = m.get("scope_level") or m.get("scope")
+        scope_val = scope_val if scope_val in ("user", "project", "session", "turn") else "project"
         res = ncb.create("memories", {
             "project": project,
             "category": category,
-            "scope": m.get("scope") if m.get("scope") in ("user", "project", "session", "turn") else "project",
+            "scope_level": scope_val,
             "client": str(m.get("client") or m.get("agent") or "unknown"),
+            "origin": "harvest",
             "title": title,
             "content": content,
-            "full_content": str(m.get("full_content") or content),
+            "full_text": str(m.get("full_text") or m.get("full_content") or content),
             "tags": str(m.get("tags") or "").lower(),
-            "related": str(m.get("related") or ""),
-            "source": str(m.get("source") or "harvest"),
-            "fingerprint": fp,
+            "related_entities": str(m.get("related_entities") or m.get("related") or ""),
+            "content_fingerprint": fp,
             "confidence_score": int(conf),
-            "status": "active",
-            "superseded_by": 0,
-            "access_count": 1,
+            "lifecycle_status": "active",
+            "superseded_by_id": 0,
+            "revision": max([int(r.get("revision") or r.get("version") or 1) for r in superseded] or [0]) + 1,
+            "retrieval_count": 0,
             "invalid_at": None,
-            "last_accessed_at": now_str(),
+            "invalid_reason": "",
+            "last_used_at": None,
         })
     except RuntimeError as e:
         if "duplicate" in str(e).lower():
@@ -719,7 +719,12 @@ def save_memory(ncb, cfg, m, cache):
 
     if superseded and new_id:
         old = superseded[0]["id"]
-        ncb.update("memories", old, {"status": "superseded", "superseded_by": new_id})
+        ncb.update("memories", old, {
+            "lifecycle_status": "superseded",
+            "superseded_by_id": new_id,
+            "invalid_at": now_str(),
+            "invalid_reason": "superseded",
+        })
         return {"action": "UPDATE", "id": new_id, "superseded_id": old}
     return {"action": "ADD", "id": new_id}
 
@@ -737,7 +742,7 @@ def save_pitfall(ncb, cfg, p, cache):
         return {"action": "NOOP", "cached": True}
     cache.add(fp)
 
-    exist = [r for r in ncb.all("pitfalls", {"project": project}) if r.get("fingerprint") == fp]
+    exist = [r for r in ncb.all("pitfalls", {"project": project}) if (r.get("content_fingerprint") == fp or r.get("fingerprint") == fp)]
     if exist:
         rid = exist[0]["id"]
         n = int(exist[0].get("recurrence") or 1) + 1
@@ -747,15 +752,15 @@ def save_pitfall(ncb, cfg, p, cache):
     try:
         res = ncb.create("pitfalls", {
             "project": project,
-        "client": str(p.get("client") or p.get("agent") or "unknown"),
-        "component": component,
-        "symptom": symptom,
-        "root_cause": str(p.get("root_cause") or "（由失败→成功相关性推断，待人工确认）"),
-        "solution": solution,
-        "severity": p.get("severity") if p.get("severity") in ("low", "medium", "high", "critical") else "medium",
-        "error_type": str(p.get("error_type") or ""),
-        "tags": str(p.get("tags") or "").lower(),
-        "fingerprint": fp,
+            "client": str(p.get("client") or p.get("agent") or "unknown"),
+            "component": component,
+            "symptom": symptom,
+            "root_cause": str(p.get("root_cause") or "（由失败→成功相关性推断，待人工确认）"),
+            "solution": solution,
+            "severity": p.get("severity") if p.get("severity") in ("low", "medium", "high", "critical") else "medium",
+            "error_type": str(p.get("error_type") or ""),
+            "tags": str(p.get("tags") or "").lower(),
+            "content_fingerprint": fp,
             "recurrence": 1,
             "last_occurred_at": now_str(),
         })
@@ -1059,15 +1064,14 @@ def promote_scopes(ncb, cfg, dry_run=False):
         if m.get("invalid_at"):
             continue
 
-        # 检查 scope 是否为 session 或 turn
-        scope = str(m.get("scope") or "").lower()
+        # 检查 scope_level 是否为 session 或 turn
+        scope = str(m.get("scope_level") or m.get("scope") or "").lower()
         if scope not in ("session", "turn"):
             continue
 
-        # 检查 access_count + hits >= min_hits
-        access_cnt = int(m.get("access_count") or 0)
-        hits_cnt = int(m.get("hits") or 0)
-        if (access_cnt + hits_cnt) < min_hits:
+        # 检查 retrieval_count (或 access_count + hits) >= min_hits
+        rc_cnt = int(m.get("retrieval_count") or (int(m.get("access_count") or 0) + int(m.get("hits") or 0)))
+        if rc_cnt < min_hits:
             continue
 
         # 检查 confidence_score >= 阈值
@@ -1081,14 +1085,16 @@ def promote_scopes(ncb, cfg, dry_run=False):
 
         # 符合条件，就地提升为 project
         if dry_run:
+            m["scope_level"] = "project"
             m["scope"] = "project"
             promoted.append({"id": rid, "title": m.get("title"), "dry_run": True})
         else:
             try:
                 ncb.update("memories", rid, {
-                    "scope": "project",
+                    "scope_level": "project",
                     "updated_at": now_str(),
                 })
+                m["scope_level"] = "project"
                 m["scope"] = "project"
                 promoted.append({"id": rid, "title": m.get("title")})
             except Exception as e:
@@ -1308,9 +1314,9 @@ def rank_importance(m, now_ts):
     只用于【决定谁进快照】，与中间件内部的排序是两件事。
     """
     conf = (float(m.get("confidence_score") or 100)) / 100.0
-    hits = int(m.get("hits") or 0) + int(m.get("access_count") or 0)
+    hits = int(m.get("retrieval_count") or (int(m.get("hits") or 0) + int(m.get("access_count") or 0)))
     stab = 1.0 * (1 + 1.5 * math.log(1 + hits))
-    t = m.get("last_accessed_at") or m.get("updated_at") or m.get("created_at") or ""
+    t = m.get("last_used_at") or m.get("last_accessed_at") or m.get("updated_at") or m.get("created_at") or ""
     try:
         dt = datetime.strptime(str(t)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         days = max(0.0, (now_ts - dt.timestamp()) / 86400.0)
@@ -1324,14 +1330,15 @@ def build_snapshot(mems, cap, dormant_days, now_ts):
     """挑出该推给网关的记忆：活跃、未失效、未被取代，按重要度截断"""
     out = []
     for m in mems:
-        if str(m.get("status") or "active") != "active":
+        status = str(m.get("lifecycle_status") or m.get("status") or "active")
+        if status != "active":
             continue
         if m.get("invalid_at"):
             continue
         # 休眠：久未取用且从未被命中过的，不进快照（保留在库里，可被检索到）
-        hits = int(m.get("hits") or 0) + int(m.get("access_count") or 0)
+        hits = int(m.get("retrieval_count") or (int(m.get("hits") or 0) + int(m.get("access_count") or 0)))
         if hits <= 1 and dormant_days > 0:
-            t = m.get("last_accessed_at") or m.get("created_at") or ""
+            t = m.get("last_used_at") or m.get("last_accessed_at") or m.get("created_at") or ""
             try:
                 dt = datetime.strptime(str(t)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
                 if (now_ts - dt.timestamp()) / 86400.0 > dormant_days:
@@ -1344,9 +1351,9 @@ def build_snapshot(mems, cap, dormant_days, now_ts):
 
 
 # 只推中间件真正用得上的字段：字段越少，plugins.json 越小、解析越快
-SNAP_FIELDS = ("id", "project", "category", "scope", "client", "title", "content",
-               "tags", "entities", "confidence_score", "access_count", "hits",
-               "status", "invalid_at", "created_at", "updated_at", "last_accessed_at")
+SNAP_FIELDS = ("id", "project", "category", "scope_level", "scope", "client", "origin", "title", "content",
+               "tags", "related_entities", "entities", "confidence_score", "retrieval_count", "access_count", "hits",
+               "lifecycle_status", "status", "invalid_at", "created_at", "updated_at", "last_used_at", "last_accessed_at")
 
 
 def slim(m):

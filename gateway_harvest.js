@@ -699,13 +699,13 @@ export async function harvestGateway(args, context) {
             const res = await saveMemory(client, cfg, {
               project: targetProject,
               category: item.category,
-              scope: item.scope || "project",
+              scope_level: item.scope || "project",
               client: agent,
+              origin: "harvest",
               title: item.title,
               content: item.content,
               tags: item.tags,
               confidence: item.confidence,
-              source: "gateway_harvest",
             }, { agent, _ctx: { agent } });
             if (res && res.action !== "NOOP") {
               memoriesSaved++;
@@ -731,7 +731,6 @@ export async function harvestGateway(args, context) {
               severity: p.severity || "medium",
               error_type: p.error_type || "general",
               tags: p.tags,
-              source: "gateway_harvest",
             }, { agent, _ctx: { agent } });
             let res = resRaw;
             if (typeof resRaw === "string") {

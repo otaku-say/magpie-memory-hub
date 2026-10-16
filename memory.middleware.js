@@ -81,7 +81,7 @@ function tokenize(text) {
 /* ================= 双时态：是否仍然有效 ================= */
 function isValid(m, now) {
   if (!m) return false;
-  if (m.status === "superseded") return false;
+  if (m.lifecycle_status === "superseded" || m.status === "superseded") return false;
   if (m.invalid_at) {
     var t = Date.parse(String(m.invalid_at));
     if (!isNaN(t) && t <= now) return false;
@@ -94,12 +94,10 @@ function isValid(m, now) {
  * 高频核心事实半衰期长，偶发噪音快速衰减。
  */
 function retention(m, now) {
-  var hits = parseInt(m.hits, 10);
-  if (!hits || hits !== hits) hits = 0;
-  var acc = parseInt(m.access_count, 10);
-  if (!acc || acc !== acc) acc = 0;
-  var S = 1.0 * (1 + 1.5 * Math.log(1 + hits + acc * 0.5));
-  var t = Date.parse(String(m.updated_at || m.last_accessed_at || m.created_at || ""));
+  var rc = parseInt(m.retrieval_count != null ? m.retrieval_count : (m.access_count != null ? m.access_count : m.hits), 10);
+  if (!rc || rc !== rc) rc = 0;
+  var S = 1.0 * (1 + 1.5 * Math.log(1 + rc));
+  var t = Date.parse(String(m.updated_at || m.last_used_at || m.last_accessed_at || m.created_at || ""));
   if (isNaN(t)) return 1;
   var days = (now - t) / DAY_MS;
   if (days <= 0) return 1;
@@ -118,8 +116,10 @@ function signatureOf(memories) {
   for (var i = 0; i < n; i++) {
     var m = memories[i];
     if (!m) continue;
-    sum = (sum + (m.id | 0) + (m.access_count | 0) * 7 + (m.hits | 0) * 13) | 0;
-    if (m.status && m.status !== "active") inact++;
+    var rc = (m.retrieval_count != null ? m.retrieval_count : (m.access_count != null ? m.access_count : m.hits)) | 0;
+    var st = m.lifecycle_status || m.status;
+    sum = (sum + (m.id | 0) + rc * 7) | 0;
+    if (st && st !== "active") inact++;
     if (m.invalid_at) inact += 2;
   }
   var h = (n * 31 + sum * 131 + inact * 17) | 0;
@@ -156,8 +156,9 @@ function buildIndex(memories, now, version) {
     var keys = {};
     if (m.project) keys[String(m.project).toLowerCase()] = 1;
     if (m.category) keys[String(m.category).toLowerCase()] = 1;
-    if (m.entities) {
-      var ents = String(m.entities).toLowerCase().split(/[\s,]+/);
+    var entsStr = m.related_entities || m.entities;
+    if (entsStr) {
+      var ents = String(entsStr).toLowerCase().split(/[\s,]+/);
       for (var e = 0; e < ents.length; e++) if (ents[e].length >= 2) keys[ents[e]] = 1;
     }
     if (m.tags) {
@@ -203,7 +204,7 @@ function lastUserText(messages) {
 function lexicalScore(m, tokens) {
   if (!tokens.length) return 0;
   var title = String(m.title || "").toLowerCase();
-  var ents = String(m.entities || "").toLowerCase();
+  var ents = String(m.related_entities || m.entities || "").toLowerCase();
   var tags = String(m.tags || "").toLowerCase();
   var body = String(m.content || "").toLowerCase();
   var score = 0;
@@ -272,6 +273,9 @@ export function onRequest(body, ctx) {
   ctx.state.answer = "";
   ctx.state.harvested = 0;
   ctx.state.cardPrefix = opts.ccr_cards ? "card" : "full";
+  // 轮次号与来源 agent：供提炼指令的间隔控制与作用域过滤使用
+  st.turnNo = (Number(st.turnNo) || 0) + 1;
+  st.agent = (ctx && ctx.agent) || st.agent || "";
   ctx.state.inlineExtract = !!opts.inline_extract;
   ctx.state.memHold = 0;
   ctx.state.memBuf = "";
@@ -356,8 +360,8 @@ export function onRequest(body, ctx) {
         for (var q = 0; q < cand.length; q++) {
           var cq = cand[q];
           cq._fresh = retention(cq, now);
-          cq._heat = (parseInt(cq.hits, 10) || 0) + (parseInt(cq.access_count, 10) || 0);
-          cq._scope = SCOPE_AFFINITY[cq.scope] || 2;
+          cq._heat = (parseInt(cq.retrieval_count != null ? cq.retrieval_count : (cq.access_count != null ? cq.access_count : cq.hits), 10) || 0);
+          cq._scope = SCOPE_AFFINITY[cq.scope_level || cq.scope] || 2;
         }
         var freshSorted = cand.slice().sort(byDesc(function (x) { return x._fresh; }));
         var heatSorted = cand.slice().sort(byDesc(function (x) { return x._heat; }));
@@ -413,30 +417,66 @@ export function onRequest(body, ctx) {
 
   /* --- ② 可选：内联提炼指令 ---
    *
-   * 两条通路，优先走第一条：
+   * 两条通路（优先第一条）：
+   *   ① 【直调工具】让 agent 用 memory_save 存 → 数据经 MCP 直接进库，零外部进程
+   *   ② 【<memory> 块】agent 手里没这个工具时的兜底，中间件剥离并打 [MEMORY_HARVEST]
    *
-   *   ① 【直调工具】让 agent 用 memory_save 工具存 → 数据直接经 MCP 进库，
-   *      不依赖任何外部进程。这是主路径。
+   * 为什么把 ② 降级：它依赖「有人在跑 harvest.py」，而 Docker 里网关 stdout 是
+   * 容器管道、没有进程能读，模型就算乖乖输出了块也进不了库。① 没有这个外部依赖。
    *
-   *   ② 【<memory> 块】agent 手里没有这个工具时的兜底。中间件剥离该块并
-   *      打印 [MEMORY_HARVEST]{json} 到网关 stdout，由 harvest.py 读走。
-   *
-   * 为什么把顺序反过来（早先只做 ②）：② 依赖「有人在跑 harvest.py」，而
-   * 在 Docker 部署里网关 stdout 是容器管道、不是文件，没有进程能 tail 它，
-   * 于是模型就算是乖乖输出了 <memory> 块，内容也永远进不了库。
-   * ① 没有这个外部依赖，是唯一在容器里能自洽跑通的路径。
+   * ── 强度模式（照官方 middleware-system-prompt 的思路做成可配置）──
+   * soft   ：现状语气「若产生了…」。被动，取决于模型是否意识到有东西值得存。
+   * strict ：「每轮结束前检查」+ 给出具体清单。**实测观察：模型不存的原因往往
+   *           不是不愿意，而是不确定什么算「值得长期留存」** —— 给清单能显著
+   *           降低它的判断负担，从而提高合规率。
+   * 另有 extract_agents / extract_models 两个作用域过滤（照 system-prompt 的
+   * agents/models 设计），以及 extract_interval 控制注入频率以省 token。
    */
-  if (opts.inline_extract) {
-    var toolName = PLUGIN_NAME + "_memory_save";
-    injected +=
-      "\n\n[Memory Instruction]\n" +
-      "若本轮产生了值得跨会话复用的持久事实（偏好/事实/决策/实体/洞察），" +
-      "用 `" + toolName + "` 工具把它存下来" +
-      "（参数：category、title、content、tags、confidence）。" +
-      "\n若你的工具列表里没有它，则改为在回复的最后追加一个 " +
-      "<memory>JSON 数组</memory> 块，元素形如 " +
-      '{"category":"fact|preference|context|entity|decision|insight","title":"...","content":"...","tags":"a,b","confidence":0.9}。' +
-      "\n没有值得长期留存的内容时，两条都不要做（不要为了凑数而保存）。";
+  var wantExtract = opts.inline_extract !== false;
+  if (wantExtract) {
+    var strength = String(opts.extract_strength || "soft").toLowerCase();
+    var interval = Number(opts.extract_interval) || 1;
+    var turnNo = Number(st.turnNo) || 0;
+    // 作用域过滤：留空=全部适用
+    var onlyAgents = opts.extract_agents;
+    var onlyModels = opts.extract_models;
+    var agentName = String((ctx && ctx.agent) || st.agent || "").trim();
+    var modelName = String(st.model || "").trim();
+    if (Array.isArray(onlyAgents) && onlyAgents.length && agentName &&
+        onlyAgents.indexOf(agentName) === -1) wantExtract = false;
+    if (Array.isArray(onlyModels) && onlyModels.length && modelName &&
+        !onlyModels.some(function (p) { return modelName.indexOf(p) === 0; })) wantExtract = false;
+    if (interval > 1 && (turnNo % interval) !== 0) wantExtract = false;
+
+    if (wantExtract) {
+      var toolName = PLUGIN_NAME + "_memory_save";
+      if (strength === "strict") {
+        injected +=
+          "\n\n[Memory Check —— 结束本轮回复前必做一次]\n" +
+          "逐项检查本轮是否产生了下面任一类内容：\n" +
+          "1) 【偏好/约定】用户表达的偏好、习惯、要求（如「不要用 X」「统一用 Y」）\n" +
+          "2) 【决策】已拍板的技术选型、替代方案、架构约定\n" +
+          "3) 【事实/环境】项目路径、可用的命令、版本、配置项、环境变量\n" +
+          "4) 【踩坑】遇到的报错及其解决办法（现象→根因→解法）\n" +
+          "5) 【洞察】可跨会话复用的结论或方法论\n" +
+          "若有任何一项命中：**立即**用 `" + toolName + "` 存下（一条内容一次调用，不要合并成一条）。" +
+          "踩坑类优先用 `" + PLUGIN_NAME + "_pitfall_save" + "`。\n" +
+          "若你的工具列表里没有这些工具：改为在回复最后追加一个 " +
+          "<memory>JSON 数组</memory> 块，元素形如 " +
+          '{"category":"fact|preference|context|entity|decision|insight","title":"...","content":"...","tags":"a,b","confidence":0.9}。' +
+          "\n若五项都没有命中：忽略本提示即可，不要为了凑数而保存。";
+      } else {
+        injected +=
+          "\n\n[Memory Instruction]\n" +
+          "若本轮产生了值得跨会话复用的持久事实（偏好/事实/决策/实体/洞察），" +
+          "用 `" + toolName + "` 工具把它存下来" +
+          "（参数：category、title、content、tags、confidence）。" +
+          "\n若你的工具列表里没有它，则改为在回复的最后追加一个 " +
+          "<memory>JSON 数组</memory> 块，元素形如 " +
+          '{"category":"fact|preference|context|entity|decision|insight","title":"...","content":"...","tags":"a,b","confidence":0.9}。' +
+          "\n没有值得长期留存的内容时，两条都不要做（不要为了凑数而保存）。";
+      }
+    }
   }
 
   if (!injected) return body;

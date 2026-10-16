@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.6.0</span>
+    <span class="version-tag">v6.7.0</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、上下文压缩、R2 存储。</p>
 
@@ -241,6 +241,77 @@
       <div class="card-save-row">
         <button type="button" class="btn-card-save" id="btn_save_r2">保存本卡片</button>
         <span class="status" id="r2_status" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </details>
+
+  <!-- ③ 记忆采集来源 -->
+  <details class="card" id="card_harvest">
+    <summary>
+      <span class="chev"></span>
+      <span class="t">记忆采集来源</span>
+      <span class="sub">对话录制离线提炼 · 免 MCP 模式 · 增量扫描</span>
+    </summary>
+    <div class="body">
+      <div class="source-intro-box">
+        <div class="source-item">
+          <div class="source-item-title">
+            <span class="source-badge">来源一</span>
+            <strong>内联提炼</strong>
+          </div>
+          <p class="source-item-desc">由对话中的模型顺手产出，<strong>需要 agent 添加本插件的 MCP 工具</strong>（<code>memory_save</code> / <code>pitfall_save</code>）。</p>
+        </div>
+        <div class="source-item">
+          <div class="source-item-title">
+            <span class="source-badge">来源二</span>
+            <strong>对话录制提炼</strong>
+          </div>
+          <p class="source-item-desc">读 Magpie 的 GatewayConversations 落盘，由纯 JS 规则提炼，<strong>不需要 agent 配 MCP 工具</strong>。</p>
+        </div>
+      </div>
+
+      <div class="row split">
+        <div class="main">
+          <div class="row-head">
+            <label for="auto_harvest">对话自动提炼</label>
+            <span class="badge rec">推荐 关</span>
+          </div>
+          <div class="hint">
+            <div class="hint-desc">插件在宿主每次初始化加载时自动扫描一次对话录制目录，对新对话增量提炼并入库。</div>
+            <div class="hint-diff"><strong>开</strong>：每次插件加载都会扫一遍新对话，无需人工触发；<strong>关</strong>：不自动扫，需手动点「立即扫描对话录制」或让 agent 调 <code>harvest_gateway</code> 工具。</div>
+          </div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="auto_harvest"><span></span></label>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button type="button" id="btn_harvest_gateway">立即扫描对话录制</button>
+      </div>
+
+      <div class="action-status-box" id="harvest_action_status" style="display:none;"></div>
+
+      <div class="divider-note">
+        <p><strong>⚠️ 隐私与数据来源说明</strong></p>
+        <p>
+          <strong>要启用这条来源，需先在 Magpie 里开启对话录制：</strong><br>
+          打开 <strong>设置 → 插件</strong>，找到内置插件 <strong>「会话」</strong>，把它打开（开关位于插件页中该插件的说明文字旁）。<br>
+          打开后该插件会显示 <strong>「正在记录网关对话」</strong>；其说明文字为 <strong>「已开启：Agent 经网关发送的内容和回复只保存在这台电脑上，最多 7 天（256 MiB），可在每个网关会话下查看」</strong>。<br>
+          若要关闭录制，点 <strong>「停止记录并清空已保存的对话」</strong>。<br>
+          <em>—— 插件本页只是读取该录制的结果，<strong>无法代你开启</strong>，所以必须先去那里打开。</em>
+        </p>
+        <p>
+          <strong>本地落盘与隐私保护保证：</strong><br>
+          1. 开启录制意味着对话内容会写到本地磁盘（<code>/config/magpie/gateway-conversations</code>）。<br>
+          2. 插件<strong>只把提炼后的结构化记忆入库，绝不把对话原文入库</strong>；提炼采用本地规则引擎，无任何外部云端调用。<br>
+          3. 若未开启录制或暂无录制文件，卡片将显示友好提示，不会报错。
+        </p>
+      </div>
+
+      <div class="card-save-row">
+        <button type="button" class="btn-card-save" id="btn_save_card_harvest">保存本卡片</button>
+        <span class="status" id="status_card_harvest" role="status" aria-live="polite"></span>
       </div>
     </div>
   </details>
@@ -525,7 +596,7 @@
       <p>将向宿主提交一键创建信标，自动执行以下操作：</p>
       <ul>
         <li>自动在 NoCodeBackend 上创建数据库（若不存在）</li>
-        <li>自动补齐缺失的数据表（<code>memories</code>、<code>pitfalls</code>、<code>memhub_meta</code>）、列与索引</li>
+        <li>自动补齐缺失的数据表（<code>memories</code>、<code>pitfalls</code>、<code>schema_meta</code>）、列与索引</li>
         <li><strong>若同名已存在不会破坏数据</strong>：将走复用/补齐策略，绝不删除已有数据</li>
         <li>按配置自动创建或挂载 Cloudflare R2 存储桶并配置 CORS</li>
         <li>自动提取并保存数据库的 Secret Key，后续无需手填</li>
@@ -544,7 +615,7 @@
     <h3 id="modal_reset_title">⚠️ 确认清空数据库</h3>
     <div class="modal-body">
       <div class="danger-banner">
-        将删除 <code>memories</code> / <code>pitfalls</code> / <code>memhub_meta</code> 三张表，<strong>表结构与全部数据一并删除，不可恢复</strong>；库中其它表不受影响。
+        将删除 <code>memories</code> / <code>pitfalls</code> / <code>schema_meta</code> 三张表，<strong>表结构与全部数据一并删除，不可恢复</strong>；库中其它表不受影响。
       </div>
       <p class="reset-prompt">
         请输入当前数据库名称以确认清空：<br>

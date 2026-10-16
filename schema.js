@@ -11,12 +11,13 @@
  */
 
 /** 结构版本号。每次改动 TABLES 都要 +1，并在 MIGRATIONS 里补一条说明。 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** 各版本做了什么（给人看，也用于生成变更说明）。 */
 export const MIGRATIONS = {
   1: "初始结构：memories / pitfalls / memhub_meta 三表 + 两个唯一索引",
   2: "新增 client 来源字段（memories / pitfalls）与 full_content 全文存储（memories）",
+  3: "数据库表与字段语义重构：删除 dead fields (entities/hits/source)，重命名为语义明确字段 (scope_level, content_fingerprint, retrieval_count, related_entities, full_text, superseded_by_id, lifecycle_status, revision, last_used_at)，新增 origin 产生方式，改默认值 client='unknown'，重命名元数据表为 schema_meta",
 };
 
 /**
@@ -31,44 +32,38 @@ export const TABLES = {
       { name: "id", type: "INT", args: "AUTO_INCREMENT", pk: true },
       { name: "project", type: "VARCHAR", length: 128, default: "'global'" },
       { name: "category", type: "VARCHAR", length: 64, default: "'fact'" },
-      // ⚠️ 实测踩坑：起初这里漏了 scope，结果照声明初始化出来的库
-      // 在 memory_save 时报 "Unknown column 'scope' in 'field list'"。
-      // 声明必须与 tools.js 的 saveMemory payload 逐字段对齐。
-      { name: "scope", type: "VARCHAR", length: 32, default: "'project'" },
-      { name: "client", type: "VARCHAR", length: 64, default: "''" },
+      // 声明必须与 tools.js 的 saveMemory payload 逐字段对齐
+      { name: "scope_level", type: "VARCHAR", length: 32, default: "'project'" },
+      { name: "client", type: "VARCHAR", length: 64, default: "'unknown'" },
+      { name: "origin", type: "VARCHAR", length: 32, default: "'tool'" },
       { name: "title", type: "VARCHAR", length: 512, notNull: true },
       { name: "content", type: "TEXT", notNull: true },
-      { name: "full_content", type: "TEXT", nullable: true },
+      { name: "full_text", type: "TEXT", nullable: true },
       { name: "tags", type: "VARCHAR", length: 512, default: "''" },
-      { name: "entities", type: "VARCHAR", length: 512, default: "''" },
-      { name: "related", type: "VARCHAR", length: 512, default: "''" },
-      { name: "source", type: "VARCHAR", length: 64, default: "''" },
+      { name: "related_entities", type: "VARCHAR", length: 512, default: "''" },
       /* 指纹目前恰好是 32 位十六进制（tools.js 与 harvest.py 都 slice(0,32)）。
-       * 曾改成 CHAR(32) 想省索引空间，但实测立刻暴露问题：
-       * 任何稍长的值都会直接 `Data too long for column` 报错，而省下的
-       * 只有 32 字节/行 —— 这点收益完全抵不上「零余量」带来的脆弱性。
-       * 故保持 VARCHAR(64)。 */
-      { name: "fingerprint", type: "VARCHAR", length: 64, notNull: true },
+       * 保持 VARCHAR(64) 提供充足余量。 */
+      { name: "content_fingerprint", type: "VARCHAR", length: 64, notNull: true },
       { name: "confidence_score", type: "INT", default: "100" },
-      // 16 太紧（'superseded' 已占 10），留出余量给未来状态
-      { name: "status", type: "VARCHAR", length: 24, default: "'active'" },
-      { name: "superseded_by", type: "INT", default: "0" },
-      { name: "version", type: "INT", default: "1" },
-      { name: "hits", type: "INT", default: "0" },
-      { name: "access_count", type: "INT", default: "1" },
+      // 状态：active / superseded / invalid
+      { name: "lifecycle_status", type: "VARCHAR", length: 24, default: "'active'" },
+      { name: "superseded_by_id", type: "INT", default: "0" },
+      { name: "revision", type: "INT", default: "1" },
+      { name: "retrieval_count", type: "INT", default: "0" },
       { name: "invalid_at", type: "DATETIME", nullable: true },
       // 软失效的原因，便于审计（superseded / user_forgot / duplicate / expired）
       { name: "invalid_reason", type: "VARCHAR", length: 64, default: "''" },
       // 会话级/轮次级记忆的到期时间；NULL = 永不过期
       { name: "expires_at", type: "DATETIME", nullable: true },
-      { name: "last_accessed_at", type: "DATETIME", default: "CURRENT_TIMESTAMP" },
+      // 最后被检索命中或被读取展开的时间；写库时不设置，默认为 NULL；仅在被取用时更新
+      { name: "last_used_at", type: "DATETIME", nullable: true },
       { name: "created_at", type: "DATETIME", default: "CURRENT_TIMESTAMP" },
       { name: "updated_at", type: "DATETIME", default: "CURRENT_TIMESTAMP", onUpdate: "CURRENT_TIMESTAMP" },
     ],
     indexes: [
       // 去重的最终保证：NCB 有约 2 秒写后读延迟，靠「先读后写」会漏掉紧邻/并发重复
-      { name: "idx_memories_uniq_fp", unique: true, columns: ["project", "fingerprint"] },
-      { name: "idx_memories_scope", columns: ["project", "status"] },
+      { name: "idx_memories_uniq_fp", unique: true, columns: ["project", "content_fingerprint"] },
+      { name: "idx_memories_scope", columns: ["project", "lifecycle_status"] },
       // 供「清理已过期记忆」用
       { name: "idx_memories_expires", columns: ["expires_at"] },
     ],
@@ -79,7 +74,7 @@ export const TABLES = {
     columns: [
       { name: "id", type: "INT", args: "AUTO_INCREMENT", pk: true },
       { name: "project", type: "VARCHAR", length: 128, default: "'global'" },
-      { name: "client", type: "VARCHAR", length: 64, default: "''" },
+      { name: "client", type: "VARCHAR", length: 64, default: "'unknown'" },
       { name: "component", type: "VARCHAR", length: 128, notNull: true },
       { name: "symptom", type: "TEXT", notNull: true },
       { name: "root_cause", type: "TEXT", notNull: true },
@@ -87,7 +82,7 @@ export const TABLES = {
       { name: "severity", type: "VARCHAR", length: 16, default: "'medium'" },
       { name: "error_type", type: "VARCHAR", length: 64, default: "''" },
       { name: "tags", type: "VARCHAR", length: 512, default: "''" },
-      { name: "fingerprint", type: "VARCHAR", length: 64, notNull: true },
+      { name: "content_fingerprint", type: "VARCHAR", length: 64, notNull: true },
       { name: "recurrence", type: "INT", default: "1" },
       { name: "invalid_at", type: "DATETIME", nullable: true },
       { name: "invalid_reason", type: "VARCHAR", length: 64, default: "''" },
@@ -96,11 +91,11 @@ export const TABLES = {
       { name: "updated_at", type: "DATETIME", default: "CURRENT_TIMESTAMP", onUpdate: "CURRENT_TIMESTAMP" },
     ],
     indexes: [
-      { name: "idx_pitfalls_uniq_fp", unique: true, columns: ["project", "fingerprint"] },
+      { name: "idx_pitfalls_uniq_fp", unique: true, columns: ["project", "content_fingerprint"] },
     ],
   },
 
-  memhub_meta: {
+  schema_meta: {
     comment: "插件自用元数据（结构版本等）。这是插件唯一的自有表，请勿写入业务数据。",
     columns: [
       { name: "id", type: "INT", args: "AUTO_INCREMENT", pk: true },
@@ -109,7 +104,7 @@ export const TABLES = {
       { name: "updated_at", type: "DATETIME", default: "CURRENT_TIMESTAMP", onUpdate: "CURRENT_TIMESTAMP" },
     ],
     indexes: [
-      { name: "idx_memhub_meta_k", unique: true, columns: ["k"] },
+      { name: "idx_schema_meta_k", unique: true, columns: ["k"] },
     ],
   },
 };
@@ -151,7 +146,7 @@ export function toNcbTables() {
 }
 
 /** 元数据表名（清库时也要删掉它）。 */
-export const META_TABLE = "memhub_meta";
+export const META_TABLE = "schema_meta";
 /** 记录结构版本号的键名。 */
 export const VERSION_KEY = "schema_version";
 

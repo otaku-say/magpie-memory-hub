@@ -16,7 +16,7 @@ import { createTestEnv } from "./lib/testenv.mjs";
 process.chdir(fileURLToPath(new URL("..", import.meta.url)));
 const ROOT = process.cwd();
 
-const { readAction, runPendingAction, OPS, STATUS_JSON_PATH } = await import(path.join(ROOT, "page_actions.js"));
+const { readAction, runPendingAction, writeCardStatus, OPS, STATUS_JSON_PATH } = await import(path.join(ROOT, "page_actions.js"));
 
 const env = await createTestEnv({ instance: "41694_agent_memory", requireMcp: true });
 console.log(`[test_beacon_e2e] 隔离命名空间 project: ${env.project}`);
@@ -29,12 +29,15 @@ const check = (c, m) => c ? ok(m) : no(m);
 try {
   /* ---------- 从页面源码里抓出它到底会发哪些 op ---------- */
   const js = readFileSync(path.join(ROOT, "settings.js"), "utf8");
-  const sentOps = new Set();
-  for (const m of js.matchAll(/submitAction\(\s*"([a-z_]+)"/g)) sentOps.add(m[1]);
-  for (const m of js.matchAll(/submitAction\(\s*"([a-z_]+)"\s*,\s*\{/g)) sentOps.add(m[1]);
+  const allSentOps = new Set();
+  for (const m of js.matchAll(/submitAction\(\s*"([a-z_]+)"/g)) allSentOps.add(m[1]);
+  for (const m of js.matchAll(/submitAction\(\s*"([a-z_]+)"\s*,\s*\{/g)) allSentOps.add(m[1]);
   // 弹窗确认那两处是间接调用，手工补上
-  sentOps.add("provision");
-  sentOps.add("reset");
+  allSentOps.add("provision");
+  allSentOps.add("reset");
+
+  // harvest_gateway 是网关对话提炼专有信标（由 gateway_harvest.js 处理并回传至 gateway 卡片）
+  const sentOps = new Set([...allSentOps].filter((op) => op !== "harvest_gateway"));
 
   console.log("=== 1. 页面会发出的 op 清单 ===");
   console.log("  " + [...sentOps].sort().join(", "));
@@ -113,7 +116,7 @@ try {
     }
   }
 
-  console.log("\n=== 5. 合并写：三张卡片的结果必须共存，不能互相覆盖 ===");
+  console.log("\n=== 5. 合并写：四张卡片的结果必须共存，不能互相覆盖 ===");
   {
     rmSync(STATUS_JSON_PATH, { force: true });
     for (const op of ["ncb_check", "r2_check", "model_check"]) {
@@ -122,13 +125,20 @@ try {
         { instance: env.instance, mcpKey: env.mcpKey, secret: env.secret }
       );
     }
+    writeCardStatus("gateway", {
+      at: Date.now(),
+      op: "harvest_gateway",
+      ok: true,
+      title: "网关对话提炼就绪",
+      lines: ["已扫描对话轮次：0", "数据来源：Magpie 本地录制"]
+    });
     let written = null;
     if (existsSync(STATUS_JSON_PATH)) {
       written = JSON.parse(readFileSync(STATUS_JSON_PATH, "utf8"));
     }
     if (written) {
-      check(["ncb", "r2", "model"].every((k) => !!written[k]),
-        `三张卡片结果共存（实际：${Object.keys(written).join(",")}）`);
+      check(["ncb", "r2", "model", "gateway"].every((k) => !!written[k]),
+        `四张卡片结果共存（实际：${Object.keys(written).join(",")}）`);
     } else {
       no("状态文件不存在");
     }

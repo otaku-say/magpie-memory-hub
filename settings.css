@@ -762,7 +762,7 @@ code, .mono {
   padding: 1px 7px;
   border-radius: var(--radius-sm);
   background: var(--magpie-accent-soft);
-  color: var(--magpie-accent-fg);
+  color: var(--magpie-accent);
   font-size: var(--fs-badge);
   font-weight: 600;
   font-family: var(--magpie-code);
@@ -830,7 +830,7 @@ code, .mono {
   text-align: center;
   border-radius: 50%;
   background: var(--magpie-accent-soft);
-  color: var(--magpie-fg);
+  color: var(--magpie-accent);
   font-size: 11px;
   font-weight: 600;
   margin-top: 2px;
@@ -911,3 +911,67 @@ code, .mono {
   font-weight: 600;
   color: var(--magpie-fg);
 }
+
+/* ---------- 记忆采集来源说明卡片 ---------- */
+.source-intro-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: var(--gap-row);
+  padding: 12px 14px;
+  background: var(--magpie-card);
+  border: 1px solid var(--magpie-line);
+  border-radius: var(--radius);
+}
+.source-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.source-item + .source-item {
+  padding-top: 10px;
+  border-top: 1px dashed var(--magpie-line);
+}
+.source-item-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-label);
+  color: var(--magpie-fg);
+}
+.source-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--magpie-accent-soft);
+  color: var(--magpie-accent);
+  font-size: var(--fs-badge);
+  font-weight: 600;
+  border: 1px solid var(--magpie-line);
+}
+.source-item-desc {
+  margin: 0;
+  font-size: var(--fs-hint);
+  color: var(--magpie-fg-2);
+  line-height: 1.5;
+}
+.source-item-desc code {
+  font-family: var(--magpie-code);
+  font-size: var(--fs-code);
+}
+
+.harvest-guide-tip {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--magpie-card) 85%, var(--magpie-bg));
+  border: 1px dashed var(--magpie-line);
+  font-size: var(--fs-hint);
+  color: var(--magpie-fg-2);
+  line-height: 1.5;
+}
+.harvest-guide-tip strong {
+  color: var(--magpie-fg);
+}
+
+

@@ -49,7 +49,7 @@ try {
       try { safeIdent(c, "column", "memories"); } catch (e) { cb++; }
     }
     check(cb === badCols.length, `${cb}/${badCols.length} 个非法列名被拒`);
-    ok(`合法名可用: ${safeIdent("memories", "table")} ${safeIdent("fingerprint", "column", "memories")}`);
+    ok(`合法名可用: ${safeIdent("memories", "table")} ${safeIdent("content_fingerprint", "column", "memories")}`);
   }
 
   console.log("\n=== 2. 值转义：这些写法都不能逃出字符串字面量 ===");
@@ -119,10 +119,10 @@ try {
     const fp = "fp_esc_" + stamp + "_" + Math.abs(hash(v));
     try {
       await mcp.create("memories", {
-        project: env.project, fingerprint: fp, title: "转义往返测试",
-        content: v, status: "active", scope: "project", category: "fact", confidence_score: 100,
+        project: env.project, content_fingerprint: fp, title: "转义往返测试",
+        content: v, lifecycle_status: "active", scope_level: "project", category: "fact", confidence_score: 100,
       });
-      const res = await mcp.list("memories", { project: env.project, fingerprint: fp, limit: 1 });
+      const res = await mcp.list("memories", { project: env.project, content_fingerprint: fp, limit: 1 });
       const row = (res.data || [])[0];
       if (!row) { rtFail++; no(`读回为空: ${JSON.stringify(v).slice(0, 40)}`); continue; }
       const got = String(row.content);

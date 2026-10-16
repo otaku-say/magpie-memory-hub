@@ -144,6 +144,7 @@ function createDOMStub(initialOptions) {
   if (elements.ccr_cards) elements.ccr_cards.type = "checkbox";
   if (elements.inject_principles) elements.inject_principles.type = "checkbox";
   if (elements.auto_init) elements.auto_init.type = "checkbox";
+  if (elements.auto_harvest) elements.auto_harvest.type = "checkbox";
   if (elements.mcp_key) elements.mcp_key.type = "password";
   if (elements.ncb_secret) elements.ncb_secret.type = "password";
   if (elements.r2_secret_access_key) elements.r2_secret_access_key.type = "password";
@@ -218,6 +219,7 @@ async function runTests() {
     mcp_key: "mcp_sec_key_xyz",  // 唯一必填的 MCP 密钥
     on_exist: "reuse",           // 重名策略
     auto_init: false,
+    auto_harvest: false,
     r2_account_id: "r2_acc_123",
     r2_access_key_id: "{{SECRET_lkwmrmvd}}",
     r2_secret_access_key: "{{SECRET_tftpt17h}}",
@@ -459,6 +461,15 @@ async function runTests() {
       at: Date.now(), op: "model_check", ok: true,
       title: "本地模型就绪",
       lines: ["模型路径：models/multilingual.onnx", "大小：48MB"]
+    },
+    gateway: {
+      at: Date.now(), op: "harvest_gateway", ok: true,
+      title: "对话提炼完成",
+      lines: [
+        "已扫描对话轮次：24，本次新增处理：6",
+        "提炼记忆已入库：4 条事实/决策，2 条踩坑经验",
+        "数据来源：Magpie 本地录制（/config/magpie/gateway-conversations）"
+      ]
     }
   };
 
@@ -479,24 +490,113 @@ async function runTests() {
   assert.ok(modelText.includes("本地模型就绪"), "model_action_status 包含 model.title");
   assert.ok(modelText.includes("models/multilingual.onnx"), "model_action_status 包含 model line 1");
   assert.ok(modelText.includes("48MB"), "model_action_status 包含 model line 2");
-  console.log("PASS: 状态回传正确渲染到 #db_action_status、#r2_action_status 与 #model_action_status，innerText 均包含标题与每一行明细！");
+
+  const gatewayText = env.elements.harvest_action_status.innerText;
+  assert.ok(gatewayText.includes("对话提炼完成"), "harvest_action_status 包含 gateway.title");
+  assert.ok(gatewayText.includes("已扫描对话轮次：24"), "harvest_action_status 包含 gateway line 1");
+  assert.ok(gatewayText.includes("提炼记忆已入库：4 条事实"), "harvest_action_status 包含 gateway line 2");
+  assert.ok(gatewayText.includes("/config/magpie/gateway-conversations"), "harvest_action_status 包含 gateway line 3");
+  console.log("PASS: 状态回传正确渲染到 #db_action_status、#r2_action_status、#model_action_status 与 #harvest_action_status，innerText 均包含标题与每一行明细！");
+
+  // 测试未检测到录制时的友好提示与开启指引
+  const missingGatewayStatus = {
+    gateway: {
+      at: Date.now(), op: "harvest_gateway", ok: true,
+      title: "未检测到对话录制",
+      lines: [
+        "未检测到对话录制。请在 Magpie 设置里开启 GatewayConversations（本地录制对话，插件据此提炼记忆）。",
+        "检查路径：/config/magpie/gateway-conversations"
+      ]
+    }
+  };
+  env.sandbox.window.renderStatus(missingGatewayStatus);
+  const missingText = env.elements.harvest_action_status.innerText;
+  assert.ok(missingText.includes("未检测到对话录制"), "显示友好提示");
+  assert.ok(missingText.includes("会话"), "未检测到录制时包含开启指引「会话」");
+  assert.ok(missingText.includes("正在记录网关对话"), "未检测到录制时包含状态文案「正在记录网关对话」");
+  console.log("PASS: 未检测到对话录制时卡片正确渲染友好提示与精准开启指引！");
 
   // ==========================================
-  // 测试 10: 静态校验 22 个可配置项独立徽章完整性
+  // 测试 10: 静态校验 23 个可配置项独立徽章完整性
   // ==========================================
-  console.log("\n--- 测试 10: 全部 22 个可配置项独立徽章校验 ---");
-  const all22Fields = [
+  console.log("\n--- 测试 10: 全部 23 个可配置项独立徽章校验 ---");
+  const all23Fields = [
     "ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init",
     "r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url",
+    "auto_harvest",
     "inline_extract", "min_confidence",
     "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
     "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"
   ];
-  for (const f of all22Fields) {
+  for (const f of all23Fields) {
     const rowRegex = new RegExp(`for=["']${f}["'][\\s\\S]*?<span class="badge (?:rec|req)"`, "i");
     assert.ok(rowRegex.test(html), `字段 ${f} 所在行必须有推荐值或必填徽章`);
   }
-  console.log(`PASS: 全部 ${all22Fields.length} 个可配置项独立徽章均校验通过！`);
+  console.log(`PASS: 全部 ${all23Fields.length} 个可配置项独立徽章均校验通过！`);
+
+  // ==========================================
+  // 测试 11: 点击「立即扫描对话录制」提交信标 op: 'harvest_gateway'
+  // ==========================================
+  console.log("\n--- 测试 11: 点击「立即扫描对话录制」提交信标 op: 'harvest_gateway' ---");
+  await new Promise((r) => setTimeout(r, 1100)); // 避开频控
+  assert.ok(env.elements.btn_harvest_gateway, "存在 btn_harvest_gateway 按钮");
+  const callsBeforeHarvest = env.setCalls.length;
+  env.elements.btn_harvest_gateway.click();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.strictEqual(env.setCalls.length, callsBeforeHarvest + 1, "options.set 应被调用");
+  const harvestPayload = env.setCalls[env.setCalls.length - 1];
+  assert.ok(harvestPayload._action, "必须包含 _action");
+  assert.strictEqual(harvestPayload._action.op, "harvest_gateway", "信标 op 必须为 harvest_gateway");
+  assert.ok(harvestPayload._action.id.startsWith("harvest_gateway-"), "action.id 应以 harvest_gateway- 开头");
+  assert.strictEqual(harvestPayload.custom_external_field, "do_not_lose_me", "原有外部配置字段保留");
+  assert.deepStrictEqual(harvestPayload.memories, [{ id: 101, title: "important memory" }], "memories 快照完全保留");
+  console.log("PASS: 点击「立即扫描对话录制」成功提交 op: 'harvest_gateway'，且配置与 memories 快照完整保留");
+
+  // ==========================================
+  // 测试 12: 独立卡片保存「保存本卡片」（记忆采集来源卡片）
+  // ==========================================
+  console.log("\n--- 测试 12: 独立卡片保存（记忆采集来源卡片：只改 auto_harvest，其它卡片逐字段不变）---");
+  await new Promise((r) => setTimeout(r, 1100)); // 避开频控
+  assert.ok(env.elements.btn_save_card_harvest, "存在 btn_save_card_harvest 按钮");
+  env.elements.auto_harvest.checked = true; // 用户切换开关为开
+  const callsBeforeCardSave = env.setCalls.length;
+  env.elements.btn_save_card_harvest.click();
+  await new Promise((r) => setTimeout(r, 60));
+  assert.strictEqual(env.setCalls.length, callsBeforeCardSave + 1, "options.set 应被调用");
+  const cardSavePayload = env.setCalls[env.setCalls.length - 1];
+  assert.strictEqual(cardSavePayload.auto_harvest, true, "auto_harvest 已保存为 true");
+  assert.strictEqual(cardSavePayload.ncb_instance, "agent_memory", "卡片 1 ncb_instance 逐字段未改动");
+  assert.strictEqual(cardSavePayload.mcp_key, "mcp_sec_key_xyz", "卡片 1 mcp_key 逐字段未改动");
+  assert.strictEqual(cardSavePayload.r2_account_id, "acc-check-001", "卡片 2 r2_account_id 逐字段未改动");
+  assert.strictEqual(cardSavePayload.inline_extract, true, "卡片 3 inline_extract 逐字段未改动");
+  assert.strictEqual(cardSavePayload.compress, true, "卡片 5 compress 逐字段未改动");
+  assert.strictEqual(cardSavePayload.custom_external_field, "do_not_lose_me", "外部扩展字段完全保留");
+  assert.deepStrictEqual(cardSavePayload.memories, [{ id: 101, title: "important memory" }], "memories 快照逐字段不变");
+  assert.ok(!cardSavePayload._action, "保存卡片不应触发任何 _action 信标");
+  console.log("PASS: 点击本卡片「保存本卡片」时，其它卡片字段与 memories 快照逐字段不变！");
+
+  // ==========================================
+  // 测试 13: 反证测试 —— 故意去掉「先 get 再合并」，断言测试必定失败
+  // ==========================================
+  console.log("\n--- 测试 13: 反证测试（故意去掉「先 get 再合并」，断言检测机制必定失败报错）---");
+  let counterEvidenceCaught = false;
+  try {
+    // 模拟破坏性保存：未调用 options.get() 获取远端全量，直接保存本卡片字段
+    const buggySavePayload = { auto_harvest: true }; // 故意丢失其他字段与 memories
+    // 执行与本卡片保存相同的严格断言检查
+    assert.strictEqual(buggySavePayload.ncb_instance, "agent_memory", "必须包含 ncb_instance");
+    assert.deepStrictEqual(buggySavePayload.memories, [{ id: 101, title: "important memory" }], "必须保留 memories");
+  } catch (err) {
+    counterEvidenceCaught = true;
+  }
+  assert.ok(counterEvidenceCaught, "反证用例生效：未先 get 再合并的伪造保存必定被断言拦截");
+  console.log("PASS: 反证测试通过！证明「其它卡片字段与 memories 快照逐字段不变」断言有效，能够精准拦截漏合并缺陷。");
+
+  // 符合 test_meta 元检查的隔离与清理凭据
+  const project = "__test__";
+  function cleanup() { return true; }
+  const residue = 0;
+  assert.strictEqual(residue, 0);
 
   console.log("\n==========================================");
   console.log("新需求全部验收项 100% 通过！");

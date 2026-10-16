@@ -57,7 +57,8 @@ var CRUSH = {
   varianceThreshold: 2.0,// 标准差倍数（异常判定）
   firstFraction: 0.3,    // 配额：开头留 30%
   lastFraction: 0.15,    // 配额：结尾留 15%（余下 55% 给「重要项」）
-  dedupIdentical: true   // 完全相同项只留一份（= dedup_identical_items）
+  dedupIdentical: true,  // 完全相同项只留一份（= dedup_identical_items）
+  logTemplateDedup: true // 日志内容模板去重开关（= log_template_dedup）
 };
 
 /* 「异常项」永远保留，且是【加法式】的：即使超出配额也不丢。
@@ -317,6 +318,107 @@ function crushJson(text, maxChars) {
 /* ---------------- LogCrush：日志/文本启发式压缩 ---------------- */
 /* 保留「信息密度高」的行：错误、异常、堆栈、路径、数字、关键字；
  * 丢弃重复行与纯噪声模板行。这是 Headroom 的 lossy 思路，纯正则实现。 */
+/* ---------------- 日志内容模板去重 ----------------
+ * 针对「只差时间戳/数字/ID」的日志行（心跳、轮询、重试等，占日志绝大多数）：
+ * 抹去结构性易变段得到「内容模板」，将同模板的连续行折叠为：
+ *   首行
+ *   …[相同内容重复 N 次]…
+ *   尾行
+ *
+ * 避坑原则：
+ * 1. 关键行必须逐行保留：只认 FATAL/ERROR/CRITICAL/致命/失败/拒绝/崩溃/异常 等，
+ *    严禁使用含裸数字 \d+ 的宽泛正则（避免因时间戳中的年份把每一行都当关键行保护）。
+ * 2. 占位符抹平：对 \x00P\d+\x00 等上游生成的占位符先行归一化为 <p>，避免因编号不同导致模板不匹配。
+ * 3. 性能热路径：单次正则遍历，无复杂回溯，耗时远低于 250ms 限额。
+ */
+
+var CRITICAL_KEYWORD_RE = /\b(?:FATAL|PANIC|CRITICAL|SEVERE|Traceback|Exception|FAILED)\b|connection refused|permission denied|access denied|timed out|\btimeout\b|segfault|\bOOM\b|\bkilled\b|No such file|not found|\bcannot\b|\bunable\b|exit code [1-9]|\b[1-9]\d* (?:failed|errors?|failures?)\b|致命|严重|失败|拒绝|崩溃|异常|报错|错误|警告升级|必须立即|立即降级|数据丢失/i;
+var ERROR_WORD_RE = /\b(?:ERROR|ERR)\b/i;
+var NEG_HEALTHY_RE = /无(?:异常|报错|错误)|0\s+(?:errors?|errs?|failures?)|(?:errors?|errs?|failures?)\s*[:=]\s*0/i;
+
+function isCriticalLine(src) {
+  if (!src || typeof src !== "string") return false;
+  if (NEG_HEALTHY_RE.test(src)) return false;
+  if (CRITICAL_KEYWORD_RE.test(src)) return true;
+  if (ERROR_WORD_RE.test(src)) return true;
+  return false;
+}
+
+var TPL_VOLATILE_RE = /\x00P\d+\x00|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b|\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b|\b[0-9a-fA-F]{16,}\b|\b(elapsed|duration|took|took_ms|latency|mem|memory|size|count|total|n|id|pid|tid|job|batch|worker|req|conn)=[-\w.]+|\b\d+(?:\.\d+)?\s?(?:ms|us|µs|ns|s|sec|secs|MB|GB|KB|B|bytes|rows|items|lines)\b|\b\d+(?:\.\d+)?\b/gi;
+
+function lineTemplate(src) {
+  if (!src || typeof src !== "string") return "";
+  return src.replace(/^\s+/, "").replace(/\s+$/, "").replace(TPL_VOLATILE_RE, function (m, kv) {
+    if (kv) return kv + "=<v>";
+    if (m.charCodeAt(0) === 0) return "<p>";
+    if (m.length === 36 && m.charAt(8) === "-") return "<uuid>";
+    if (m.length >= 16 && /^[0-9a-fA-F]+$/.test(m)) return "<hex>";
+    if (m.indexOf(":") !== -1) return "<ts>";
+    if (/[a-zA-Zµ]/.test(m)) return "<num><unit>";
+    return "<n>";
+  });
+}
+
+function dedupLogTemplates(text, opts) {
+  if (typeof text !== "string" || text.length < 40) return text;
+  var lines = text.split("\n");
+  if (lines.length < 3) return text;
+
+  var checkCritical = (opts && typeof opts.isCriticalLine === "function") ? opts.isCriticalLine : isCriticalLine;
+
+  var out = [];
+  var currentRun = null;
+
+  function flushRun() {
+    if (!currentRun) return;
+    if (currentRun.count === 1) {
+      out.push(currentRun.firstLine);
+    } else if (currentRun.count === 2) {
+      out.push(currentRun.firstLine);
+      out.push(currentRun.lastLine);
+    } else {
+      out.push(currentRun.firstLine);
+      out.push("…[相同内容重复 " + (currentRun.count - 2) + " 次]…");
+      out.push(currentRun.lastLine);
+    }
+    currentRun = null;
+  }
+
+  for (var i = 0; i < lines.length; i++) {
+    var rawLine = lines[i];
+    var trimmed = rawLine.replace(/\s+$/, "").replace(/^\s+/, "");
+    if (!trimmed.length) {
+      flushRun();
+      out.push(rawLine);
+      continue;
+    }
+
+    if (checkCritical(trimmed)) {
+      flushRun();
+      out.push(rawLine);
+      continue;
+    }
+
+    var tpl = lineTemplate(trimmed);
+    if (currentRun && currentRun.tpl === tpl) {
+      currentRun.count++;
+      currentRun.lastLine = rawLine;
+    } else {
+      flushRun();
+      currentRun = {
+        tpl: tpl,
+        firstLine: rawLine,
+        lastLine: rawLine,
+        count: 1
+      };
+    }
+  }
+  flushRun();
+
+  var res = out.join("\n");
+  return res.length < text.length ? res : text;
+}
+
 /* 「致命行」必须逐字节存活：报错、异常、堆栈、失败关键字。
  * 把 FATAL 压掉的压缩器比不压缩更危险，这是本模块的第一原则。
  *
@@ -330,10 +432,25 @@ var NOISE_RE = /(\berror\b|\berr\b|\bwarn\b|\bfailed\b|https?:\/\/|\/[\w.\-\/]{4
 /* 例行行：时间戳 + 级别 + 无异常信息，价值最低 */
 var ROUTINE_RE = /^\s*\d{4}-\d{2}-\d{2}[ T][\d:.]+\s+(?:INFO|DEBUG|TRACE|NOTICE)\b/i;
 
-function crushLog(text, maxChars, maxLines) {
-  var lines = String(text).split("\n");
-  var total = lines.length;
+function crushLog(text, maxChars, maxLines, opts) {
+  if (typeof text !== "string") return text;
   var cap = maxLines || 400;
+
+  var doDedup = true;
+  if (opts && (opts.log_template_dedup === false || opts.logTemplateDedup === false)) {
+    doDedup = false;
+  }
+  if (CRUSH.logTemplateDedup === false) {
+    doDedup = false;
+  }
+
+  var deduped = doDedup ? dedupLogTemplates(text, opts) : text;
+  if (deduped.length < text.length && deduped.length <= maxChars) {
+    return deduped;
+  }
+
+  var lines = String(deduped).split("\n");
+  var total = lines.length;
 
   var critical = [];
   var other = [];
@@ -350,8 +467,10 @@ function crushLog(text, maxChars, maxLines) {
       dup = 0;
     }
     last = trimmed;
-    if (CRITICAL_RE.test(trimmed)) {
+    if (isCriticalLine(trimmed)) {
       critical.push(trimmed);          // 致命行：原样保留，不截断
+    } else if (/^…\[相同内容重复 \d+ 次\]…$/.test(trimmed)) {
+      other.push(trimmed);             // 模板去重标记作为要点行保留
     } else if (ROUTINE_RE.test(trimmed)) {
       hasRoutine = true;               // 例行行：默认丢，只在预算有富余时补几条
     } else if (NOISE_RE.test(trimmed)) {
@@ -550,7 +669,7 @@ function crushText(text, opts) {
 
   var out;
   if (kind === "json") out = crushJson(text, maxChars);
-  else if (kind === "log") out = crushLog(text, maxChars, opts.maxLines || opts.max_lines || 400);
+  else if (kind === "log") out = crushLog(text, maxChars, opts.maxLines || opts.max_lines || 400, opts);
   else out = cutStr(text, maxChars);   // prose/code/diff：不做有损改写，只截断
 
   // 兜底：压完不能比原文还大（否则是倒退，不是压缩，记入 Skip Set）
@@ -584,7 +703,9 @@ function compressBody(body, opts) {
 
   var crushOpts = {
     maxChars: maxChars,
-    maxLines: opts.max_lines || opts.maxLines || 400
+    maxLines: opts.max_lines || opts.maxLines || 400,
+    logTemplateDedup: opts.log_template_dedup !== undefined ? opts.log_template_dedup : (opts.logTemplateDedup !== undefined ? opts.logTemplateDedup : CRUSH.logTemplateDedup),
+    log_template_dedup: opts.log_template_dedup !== undefined ? opts.log_template_dedup : (opts.logTemplateDedup !== undefined ? opts.logTemplateDedup : CRUSH.logTemplateDedup)
   };
 
   for (var i = 0; i < body.messages.length; i++) {
@@ -920,5 +1041,10 @@ export {
   // 新增导出（前缀漂移探测 + 哈希工具）
   analyzeCacheStability,
   detectVolatileContent,
-  hash32hex
+  hash32hex,
+
+  // 日志内容模板去重
+  dedupLogTemplates,
+  lineTemplate,
+  isCriticalLine
 };

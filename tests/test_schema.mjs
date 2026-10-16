@@ -136,7 +136,7 @@ console.log("\n=== 10. DDL 具备 IF NOT EXISTS 幂等保护 ===");
   }
   eq(/ON DUPLICATE KEY UPDATE/.test(versionUpsertSQL(1)), true, "版本记录用 upsert（重复写不报错）");
   ok(`版本号=${SCHEMA_VERSION}，键名=${VERSION_KEY}`);
-  eq(typeof TABLES.memories.columns.find((c) => c.name === "fingerprint").notNull, "boolean", "fingerprint 非空");
+  eq(typeof TABLES.memories.columns.find((c) => c.name === "content_fingerprint").notNull, "boolean", "content_fingerprint 非空");
 }
 
 console.log("\n=== 11. 计划摘要（给二次确认弹窗用）===");

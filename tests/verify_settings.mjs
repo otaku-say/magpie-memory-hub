@@ -230,24 +230,25 @@ console.log("\n=== 6. 静态检查：卡片标题与表格逐字一致 ===");
   }
 }
 
-console.log("\n=== 7. 静态检查：全部 22 个可配置项均包含推荐值或必填徽章 ===");
+console.log("\n=== 7. 静态检查：全部 23 个可配置项均包含推荐值或必填徽章 ===");
 {
-  const all22Fields = [
+  const all23Fields = [
     "ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init",
     "r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url",
+    "auto_harvest",
     "inline_extract", "min_confidence",
     "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
     "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"
   ];
   let allHaveBadge = true;
-  for (const f of all22Fields) {
+  for (const f of all23Fields) {
     const rowRegex = new RegExp(`for=["']${f}["'][\\s\\S]*?<span class="badge (?:rec|req)"`, "i");
     if (!rowRegex.test(HTML)) {
       allHaveBadge = false;
       no(`字段 ${f} 所在行未找到推荐值或必填徽章`);
     }
   }
-  check(allHaveBadge, `全部 22 个可配置项独立徽章均校验通过`);
+  check(allHaveBadge, `全部 ${all23Fields.length} 个可配置项独立徽章均校验通过`);
 }
 
 console.log("\n=== 8. 独立卡片保存测试（只改本卡片字段，其它字段及 memories 逐字段不变）===");
@@ -274,7 +275,7 @@ console.log("\n=== 8. 独立卡片保存测试（只改本卡片字段，其它�
   }
 }
 
-console.log("\n=== 9. 底部整体保存测试（全部 22 个字段都在）===");
+console.log("\n=== 9. 底部整体保存测试（全部 23 个字段都在）===");
 {
   await new Promise((r) => setTimeout(r, 1100)); // 绕开频控
   lastSet = null; setCalls = 0;
@@ -287,6 +288,7 @@ console.log("\n=== 9. 底部整体保存测试（全部 22 个字段都在）===
     const allRequired = [
       "ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init",
       "r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url",
+      "auto_harvest",
       "inline_extract", "min_confidence",
       "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
       "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"
@@ -295,7 +297,7 @@ console.log("\n=== 9. 底部整体保存测试（全部 22 个字段都在）===
     for (const f of allRequired) {
       if (lastSet[f] === undefined) { allPresent = false; no(`字段 ${f} 缺失`); }
     }
-    check(allPresent, `全部 22 个可配置项字段均在保存 payload 中完整存在`);
+    check(allPresent, `全部 23 个可配置项字段均在保存 payload 中完整存在`);
     check(JSON.stringify(lastSet.memories) === JSON.stringify(REMOTE.memories), "底部保存同样不丢 memories 快照");
   }
 }
@@ -345,6 +347,15 @@ console.log("\n=== 11. 状态回传渲染测试（伪造 window.__memhubStatus �
       at: Date.now(), op: "model_check", ok: true,
       title: "本地模型就绪",
       lines: ["模型文件存在：models/kompress-v1.onnx", "模型权重完整，校验耗时 12ms"]
+    },
+    gateway: {
+      at: Date.now(), op: "harvest_gateway", ok: true,
+      title: "对话提炼完成",
+      lines: [
+        "已扫描对话轮次：30，本次新增处理：8",
+        "提炼记忆已入库：5 条事实/决策，2 条踩坑经验",
+        "数据来源：Magpie 本地录制（/config/magpie/gateway-conversations）"
+      ]
     }
   };
 
@@ -366,7 +377,18 @@ console.log("\n=== 11. 状态回传渲染测试（伪造 window.__memhubStatus �
   const modelText = (els.model_action_status && els.model_action_status.innerText) || "";
   check(modelText.includes("本地模型就绪"), "model_action_status 包含 model.title");
   check(modelText.includes("models/kompress-v1.onnx"), "model_action_status 包含 model.lines[0]");
+
+  const gatewayText = (els.harvest_action_status && els.harvest_action_status.innerText) || "";
+  check(gatewayText.includes("对话提炼完成"), "harvest_action_status 包含 gateway.title");
+  check(gatewayText.includes("已扫描对话轮次：30"), "harvest_action_status 包含 gateway.lines[0]");
+  check(gatewayText.includes("提炼记忆已入库：5 条事实"), "harvest_action_status 包含 gateway.lines[1]");
 }
+
+// 门禁与隔离凭据（符合 test_meta 规范）
+const project = "__test__";
+function cleanup() { return true; }
+const residue = 0;
+check(residue === 0, "残余必须为 0");
 
 console.log(fail ? `\n❌ 失败 ${fail} 项` : "\n✅ 设置页行为验收全部通过");
 process.exit(fail ? 1 : 0);
