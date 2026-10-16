@@ -23,6 +23,7 @@ import { lookupSecret, lookupDatabase } from "./local_state.js";
 import { makeMcpClient } from "./mcp_client.js";
 import { checkLocalModel, MODEL_SPEC, modelDir } from "./model_check.js";
 import { runPendingAction, readAction, writeCardStatus, isModelDownloading, startBackgroundModelDownload } from "./page_actions.js";
+import { harvestGateway } from "./gateway_harvest.js";
 
 const NCB_BASE = "https://api.nocodebackend.com";
 
@@ -87,6 +88,9 @@ function readOptions(options) {
     storagePublicUrl: o.storage_public_url || "",
     // 宿主每次加载时自愈（结构缺失就补）。默认关：避免给工具枚举引入网络等待。
     autoInit: o.auto_init === true,
+    // 宿主每次加载时自动增量扫描网关录制的对话落盘。默认关：避免涉及用户隐私与启动延迟。
+    autoHarvest: o.auto_harvest === true,
+    gatewayConvDir: o.gateway_conv_dir || process.env.MEMHUB_GATEWAY_CONV_DIR || "",
     // R2 凭据：由设置页的「保存 R2 设置」按钮写入。
     // 挂载时会**显式传给 NCB**，否则它会用账号里缓存的旧连接（密钥轮换后必然失败）。
     r2AccountId: o.r2_account_id || "",
@@ -478,6 +482,7 @@ async function memoryList(client, cfg, args) {
   let all = (await fetchAll(client, "memories", { status: "active" })).filter(
     (r) => r.status !== "superseded"
   );
+  if (args.project) all = all.filter((r) => String(r.project || "") === String(args.project));
   if (args.client) all = all.filter((r) => String(r.client || "") === String(args.client));
   const sorted = all.sort((a, b) => rankMemory(b) - rankMemory(a)).slice(0, limit);
   return jsonOut({
@@ -723,6 +728,7 @@ const TOOLS = {
     args: {
       type: "object",
       properties: {
+        project: { type: "string", description: "限定项目" },
         client: { type: "string", description: "限定客户端来源（如 minis、codex、claude）" },
         limit: { type: "integer", description: "返回条数，默认 20，最大 100" },
       },
@@ -995,6 +1001,26 @@ const TOOLS = {
     args: { type: "object", properties: {} },
     run: (args, ctx) => storageGuide(ctx._cfg),
   },
+
+  harvest_gateway: {
+    description: "增量扫描 Magpie 网关录制的对话落盘（GatewayConversations），提炼环境事实、架构决策与故障规避经验存入记忆库。数据源于本地磁盘，可在 Magpie 设置中开启或关闭 GatewayConversations 录制。",
+    args: {
+      type: "object",
+      properties: {
+        dir: { type: "string", description: "自定义对话落盘目录路径（可选，默认自动探测）" },
+        force_rescan: { type: "boolean", description: "是否强制重新扫描所有文件（忽略增量状态，默认 false）" },
+        project: { type: "string", description: "项目命名空间（可选，默认 global）" },
+      },
+    },
+    run: (args, ctx) => harvestGateway(args, {
+      _client: ctx._client,
+      _cfg: ctx._cfg,
+      _ctx: ctx._ctx,
+      saveMemory,
+      pitfallSave,
+      signal: ctx.signal,
+    }),
+  },
 };
 
 /* ================================================================== *
@@ -1030,6 +1056,20 @@ export const MagpieMemoryHub = async (input, options) => {
   if (cfg.autoInit && cfg.mcpKey) {
     dbInit(cfg, {}).catch((e) => {
       console.error("[memory-hub] auto_init 失败：" + String(e && e.message || e));
+    });
+  }
+
+  /* ---- auto_harvest 自动增量提炼 ----
+   * 不 await：增量扫描在后台异步执行，不给常规工具枚举引入网络/磁盘延迟。
+   * 仅在 options.auto_harvest 为 true 时开启，默认 false 以防隐私越界。 */
+  if (cfg.autoHarvest) {
+    harvestGateway({}, {
+      _client: client,
+      _cfg: cfg,
+      saveMemory,
+      pitfallSave,
+    }).catch((e) => {
+      console.error("[memory-hub] auto_harvest 失败：" + String((e && e.message) || e));
     });
   }
 

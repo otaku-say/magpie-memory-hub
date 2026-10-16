@@ -66,31 +66,32 @@ console.log("=================================================================="
   fs.rmSync(resumeTestDir, { recursive: true, force: true });
   fs.mkdirSync(resumeTestDir, { recursive: true });
 
-  // 复制已就绪的 model.onnx, tokenizer.json, config.json，确保测试只聚焦 vocab.txt
+  // 复制已就绪的其它文件，确保测试只聚焦 tokenizer_config.json
   fs.copyFileSync(path.join(targetDir, "model.onnx"), path.join(resumeTestDir, "model.onnx"));
   fs.copyFileSync(path.join(targetDir, "tokenizer.json"), path.join(resumeTestDir, "tokenizer.json"));
   fs.copyFileSync(path.join(targetDir, "config.json"), path.join(resumeTestDir, "config.json"));
+  fs.copyFileSync(path.join(targetDir, "special_tokens_map.json"), path.join(resumeTestDir, "special_tokens_map.json"));
 
-  // 截取 vocab.txt 前 200,000 字节写入 vocab.txt.tmp
-  const vocabFull = fs.readFileSync(path.join(targetDir, "vocab.txt"));
-  const partialBuf = vocabFull.subarray(0, 200000);
-  const tmpVocab = path.join(resumeTestDir, "vocab.txt.tmp");
-  fs.writeFileSync(tmpVocab, partialBuf);
-  console.log(`模拟中断场景：已生成 vocab.txt.tmp，已有字节数: ${fs.statSync(tmpVocab).size}（总需: ${MODEL_SPEC.files["vocab.txt"].size}）`);
+  // 截取 tokenizer_config.json 前 500 字节写入 tokenizer_config.json.tmp
+  const tokConfFull = fs.readFileSync(path.join(targetDir, "tokenizer_config.json"));
+  const partialBuf = tokConfFull.subarray(0, 500);
+  const tmpTokConf = path.join(resumeTestDir, "tokenizer_config.json.tmp");
+  fs.writeFileSync(tmpTokConf, partialBuf);
+  console.log(`模拟中断场景：已生成 tokenizer_config.json.tmp，已有字节数: ${fs.statSync(tmpTokConf).size}（总需: ${MODEL_SPEC.files["tokenizer_config.json"].size}）`);
 
   let resumeOffset = -1;
   await downloadModel({}, { dir: resumeTestDir }, (p) => {
-    if (p.file === "vocab.txt") {
+    if (p.file === "tokenizer_config.json") {
       if (resumeOffset === -1 && p.done_bytes > 0) resumeOffset = p.done_bytes;
       console.log(`  [断点续传进度] ${p.file} 状态=${p.status} 字节=${p.done_bytes}/${p.total_bytes}`);
     }
   });
 
-  const finalVocab = path.join(resumeTestDir, "vocab.txt");
-  assert.ok(fs.existsSync(finalVocab), "断点续传后 vocab.txt 必须存在");
-  assert.ok(!fs.existsSync(tmpVocab), "vocab.txt.tmp 必须已原子替换");
-  const finalSha = await computeSha256(finalVocab);
-  assert.strictEqual(finalSha, MODEL_SPEC.files["vocab.txt"].sha256, "续传后 SHA-256 必须一致");
+  const finalTokConf = path.join(resumeTestDir, "tokenizer_config.json");
+  assert.ok(fs.existsSync(finalTokConf), "断点续传后 tokenizer_config.json 必须存在");
+  assert.ok(!fs.existsSync(tmpTokConf), "tokenizer_config.json.tmp 必须已原子替换");
+  const finalSha = await computeSha256(finalTokConf);
+  assert.strictEqual(finalSha, MODEL_SPEC.files["tokenizer_config.json"].sha256, "续传后 SHA-256 必须一致");
   console.log(`✓ 断点续传成功！初始续传点: ${resumeOffset} 字节，最终 SHA-256 严格匹配！`);
 }
 
@@ -105,7 +106,8 @@ console.log("=================================================================="
   // 复制已有正常文件
   fs.copyFileSync(path.join(targetDir, "model.onnx"), path.join(tamperTestDir, "model.onnx"));
   fs.copyFileSync(path.join(targetDir, "tokenizer.json"), path.join(tamperTestDir, "tokenizer.json"));
-  fs.copyFileSync(path.join(targetDir, "vocab.txt"), path.join(tamperTestDir, "vocab.txt"));
+  fs.copyFileSync(path.join(targetDir, "special_tokens_map.json"), path.join(tamperTestDir, "special_tokens_map.json"));
+  fs.copyFileSync(path.join(targetDir, "tokenizer_config.json"), path.join(tamperTestDir, "tokenizer_config.json"));
 
   // 构造 config.json.tmp：真实 config.json 但篡改末尾 1 个字节
   const realConfig = fs.readFileSync(path.join(targetDir, "config.json"));

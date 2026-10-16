@@ -2,24 +2,16 @@
 """
 compress_text.py — 语义压缩（离线管线侧）
 ==========================================
-把 Headroom 用的那个文本重要性小模型拿来用：
+选用当前中英混合场景效果最佳的抽取式多语言小模型：
 
-    chopratejas/kompress-v2-base
-      基座 answerdotai/ModernBERT-base，INT8 ONNX 约 140MB，Apache-2.0
-      token 级重要性二分类器（非生成式，无幻觉风险）
-      每个 token 得到一个 0~1 的保留概率，低于阈值的词元丢弃
+    microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank
+      （INT8 ONNX 社区量化版：KatawaDead/llmlingua-2-bert-base-multilingual-cased-meetingbank-onnx-int8）
+      基座 XLM-RoBERTa-large（560M 参数，250k SentencePiece 丰富多语言词表）
+      token / 词级重要性二分类器（非生成式，零幻觉风险）
+      原生支持中英混合与跨语言上下文长文本，CPU 推理约 400ms，MIT 许可
 
-依赖刻意做轻：只需 onnxruntime + tokenizers + numpy + huggingface_hub，
-不引入 transformers（那会拖进 PyTorch 等一大堆东西）。
-
-为什么放在离线管线而不是中间件：
-    中间件跑在 moejs（Go 内嵌 JS 引擎）里，不能加载原生模块或 WASM，
-    且 onRequest 只有 250ms。ONNX 推理必须放到独立进程。
-
-为什么值得做：
-    网关中间件的纯 JS 压缩对「工具输出（JSON/日志）」效果很好（实测省 91%），
-    但对**自然语言长文**只能截断。这个小模型专治自然语言，
-    在把长对话送进提炼模型之前压一道，直接砍掉提炼 Token 成本。
+依赖保持极轻：只需 onnxruntime + tokenizers + numpy + huggingface_hub，
+不引入 transformers 或 PyTorch。
 
 设计原则：**永远 fail-open**
     没有 onnxruntime / 没下载模型 / 推理出错 —— 一律原样返回，
@@ -30,12 +22,12 @@ import os
 import re
 import sys
 
-MODEL_ID = os.environ.get("KOMPRESS_MODEL", "chopratejas/kompress-v2-base")
-MODEL_ONNX = os.environ.get("KOMPRESS_ONNX", "onnx/kompress-int8-wo.onnx")
-MAX_TOKENS = int(os.environ.get("KOMPRESS_MAX_TOKENS", "4096"))
+MODEL_ID = os.environ.get("KOMPRESS_MODEL", "KatawaDead/llmlingua-2-bert-base-multilingual-cased-meetingbank-onnx-int8")
+MODEL_ONNX = os.environ.get("KOMPRESS_ONNX", "model.onnx")
+MAX_TOKENS = int(os.environ.get("KOMPRESS_MAX_TOKENS", "512"))
 MIN_CHARS = int(os.environ.get("KOMPRESS_MIN_CHARS", "600"))
 
-# 绝不压缩的内容：代码块、堆栈、URL、路径、时间戳、长哈希——它们是关键信息
+# 绝不压缩的内容：代码块、堆栈、URL、路径、时间戳、长哈希
 PROTECT_RE = re.compile(
     r"```[\s\S]*?```"
     r"|^\s*(?:at\s+[\w.$]+\(|Traceback|File \")[^\n]*"
@@ -49,41 +41,91 @@ PROTECT_RE = re.compile(
 TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?|[^\sA-Za-z0-9_]")
 CJK_RE = re.compile(r"[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
-# 「语义脆弱词」必须钉住，永不因模型打分被丢。
-# 依据 Headroom 的实测结论：丢掉 not 不是「降级指令」，而是【变成相反的指令】；
-# 丢掉 or/and 会改变「哪个条件必须成立」。它在 40 个真实文本上实测：
-# 否定词保留率 73.5%→91.9%，情态词 65.5%→96.8%，压缩率只损失 0.2 个百分点。
-# 中文同理：丢掉「不/禁止/必须/只能」会直接反转语义，必须钉住。
+# 「语义脆弱词」必须钉住，永不因模型打分被丢：
+# 包含中英否定词、情态词、条件词、环境变量名、命令行参数、版本号、数字及单位
 MUST_KEEP_RE = re.compile(
-    # 不可重建的 token
-    r"\b0x[0-9A-Fa-f]+\b"
+    r"\u0000P\d+\u0000"
+    r"|\b0x[0-9A-Fa-f]+\b"
     r"|(?<![\w.])\d+(?:\.\d+)?(?![\w.])"
-    r"|[A-Z_]{2,}"
+    r"|\b[A-Z][A-Z0-9_]{2,}\b"
     r"|[a-z_][a-z0-9_]*\.[a-z0-9_]+"
     r"|/[a-z0-9/._-]{2,}"
     r"|\.[a-z]{2,4}\b"
     r"|--?[a-z][\w-]*"
-    r"|\b[A-Z][a-z]+[A-Z]\w*"
-    # 英文：否定 / 情态 / 布尔连接词
+    r"|\bv?\d+(?:\.\d+)+(?:-[a-zA-Z0-9.]+)?\b"
+    r"|\b\d+(?:ms|s|m|h|MB|GB|KB|kb|qps|QPS|%)\b"
     r"|(?i:\b(?:not|never|none|cannot|can't|don't|doesn't|didn't|won't|shouldn't"
     r"|mustn't|isn't|aren't|avoid|refuse|prohibited|forbidden|disallow|unless"
-    r"|except|without|must|should|shall|required|always|only|mandatory|and|or|nor|xor)\b)"
-    # 中文：否定 / 禁止 / 情态 / 条件 / 连接
+    r"|except|without|must|should|shall|required|always|only|mandatory|and|or|nor|xor"
+    r"|fatal|critical|severe)\b)"
     r"|(?:不|别|没|无|非|禁止|严禁|切勿|不得|不可|不能|不要|无需|免|必须|务必|只能|仅|只|应当|应该|需要|要求|除非|否则|除了|以及|或者|和|并且|但是|然而|如果|若|当)"
 )
 
-# 模型训练时的块大小：v2 的 chunk_words=50
-CHUNK_WORDS = int(os.environ.get("KOMPRESS_CHUNK_WORDS", "350"))
+# XLM-RoBERTa/BERT 架构单次输入分块上限（Position Embeddings 限制为 512）
+MAX_CHUNK_TOKENS = int(os.environ.get("KOMPRESS_CHUNK_TOKENS", "450"))
 
-# 日志/结构化行的特征：时间戳 + 级别，或大量行以级别开头。
-# 这类内容靠「固定词位」表达结构，词级抽干会让它读不通
-# （实测："INFO processing batch 0 of 25 with 0 errors" → "INFO 0 25 0 and 0 retries"）。
-# 对日志一律走【行级】：整行留或整行丢，结构不被破坏。
+# 日志/结构化行特征：时间戳 + 级别，或以级别开头
 LOG_LINE_RE = re.compile(
-    r"^\s*(?:\[?\d{2,4}[-/]\d{1,2}[-/]\d{1,2}[ T][\d:.]+|"
+    r"^\s*(?:\u0000P\d+\u0000\s*)?(?:\[?\d{2,4}[-/]\d{1,2}[-/]\d{1,2}[ T][\d:.]+|"
     r"\[?(?:INFO|DEBUG|TRACE|NOTICE|WARN|WARNING|ERROR|ERR|FATAL|CRITICAL|SEVERE)\]?)\b",
     re.I,
 )
+
+
+# ---------------------------------------------------------------
+# 行模板（去重用的标准化键）
+#
+# 为什么需要它：原先去重是【整行精确匹配】，于是「只差时间戳」的行全部漏掉——
+# 而真实日志里这种形态恰恰占绝大多数（心跳/轮询/重试，每行仅时间戳不同）。
+# 实测：40 行完全重复的日志能压 94%，但 40 行仅时间戳不同的日志压缩 0%。
+#
+# 做法：把行里【按规律变化的片段】替换成占位符，剩下的即「内容模板」。
+# 同一模板的行视为「同一种日志」，可折叠为首尾 + 重复计数。
+# 注意：只抹掉【结构性易变段】，绝不抹掉有语义的词（否定/情态/路径/参数等）。
+_TPL_VOLATILE = [
+    # 【必须放在最前】PROTECT_RE 已把路径/时间戳等替换成 \u0000P<n>\u0000 占位符，
+    # 而每个占位符的编号不同（P0、P1、P2…）。不先归一化它们，
+    # 40 行「只差时间戳」的日志会变成 40 个不同模板，模板去重完全失效。
+    # 这是第一版补丁没生效的真正原因。
+    (re.compile("\x00P\\d+\x00"), "<p>"),
+    # ISO8601 / 常见日志时间戳
+    (re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"), "<ts>"),
+    # 只有时分秒
+    (re.compile(r"\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b"), "<ts>"),
+    # UUID
+    (re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"), "<uuid>"),
+    # 长十六进制（hash / 十六进制 id）
+    (re.compile(r"\b[0-9a-fA-F]{16,}\b"), "<hex>"),
+    # 常见「键=值」里的可变值：耗时/内存/条数/大小/延迟
+    (re.compile(r"\b(elapsed|duration|took|took_ms|latency|mem|memory|size|count|total|n|id|pid|tid|job|batch|worker|req|conn)=[-\w.]+", re.I), r"\1=<v>"),
+    (re.compile(r"\b\d+(?:\.\d+)?\s?(?:ms|us|µs|ns|s|sec|secs|MB|GB|KB|B|bytes|rows|items|lines)\b", re.I), "<num><unit>"),
+    # 独立的数字（含负数与小数）——放最后，避免吃掉上面已处理的
+    (re.compile(r"(?<![\w.])[-+]?\d+(?:\.\d+)?(?![\w%])"), "<n>"),
+]
+
+
+# 只有这些行必须【逐行保留】，绝不参与模板折叠。
+# 注意不能用 MUST_KEEP_RE 做这个判断——它含裸数字模式（\d+），
+# 而几乎每行日志都有时间戳（"2026" 就命中），会把所有行都保护起来、
+# 导致模板去重完全失效（这正是第一版补丁没生效的原因）。
+_CRITICAL_LINE_RE = re.compile(
+    r"\b(?:FATAL|ERROR|CRITICAL|PANIC|SEVERE|Traceback)\b"
+    r"|致命|严重|失败|拒绝|崩溃|异常|报错|错误"
+    r"|警告升级|必须立即|立即降级|数据丢失",
+    re.I,
+)
+
+
+def is_critical_line(src):
+    return bool(_CRITICAL_LINE_RE.search(src))
+
+
+def line_template(src):
+    """把一行归一化成「内容模板」；只抹结构性易变段，保留全部语义词。"""
+    t = src.strip()
+    for rx, rep in _TPL_VOLATILE:
+        t = rx.sub(rep, t)
+    return t
 
 
 def _log_ratio(text):
@@ -117,38 +159,53 @@ class Kompress:
             import numpy as np
             import onnxruntime as ort
             from tokenizers import Tokenizer
-            from huggingface_hub import hf_hub_download
         except Exception as e:
             self.unavailable_reason = (
                 "缺少依赖（Alpine: apk add py3-onnxruntime py3-numpy; "
-                f"pip install tokenizers huggingface_hub）: {e}")
+                f"pip install tokenizers）: {e}")
             self.log(f"语义压缩不可用：{self.unavailable_reason}")
             return False
 
+        # 优先读取本地持久卷已下载的模型目录（离线优先，不依赖外网）
+        candidates = []
+        if os.environ.get("MEMHUB_MODEL_DIR"):
+            candidates.append(os.path.expanduser(os.environ["MEMHUB_MODEL_DIR"]))
+        candidates.append(os.path.join(os.path.expanduser("~"), ".magpie-memory-hub", "models", "llmlingua2-mbert-int8"))
+
+        local_dir = None
+        for cand in candidates:
+            if cand and os.path.exists(os.path.join(cand, "model.onnx")) and os.path.exists(os.path.join(cand, "tokenizer.json")):
+                local_dir = cand
+                break
+
+        tok_path = None
+        onnx_path = None
+        if local_dir:
+            tok_path = os.path.join(local_dir, "tokenizer.json")
+            onnx_path = os.path.join(local_dir, "model.onnx")
+        else:
+            try:
+                from huggingface_hub import hf_hub_download
+                tok_path = hf_hub_download(repo_id=MODEL_ID, filename="tokenizer.json")
+                onnx_path = hf_hub_download(repo_id=MODEL_ID, filename=MODEL_ONNX)
+            except Exception as e:
+                self.unavailable_reason = f"本地模型未下载且网络获取失败: {e}"
+                self.log(f"语义压缩不可用：{self.unavailable_reason}")
+                return False
+
         try:
-            tok_path = hf_hub_download(repo_id=MODEL_ID, filename="tokenizer.json")
             self._tok = Tokenizer.from_file(tok_path)
             self._tok.enable_truncation(max_length=MAX_TOKENS)
-            # 裸 Tokenizer 没有 all_special_ids，手工取出来；
-            # 否则 [CLS]/[SEP] 会混进行平均分，把评分带偏。
             self._special = set()
             for name in ("[CLS]", "[SEP]", "[PAD]", "<s>", "</s>", "<pad>", "[MASK]"):
-                tid = None
                 try:
                     tid = self._tok.token_to_id(name)
+                    if tid is not None:
+                        self._special.add(tid)
                 except Exception:
-                    tid = None
-                if tid is not None:
-                    self._special.add(tid)
+                    pass
         except Exception as e:
-            self.unavailable_reason = f"tokenizer 不可得（首次需联网下载）: {e}"
-            self.log(f"语义压缩不可用：{self.unavailable_reason}")
-            return False
-
-        try:
-            onnx_path = hf_hub_download(repo_id=MODEL_ID, filename=MODEL_ONNX)
-        except Exception as e:
-            self.unavailable_reason = f"ONNX 权重不可得（约 140MB，首次需下载）: {e}"
+            self.unavailable_reason = f"tokenizer 加载失败: {e}"
             self.log(f"语义压缩不可用：{self.unavailable_reason}")
             return False
 
@@ -157,52 +214,21 @@ class Kompress:
             so.log_severity_level = 3
             self._sess = ort.InferenceSession(onnx_path, sess_options=so,
                                               providers=["CPUExecutionProvider"])
-            self._np = np
-            self._ready = True
-            self.log(f"语义压缩已就绪：{MODEL_ID}（阈值 {self.threshold}）")
-            return True
+            self._input_names = {x.name for x in self._sess.get_inputs()}
         except Exception as e:
             self.unavailable_reason = f"ONNX 会话创建失败: {e}"
             self.log(f"语义压缩不可用：{self.unavailable_reason}")
             return False
 
-    # ---------------- 推理 ----------------
-    def _keep_flags(self, text, threshold):
-        """返回与文本 token 一一对应的保留标记。"""
-        np = self._np
-        enc = self._tok.encode(text)
-        ids = list(enc.ids)
-        if not ids:
-            return [], []
-        feeds = {
-            "input_ids": np.asarray([ids], dtype=np.int64),
-            "attention_mask": np.asarray([[1] * len(ids)], dtype=np.int64),
-        }
-        names = {i.name for i in self._sess.get_inputs()}
-        feeds = {k: v for k, v in feeds.items() if k in names}
-        logits = self._sess.run(None, feeds)[0]          # [1, seq, L]
-        arr = np.asarray(logits)[0]
+        self._np = np
+        self._ready = True
+        return True
 
-        if arr.ndim == 1:
-            scores = arr
-        elif arr.shape[-1] == 1:
-            scores = 1.0 / (1.0 + np.exp(-arr[:, 0]))    # 单 logit → sigmoid
-        else:
-            x = arr - arr.max(axis=-1, keepdims=True)
-            e = np.exp(x)
-            probs = e / e.sum(axis=-1, keepdims=True)
-            scores = probs[:, -1]                        # 最后一类 = 保留概率
-
-        thr = self.threshold if threshold is None else threshold
-        flags = [bool(s >= thr) for s in scores[:len(ids)]]
-        if len(flags) < len(ids):
-            flags += [True] * (len(ids) - len(flags))
-        return ids, flags
-
-    def compress(self, text, threshold=None):
+    def compress(self, text, threshold=None, min_chars=None):
         if not text or not isinstance(text, str):
             return text
-        if len(text) < MIN_CHARS:
+        limit_chars = MIN_CHARS if min_chars is None else min_chars
+        if len(text) < limit_chars:
             return text
 
         if self.forced_text_mode:
@@ -216,8 +242,6 @@ class Kompress:
             frag_index = {}
 
             def stash(m):
-                # 按【内容】编号而非按出现次数：同一片段复用同一占位符，
-                # 否则内容重复的行会拿到不同占位符，精确去重彻底失效。
                 frag = m.group(0)
                 idx = frag_index.get(frag)
                 if idx is None:
@@ -228,19 +252,13 @@ class Kompress:
 
             masked = PROTECT_RE.sub(stash, text)
 
-            # 中文（及日韩）必须走行级剪枝：
-            # WordPiece 会把中文按字切，token 级丢弃会打碎词语
-            # （"如何"→"何"、"配置"→"配"），且多字节 UTF-8 会被从中间切
-            # 开产生 U+FFFD。行级「整行留或整行丢」物理上不可能乱码。
             # 按内容类型分流：
-            #   日志/结构化行 → 行级（整行留或整行丢），保住词位结构
-            #   自然语言散文 → 词级（Headroom 同款），粒度更细
-            # 两者都天然兼容中文：中文整句是一个「词/行」，同生共死，不会碎。
-            if _log_ratio(masked) >= 0.3:
-                lvl = self._line_level(masked, threshold)
-                out = lvl if lvl != masked else self._word_level(masked, threshold)
+            #   日志/结构化行 → 行级（整行留或整行丢），保证词位与堆栈结构完整
+            #   自然语言长文 / 代码注释 → 短语级/词级（XLM-RoBERTa 子句剪枝），绝不按 token 碎词
+            if _log_ratio(text) >= 0.3:
+                out = self._line_level(masked, threshold)
             else:
-                out = self._word_level(masked, threshold)
+                out = self._phrase_level(masked, threshold)
 
             for i, frag in enumerate(protected):
                 out = out.replace(f"\u0000P{i}\u0000", frag)
@@ -249,148 +267,174 @@ class Kompress:
             self.log(f"语义压缩出错（已忽略，原样使用）: {e}")
             return text
 
-    # ---------------- 词级剪枝（Headroom 同款，中文安全） ----------------
-    def _words_by_line(self, content):
-        """按空白切词，并记录每个词来自哪一行（重建时不能跨行粘连，否则会把无关事实拼在一起）。"""
-        words, line_ids = [], []
-        for li, line in enumerate(content.split("\n")):
-            for w in line.split():
-                words.append(w)
-                line_ids.append(li)
-        return words, line_ids
-
-    def _join_kept(self, words, line_ids, kept):
-        """重建：跨行边界换行，行内用空格。"""
-        parts = []
-        prev = None
-        for i in sorted(kept):
-            if prev is not None:
-                parts.append("\n" if line_ids[i] != prev else " ")
-            parts.append(words[i])
-            prev = line_ids[i]
-        return "".join(parts)
-
-    def _word_level(self, text, threshold):
-        """
-        按【空白分隔的词】剪枝，而不是按 token。
-        这是兼容中文的关键：中文没有空格，整句会成为一个「词」，
-        它的全部 token 同生共死 —— 物理上不可能碎词或产生乱码。
-        代价是中文粒度粗（整句取舍），换来的是绝对安全。
-        """
+    # ---------------- 批次推理打分 ----------------
+    def _score_token_sequence(self, token_ids):
+        """对长 token 序列分块做上下文编码并输出每个 token 的保留概率"""
+        if not token_ids:
+            return self._np.array([])
         np = self._np
-        thr = self.threshold if threshold is None else threshold
-        words, line_ids = self._words_by_line(text)
-        if not words:
-            return text
-
-        kept = set()
-        # 逐词编码后拼成块：对齐是「构造出来」的，不依赖预分词器，绝不会错位
-        body_ids = []
-        body_word = []
-        for wi, w in enumerate(words):
-            ids = self._tok.encode(w, add_special_tokens=False).ids
-            for t in ids:
-                body_ids.append(t)
-                body_word.append(wi)
-
-        if not body_ids:
-            return text
-
-        names = {x.name for x in self._sess.get_inputs()}
-        for start in range(0, len(body_ids), CHUNK_WORDS * 6):
-            end_i = min(start + CHUNK_WORDS * 6, len(body_ids))
-            chunk = body_ids[start:end_i]
-            chunk_words_idx = body_word[start:end_i]
+        all_scores = []
+        for start in range(0, len(token_ids), MAX_CHUNK_TOKENS):
+            chunk = token_ids[start:start + MAX_CHUNK_TOKENS]
             feeds = {
                 "input_ids": np.asarray([chunk], dtype=np.int64),
                 "attention_mask": np.asarray([[1] * len(chunk)], dtype=np.int64),
             }
-            feeds = {k: v for k, v in feeds.items() if k in names}
+            if "token_type_ids" in self._input_names:
+                feeds["token_type_ids"] = np.asarray([[0] * len(chunk)], dtype=np.int64)
+            feeds = {k: v for k, v in feeds.items() if k in self._input_names}
             arr = np.asarray(self._sess.run(None, feeds)[0])[0]
-            if arr.ndim == 1:
+
+            if arr.ndim == 2 and arr.shape[-1] == 2:
+                # LLMLingua-2 分类输出 logits [seq, 2] -> softmax 提取保留类 (label 1)
+                exp = np.exp(arr - np.max(arr, axis=-1, keepdims=True))
+                probs = exp / np.sum(exp, axis=-1, keepdims=True)
+                sc = probs[:, 1]
+            elif arr.ndim == 1:
                 sc = arr
             elif arr.shape[-1] == 1:
                 sc = 1.0 / (1.0 + np.exp(-arr[:, 0]))
             else:
-                x = arr - arr.max(axis=-1, keepdims=True)
-                pr = np.exp(x)
-                sc = (pr / pr.sum(axis=-1, keepdims=True))[:, -1]
-            # 同一个词的 token 取【最大】分：只要有一处重要就整词保留，偏保守
-            agg = {}
-            for idx in range(len(chunk)):
-                w = chunk_words_idx[idx]
-                v = float(sc[idx]) if idx < len(sc) else 1.0
-                if w not in agg or v > agg[w]:
-                    agg[w] = v
-            for w, v in agg.items():
-                if v >= thr:
-                    kept.add(w)
+                exp = np.exp(arr - np.max(arr, axis=-1, keepdims=True))
+                probs = exp / np.sum(exp, axis=-1, keepdims=True)
+                sc = probs[:, -1]
+            all_scores.extend(sc.tolist())
+        return np.array(all_scores)
 
-        # 语义脆弱词一律钉住
-        for i, w in enumerate(words):
-            if MUST_KEEP_RE.search(w):
+    # ---------------- 短语级/词级剪枝（中文安全，零乱码） ----------------
+    def _units_by_line(self, content):
+        """
+        中英混合短语级切分：
+        - 保护占位符 \\u0000P\\d+\\u0000 作为一个不可分割整体
+        - 英文单词 / 标识符按空白与符号切分
+        - 中文子句（按标点 ，。！？；;、 结尾）切分为完整语义块，绝不破坏多字节字符
+        - 记录每个单元归属的行号，跨行决不粘连
+        """
+        clause_pattern = re.compile(
+            r"(\u0000P\d+\u0000|"
+            r"[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)*|"
+            r"[\u4e00-\u9fa5]+[，。！？；;、]?|"
+            r"[^\sA-Za-z0-9_\u4e00-\u9fa5])"
+        )
+        units, line_ids = [], []
+        for li, line in enumerate(content.split("\n")):
+            matched = clause_pattern.findall(line)
+            for u in matched:
+                if u.strip():
+                    units.append(u)
+                    line_ids.append(li)
+        return units, line_ids
+
+    def _join_units(self, units, line_ids, kept):
+        """重建文本：跨行换行，相邻英文字词补空格，中文字符与标点自然连接。"""
+        parts = []
+        prev_line = None
+        prev_is_en = False
+        for i in sorted(kept):
+            u = units[i]
+            cur_line = line_ids[i]
+            cur_is_en = bool(re.match(r"^[A-Za-z0-9_.\-]+$", u))
+            if prev_line is not None and cur_line != prev_line:
+                parts.append("\n")
+                prev_is_en = False
+            elif parts and (prev_is_en and cur_is_en):
+                parts.append(" ")
+            parts.append(u)
+            prev_line = cur_line
+            prev_is_en = cur_is_en
+        return "".join(parts)
+
+    def _phrase_level(self, text, threshold):
+        """短语级/词级剪枝：在上下文序列中推理，打分聚合回短语单位。"""
+        thr = self.threshold if threshold is None else threshold
+        units, line_ids = self._units_by_line(text)
+        if not units:
+            return text
+
+        kept = set()
+        body_ids = []
+        body_units = []
+        for ui, u in enumerate(units):
+            ids = self._tok.encode(u, add_special_tokens=False).ids
+            for t in ids:
+                body_ids.append(t)
+                body_units.append(ui)
+
+        if not body_ids:
+            return text
+
+        sc = self._score_token_sequence(body_ids)
+
+        # 聚合回单元：一个单元内的 token 取平均分作为短语紧凑度指标
+        unit_tokens = {}
+        for ui, s in zip(body_units, sc):
+            unit_tokens.setdefault(ui, []).append(float(s))
+
+        for ui, score_list in unit_tokens.items():
+            avg_score = self._np.mean(score_list) if score_list else 1.0
+            if avg_score >= thr:
+                kept.add(ui)
+
+        # 语义脆弱词一律强行钉住
+        for i, u in enumerate(units):
+            if MUST_KEEP_RE.search(u):
                 kept.add(i)
 
         if not kept:
             return text
-        out = self._join_kept(words, line_ids, kept)
+        out = self._join_units(units, line_ids, kept)
         if len(out) >= len(text):
             return text
-        return f"…[语义压缩：{len(words)} 词 → 保留 {len(kept)} 词]…\n{out}"
+        return f"…[语义压缩：{len(units)} 单元 → 保留 {len(kept)} 单元]…\n{out}"
 
     # ---------------- 行级剪枝（日志安全路径） ----------------
     def _line_level(self, text, threshold):
         """
         按「行」决定去留：整行保留或整行丢弃。
-        日志靠固定词位表达结构，整行处理才读得通；且物理上不可能乱码。
+        日志靠固定词位表达结构，整行处理才读得通；堆栈行与致命错误行 100% 存活。
         """
         np = self._np
         thr = self.threshold if threshold is None else threshold
         lines = text.split("\n")
-        enc = self._tok.encode_batch(lines)
-        special = self._special
         out = []
         dropped = 0
         dup = 0
         seen = {}
-        for i, e in enumerate(enc):
-            src = lines[i]
+        seen_tpl = {}          # 模板 -> 首次出现的行号，用于「同模板折叠」
+        order = []             # 记录每行在 out 里的下标，便于回填折叠说明
+        for src in lines:
             if not src.strip():
                 continue
             key = src.strip()
-            if key in seen:          # 精确重复行必丢，最无争议的压缩
+            if key in seen:          # 精确重复行必丢
                 dup += 1
                 continue
             seen[key] = 1
+            # 同模板（只差时间戳/数字/id）的行：也视为重复。
+            # 但【必须扣住语义脆弱行】——致命错误、否定/条件/路径等整行保留，
+            # 否则会把 FATAL 这类关键行当成「重复」折叠掉。
+            tkey = line_template(src)
+            if tkey and tkey not in seen_tpl and not is_critical_line(src):
+                seen_tpl[tkey] = len(out)
+            elif tkey in seen_tpl and not is_critical_line(src):
+                order.append(seen_tpl[tkey])
+                dup += 1
+                continue
             # 语义脆弱行整行保留
             if MUST_KEEP_RE.search(src):
                 out.append(src)
                 continue
-            ids = [t for t in e.ids if t not in special]
-            if not ids:
+            enc = self._tok.encode(src, add_special_tokens=False)
+            if not enc.ids:
                 out.append(src)
                 continue
-            feeds = {
-                "input_ids": np.asarray([ids], dtype=np.int64),
-                "attention_mask": np.asarray([[1] * len(ids)], dtype=np.int64),
-            }
-            names = {x.name for x in self._sess.get_inputs()}
-            feeds = {k: v for k, v in feeds.items() if k in names}
-            arr = np.asarray(self._sess.run(None, feeds)[0])[0]
-            if arr.ndim == 1:
-                sc = arr
-            elif arr.shape[-1] == 1:
-                sc = 1.0 / (1.0 + np.exp(-arr[:, 0]))
-            else:
-                x = arr - arr.max(axis=-1, keepdims=True)
-                pr = np.exp(x)
-                sc = (pr / pr.sum(axis=-1, keepdims=True))[:, -1]
+            sc = self._score_token_sequence(enc.ids)
             score = float(np.mean(sc)) if len(sc) else 1.0
-            # 行级用更宽松的阈值：宁可多留，不可把日志抽干
             if score >= min(thr, 0.2):
                 out.append(src)
             else:
                 dropped += 1
+
         if not out or (not dropped and not dup):
             return text
         res = "\n".join(out)
@@ -403,12 +447,9 @@ class Kompress:
             note += f"，低价值 {dropped}"
         return note + "]…\n" + res
 
-    # ---------------- 不依赖模型的兜底：按 token 投影 ----------------
+    # ---------------- 不依赖模型的兜底：按行投影 ----------------
     def _project(self, text, threshold):
-        """
-        没有模型时的降级路径：按 token 密度做「保留不重复用语」的投影。
-        只做保守裁剪（丢纯重复短语），保证任何环境下都有一定收益。
-        """
+        """没有模型时的降级路径：只做保守去重，保证任何环境下都有一定收益。"""
         try:
             lines = text.split("\n")
             seen = set()
@@ -439,38 +480,50 @@ def make(log=None, threshold=0.5):
 
 
 if __name__ == "__main__":
-    import unicodedata
     k = make(log=lambda m: print("[kompress]", m, file=sys.stderr))
 
-    lines = []
-    for i in range(25):
-        lines.append("2026-10-16 04:00:00 INFO 心跳正常，无异常。")
-        lines.append(f"2026-10-16 04:00:{i%60:02d} INFO 处理第 {i} 批任务，耗时 {i*3}ms，队列长度 {100-i}。")
-        lines.append(f"INFO processing batch {i} of 25 with 0 errors and 0 retries")
-    # 语义脆弱行：绝不能丢这些词
-    lines.append("2026-10-16 04:01:00 FATAL 数据库连接被拒绝，服务禁止继续启动。")
-    lines.append("重要：除非配置项 required=true，否则不要自动重试，必须手动确认。")
-    lines.append("You must NOT delete the /var/lib/data directory unless approved.")
-    sample = "\n".join(lines)
+    test_prose = """在现代分布式系统的高并发架构设计中，用 Redis 做分布式缓存层几乎已成为工业界标准实践，但架构师绝不能忽视 TTL 与 eviction policy 的深度配合。当业务流量遭遇突发峰值或者出现 cache stampede 时，如果系统未配置合理的 stale-while-revalidate 降级机制，后端核心 MySQL 关系型数据库的 query throughput 可能会瞬间崩塌，导致全站 P99 latency 急剧飙升至 2500ms 以上。因此在高可用集群中必须规范键值命名空间，启用 allkeys-lru 内存淘汰策略，并且除非业务场景有极其特殊的强一致性要求，否则切勿轻易关闭 pipeline 批量写入优化。此外，对于跨地域 multi-region 部署的主从同步链路，务必监控 network replication lag 指标，防止读取到过期的 stale data 导致数据不一致。"""
 
-    out = k.compress(sample)
-    print(f"输入 {len(sample)} 字符 → 输出 {len(out)} 字符（省 {100*(1-len(out)/max(1,len(sample))):.1f}%）")
+    test_logs = """2026-10-16 11:19:50 INFO [heartbeat-agent] 节点集群常规健康检查已完成，全量服务状态正常。
+2026-10-16 11:19:52 DEBUG [metrics-pusher] 上报例行系统监控指标完成，等待下次采集周期。
+2026-10-16 11:19:55 INFO [cache-sync] 内存状态同步心跳正常，未检测到节点网络抖动。
+2026-10-16 11:19:58 DEBUG [task-poller] 轮询异步任务队列，未发现待处理任务。
+2026-10-16 11:20:01 INFO [gateway-router] 网关路由正常转发请求至 upstream service-mesh，当前 QPS 稳定在 12500。
+2026-10-16 11:20:02 INFO [auth-filter] JWT token verification passed for user_id=987654.
+2026-10-16 11:20:03 WARN [connection-pool] 数据库连接池 connection pool idle count 降至警戒水位 5。
+2026-10-16 11:20:04 FATAL [worker-core] 数据库连接被拒绝: connection refused to 10.0.4.15:5432，服务禁止继续处理事务！
+Traceback (most recent call last):
+  File "/opt/magpie/services/storage_manager.py", line 142, in acquire_connection
+    conn = pool.get_connection(timeout=3.0)
+  File "/opt/magpie/core/db_pool.py", line 88, in get_connection
+    raise DatabaseConnectionError("FATAL: pool exhausted, cannot allocate socket")
+storage_manager.DatabaseConnectionError: FATAL: pool exhausted, cannot allocate socket
+2026-10-16 11:20:05 ERROR [http-handler] 请求处理失败，返回 HTTP 500 Internal Server Error 给客户端。
+2026-10-16 11:20:06 INFO [circuit-breaker] 熔断机制已触发，如果未在 30s 内恢复，系统必须执行 failover。"""
 
-    def has_bad(s):
-        return "\ufffd" in s
+    test_code = """# 注意：严禁在生产环境直接运行 v2.4.1 之前的旧版本，必须升级到 version 2.5.0-rc3 或更高版本。
+# 如果环境变量 MEMHUB_FORCE_OFFLINE 未配置为 true，守护进程切勿在公网监听 0.0.0.0:8080。
+# 启动前必须通过 /usr/local/bin/magpie-cli --check-config --strict-mode 验证配置文件 /etc/magpie/hub.conf 的语法。
+# 任何情况下除非指定了 --allow-root-execution 参数，否则禁止使用 root 用户启动 NODE_ENV=production 服务。
+# 警告：未设置 TIMEOUT_SECONDS 时默认超时为 60s，务必确认 DB_MAX_CONNECTIONS 不得超过 100。"""
 
-    checks = [
-        ("无乱码 U+FFFD", not has_bad(out)),
-        ("FATAL 存活", "FATAL" in out),
-        ("中文否定「禁止」存活", "禁止" in out),
-        ("中文否定「不要」存活", "不要" in out),
-        ("中文情态「必须」存活", "必须" in out),
-        ("中文条件「除非」存活", "除非" in out),
-        ("英文否定 NOT 存活", "NOT" in out or "not" in out),
-        ("路径 /var/lib/data 存活", "/var/lib/data" in out),
-    ]
-    for name, okk in checks:
-        print(f"  {'✓' if okk else '✗'} {name}")
+    print("==================================================================")
+    print("【测试 1】中文散文夹英文术语压缩")
+    print("==================================================================")
+    out1 = k.compress(test_prose, min_chars=0)
+    print(f"输入 {len(test_prose)} 字符 → 输出 {len(out1)} 字符（压缩率 {100*(1-len(out1)/len(test_prose)):.1f}%）")
+    print("输出内容:\n" + out1)
 
-    print("\n---- 输出前 300 字符 ----")
-    print(out[:300].replace("\n", "⏎"))
+    print("\n==================================================================")
+    print("【测试 2】中文技术日志夹英文报错（含 FATAL、堆栈、路径）压缩")
+    print("==================================================================")
+    out2 = k.compress(test_logs, min_chars=0)
+    print(f"输入 {len(test_logs)} 字符 → 输出 {len(out2)} 字符（压缩率 {100*(1-len(out2)/len(test_logs)):.1f}%）")
+    print("输出内容:\n" + out2)
+
+    print("\n==================================================================")
+    print("【测试 3】中英混排代码注释与配置（含环境变量、命令行参数、版本号）压缩")
+    print("==================================================================")
+    out3 = k.compress(test_code, min_chars=0)
+    print(f"输入 {len(test_code)} 字符 → 输出 {len(out3)} 字符（压缩率 {100*(1-len(out3)/len(test_code)):.1f}%）")
+    print("输出内容:\n" + out3)

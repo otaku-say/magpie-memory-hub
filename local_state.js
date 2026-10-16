@@ -33,18 +33,19 @@ export function statePath() {
 /** 读状态。任何异常都退化为空状态，绝不让调用方崩。 */
 export function readState() {
   const p = statePath();
-  if (!p) return { secrets: {}, actions: {}, _ok: false };
+  if (!p) return { secrets: {}, actions: {}, gateway_harvest: {}, _ok: false };
   try {
-    if (!fs.existsSync(p)) return { secrets: {}, actions: {}, _ok: true, _missing: true };
+    if (!fs.existsSync(p)) return { secrets: {}, actions: {}, gateway_harvest: {}, _ok: true, _missing: true };
     const o = JSON.parse(fs.readFileSync(p, "utf8"));
-    if (!o || typeof o !== "object") return { secrets: {}, actions: {}, _ok: true };
+    if (!o || typeof o !== "object") return { secrets: {}, actions: {}, gateway_harvest: {}, _ok: true };
     return {
       secrets: o.secrets && typeof o.secrets === "object" ? o.secrets : {},
       actions: o.actions && typeof o.actions === "object" ? o.actions : {},
+      gateway_harvest: o.gateway_harvest && typeof o.gateway_harvest === "object" ? o.gateway_harvest : {},
       _ok: true,
     };
   } catch (e) {
-    return { secrets: {}, actions: {}, _ok: false, _err: String(e && e.message || e) };
+    return { secrets: {}, actions: {}, gateway_harvest: {}, _ok: false, _err: String(e && e.message || e) };
   }
 }
 
@@ -54,7 +55,14 @@ export function writeState(state) {
   if (!p) return false;
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    const out = { secrets: state.secrets || {}, actions: state.actions || {} };
+    const out = Object.assign({}, state, {
+      secrets: state.secrets && typeof state.secrets === "object" ? state.secrets : {},
+      actions: state.actions && typeof state.actions === "object" ? state.actions : {},
+      gateway_harvest: state.gateway_harvest && typeof state.gateway_harvest === "object" ? state.gateway_harvest : {},
+    });
+    delete out._ok;
+    delete out._missing;
+    delete out._err;
     const tmp = p + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify(out, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, p);
@@ -63,6 +71,19 @@ export function writeState(state) {
   } catch (e) {
     return false;
   }
+}
+
+/** 读回 gateway_harvest 增量状态 */
+export function lookupGatewayHarvest() {
+  const st = readState();
+  return st.gateway_harvest || {};
+}
+
+/** 保存 gateway_harvest 增量状态 */
+export function rememberGatewayHarvest(harvestState) {
+  const st = readState();
+  st.gateway_harvest = Object.assign({}, st.gateway_harvest || {}, harvestState || {});
+  return writeState(st);
 }
 
 /** 记住某个数据库的 Secret Key —— 只在内存里传一次，落盘即刻。 */

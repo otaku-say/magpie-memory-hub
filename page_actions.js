@@ -196,7 +196,7 @@ export function readAction(options) {
   if (!a || typeof a !== "object") return null;
   const op = String(a.op || "");
   const id = String(a.id || "");
-  if (!op || !id || !OPS[op]) return null;
+  if (!op || !id || !Object.prototype.hasOwnProperty.call(OPS, op)) return null;
   return {
     op, id,
     at: Number(a.at) || 0,
@@ -547,6 +547,15 @@ export function formatCardStatus(key, rawResult, opHint) {
       if (res.database) lines.push(`数据库：${res.database}`);
       if (res.note || res.error) lines.push(res.note || res.error);
     }
+  } else if (key === "gateway") {
+    title = res.title || (ok ? "网关对话提炼就绪" : "未检测到对话录制");
+    if (Array.isArray(res.lines) && res.lines.length) {
+      lines.push(...res.lines);
+    } else if (res.message) {
+      lines.push(res.message);
+    } else {
+      lines.push(ok ? "网关对话提炼功能正常运行" : "未检测到对话录制。请在 Magpie 设置里开启 GatewayConversations（本地录制对话，插件据此提炼记忆）。");
+    }
   }
 
   while (lines.length < 2) {
@@ -573,8 +582,8 @@ export function formatCardStatus(key, rawResult, opHint) {
  *   - 静默降级：只读目录或写文件报错时不抛异常，只在 console.error 里打日志
  */
 export function writeCardStatus(key, payloadOrResult, opHint, customStatusPath) {
-  if (key !== "ncb" && key !== "r2" && key !== "model") {
-    console.error(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2" or "model"`);
+  if (key !== "ncb" && key !== "r2" && key !== "model" && key !== "gateway") {
+    console.error(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2", "model" or "gateway"`);
     return false;
   }
 
