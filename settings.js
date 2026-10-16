@@ -379,6 +379,64 @@
     );
   }
 
+  /* ---------------- 独立保存 R2 设置 ----------------
+   * 只把 R2 那几个字段写进配置，**不触发挂载**。
+   * 为什么要单独一个按钮：用户可能在 Cloudflare 轮换过密钥，
+   * 必须先把新凭据落到插件配置里，「挂载 R2 存储」时才会把它们显式传给 NCB。
+   * 注意 options.set 是【全量替换】，所以必须先 get 再合并。
+   */
+  var R2_FIELDS = ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"];
+
+  function r2Say(msg, kind) {
+    var el = $("r2_status");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function saveR2() {
+    if (!window.magpie || !window.magpie.options) {
+      r2Say("桥接未就绪", "bad");
+      return;
+    }
+    var btn = $("btn_save_r2");
+    if (btn) btn.disabled = true;
+    r2Say("保存中…");
+
+    Promise.resolve(window.magpie.options.get()).then(function (remote) {
+      // 先拿远端全量，再只覆盖 R2 那几个字段 → 其它配置（含 memories 快照）不受影响
+      var next = Object.assign({}, remote || {});
+      var filled = 0, any = 0;
+      R2_FIELDS.forEach(function (k) {
+        var el = $(k);
+        if (!el) return;
+        var v = String(el.value || "").trim();
+        next[k] = v;
+        any++;
+        if (v) filled++;
+      });
+      return window.magpie.options.set(next).then(
+        function (written) {
+          if (btn) btn.disabled = false;
+          current = written || next;
+          if (filled === 0) {
+            r2Say("已保存，但 R2 凭据全为空 —— 挂载时 NCB 会用它账号里缓存的连接", "warn");
+          } else {
+            r2Say("已保存 " + filled + "/" + any + " 个 R2 字段；现在可以去点「挂载 R2 存储」", "ok");
+          }
+        },
+        function (e) {
+          if (btn) btn.disabled = false;
+          var m = String((e && e.message) || e);
+          r2Say(/429|too many requests/i.test(m) ? "操作过于频繁，请稍后再试（频控 1 秒/次）" : ("保存失败：" + m), "bad");
+        }
+      );
+    }).catch(function (e) {
+      if (btn) btn.disabled = false;
+      r2Say("读取配置失败：" + String((e && e.message) || e), "bad");
+    });
+  }
+
   function copyMcpUrl() {
     var el = $("mcp_url");
     if (!el) return;
@@ -477,6 +535,10 @@
 
     var copyBtn = $("copy");
     if (copyBtn) copyBtn.addEventListener("click", copyMcpUrl);
+
+    // 独立保存 R2 设置（不触发挂载）
+    var saveR2Btn = $("btn_save_r2");
+    if (saveR2Btn) saveR2Btn.addEventListener("click", saveR2);
 
     // MCP Key 切换密码显隐
     var toggleMcpBtn = $("toggle_mcp_key");

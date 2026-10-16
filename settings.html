@@ -217,8 +217,21 @@
       <div class="field">
         <label for="r2_public_url">公共访问地址 <span class="opt">可选</span></label>
         <input type="text" id="r2_public_url" spellcheck="false" placeholder="https://pub-xxx.r2.dev 或自定义域名">
-        <p class="note">用于大文件与记忆附件的多模态持久存储。账号若在 NoCodeBackend 中已有 Cloudflare 连接会自动复用，以上字段均可留空。</p>
+        <p class="note">
+          大文件与记忆附件的持久存储。留空时 NoCodeBackend 会复用账号里已连接的 Cloudflare 凭据；
+          <b>如果你在 Cloudflare 轮换过密钥，必须把新凭据填在这里并点下面的「保存 R2 设置」</b>，
+          否则 NCB 仍会用旧凭据去连，表现为挂载"成功"但实际不可用。
+        </p>
       </div>
+      <div class="r2-save-row">
+        <button type="button" id="btn_save_r2" class="primary">保存 R2 设置</button>
+        <span id="r2_status" class="status" role="status" aria-live="polite"></span>
+      </div>
+      <p class="note">
+        <b>保存 R2 设置</b>只把上面这些凭据写进插件配置，<b>不会</b>触发挂载；
+        挂载请用下方按钮组里的「挂载 R2 存储」。挂载时插件会把这些凭据<b>显式传给 NCB</b>，
+        并用一次真实上传验证是否真的生效（NCB 会在失败时也返回成功，不能只看它的返回值）。
+      </p>
     </div>
   </details>
 

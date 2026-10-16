@@ -198,6 +198,12 @@ async function execute(action, cfg, fs, sp, state) {
       if (action[k]) args[k] = action[k];
     }
   }
+  if (action.op === "storage_setup") {
+    // 挂载时把插件里保存的 R2 凭据一并传下去（信标里带的优先）
+    for (const k of ["bucket_name", "public_url", "account_id", "access_key_id", "secret_access_key"]) {
+      if (action[k]) args[k] = action[k];
+    }
+  }
 
   // 破坏性操作：先落「即将执行」，万一中途中断也不会被重复执行
   if (action.op === "reset") {

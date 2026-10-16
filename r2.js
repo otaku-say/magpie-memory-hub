@@ -1,28 +1,34 @@
 /**
- * r2.js —— Cloudflare R2 文件存储（经 NoCodeBackend MCP 代管）。
+ * r2.js —— Cloudflare R2 文件存储（经 NoCodeBackend 代管）。
  *
- * 实测确认的能力边界（2026-10-16）：
- *   可用：
- *     setup_r2_storage —— 自动创建 bucket 并配置 CORS。
- *       账号若已有 Cloudflare 连接会**自动复用凭据**（实测返回 reused_existing_connection:true），
- *       此时无需任何 Cloudflare 参数；否则需要提供 account_id / access_key_id / secret_access_key。
- *     upload_file      —— 带 fileData 直接上传并返回公开 URL；不带则返回 presigned 上传 URL。
- *   MCP 侧不可用、但【Secret Key 的 REST 侧可用】（实测 2026-10-16）：
- *     · 列举桶内对象   GET    /files?Instance=...
- *     · 删除对象       DELETE /files/{key}?Instance=...
- *     · 上传（multipart）POST /upload?Instance=...  —— 比 MCP 的 base64 上传更省，二进制尤其明显
- *   仍然做不到的：
- *     · 服务端生成**下载**用的 presigned URL（下载只能靠 bucket 的公开域名）
- *     · 读取底层 Cloudflare 凭据（NCB 不暴露，只存在平台控制面）
+ * 凭据分工（实测确认）：
+ *   · 创建 bucket / 配 CORS   → **MCP** `setup_r2_storage`
+ *   · 上传 / 列举 / 删除      → **数据库 Secret Key 的 REST**
+ *     （MCP 的 23 个工具里只有 setup + upload，没有 list/delete）
+ *   · 下载                    → 靠 bucket 的公开域名（NCB 不提供文件流代理）
+ *
+ * ⚠️ 本文件最重要的一条经验：
+ *   **`setup_r2_storage` 会在实际失败时也返回 `ok: true`。**
+ *   实测用故意写错的凭据调用，得到：
+ *     { ok: true, reused_existing_connection: false,
+ *       bucket_created: false, cors_configured: true }
+ *   —— 连 bucket 都没建出来，却报告成功。
+ *   所以 r2Setup **不采信返回值**，而是紧接着做一次真实上传探测（r2Probe），
+ *   以真实操作为准给出判定。
  */
 import { NcbMcp } from "./ncb_mcp.js";
+
+const REST_BASE = "https://api.nocodebackend.com";
+
+/* ------------------------------------------------------------------ *
+ * 客户端
+ * ------------------------------------------------------------------ */
 
 function clientOf(cfg) {
   const key = (cfg && (cfg.mcpKey || cfg.mcp_key)) || "";
   if (!key) {
     const err = new Error(
-      "未配置 MCP key。R2 存储的创建与上传都走 NoCodeBackend 的 MCP，" +
-      "需要在设置页填写 MCP key。"
+      "未配置 MCP key。R2 存储的创建与上传都走 NoCodeBackend 的 MCP，需要在设置页填写 MCP key。"
     );
     err.code = "NO_MCP_KEY";
     throw err;
@@ -41,16 +47,14 @@ function dbOf(cfg, args) {
   return db;
 }
 
-const REST_BASE = "https://api.nocodebackend.com";
-
 /** NoCodeBackend 的 REST 客户端（用数据库 Secret Key 认证）。 */
 function restClient(cfg) {
   const secret = (cfg && (cfg.secret || cfg.ncb_secret)) || "";
   const instance = (cfg && (cfg.instance || cfg.ncb_instance)) || "";
   if (!secret) {
     const err = new Error(
-      "未配置数据库 Secret Key。R2 的「列举/删除/上传」走 NoCodeBackend 的 REST，" +
-      "需要 Secret Key；只有「创建 bucket」需要 MCP key。"
+      "未配置数据库 Secret Key。R2 的「列举 / 删除」走 NoCodeBackend 的 REST，需要 Secret Key；" +
+      "只有「创建 bucket」需要 MCP key。"
     );
     err.code = "NO_SECRET";
     throw err;
@@ -92,79 +96,142 @@ async function rest(cfg, method, path, opts) {
   return { status: res.status, body };
 }
 
-/**
- * 列出该库 R2 桶内的对象。
- * 注意：这条能力在 Secret Key 的 REST 上，MCP 的 23 个工具里没有。
- */
-export async function r2List(cfg, args) {
-  const { status, body } = await rest(cfg, "GET", "/files", {});
-  if (status >= 400) {
-    return { ok: false, error: `HTTP ${status}`, body };
-  }
-  const files = (body && body.files) || [];
-  return {
-    ok: true,
-    count: files.length,
-    files: files.slice(0, (args && args.limit) || 100),
-    truncated: files.length > ((args && args.limit) || 100),
-  };
-}
+/* ------------------------------------------------------------------ *
+ * 真实性探测
+ * ------------------------------------------------------------------ */
 
 /**
- * 删除桶内一个对象。key 就是上传时返回的 key（不是完整 URL）。
- * 这是破坏性操作，需要显式传 confirm="DELETE"。
+ * 探测 R2 是否**真的**可用：上传一个极小的探针文件。
+ *
+ * 探针失败时的典型错误与含义：
+ *   · `sslv3 alert handshake failure` / `SSL alert number 40` / `EPROTO`
+ *       → Cloudflare 在 TLS 握手阶段就拒绝，说明 NCB 手里那份凭据是旧的
+ *         （已轮换/删除），或新令牌权限不足。此时**必须让 NCB 换成新凭据**。
+ *   · 403 / InvalidAccessKeyId / SignatureDoesNotMatch
+ *       → 凭据不匹配或已删除。
  */
-export async function r2Delete(cfg, args) {
-  const key = args && (args.key || args.filename);
-  if (!key) throw new Error("缺少 key（上传时返回的那个 key，不是完整 URL）");
-  if ((args && args.confirm) !== "DELETE") {
+export async function r2Probe(cfg, database) {
+  const mcp = clientOf(cfg);
+  const db = database || dbOf(cfg, {});
+  const name = "_memhub_probe_" + Date.now() + ".txt";
+  try {
+    const out = await mcp.uploadFile(db, name, utf8ToBase64("probe"), "text/plain");
+    const url = (out && (out.url || out.publicUrl)) || "";
+    if (!url) return { ok: false, error: "上传没有返回 URL", raw: out };
+    // 探针用完就删；删不掉不算失败（有些配置不给删权限）
+    let cleaned = false;
+    try {
+      const key = (out && out.key) || "";
+      if (key && cfg && (cfg.secret || cfg.ncb_secret)) {
+        const r = await rest(cfg, "DELETE", "/files/" + encodeURIComponent(key), {});
+        cleaned = r.status < 400;
+      }
+    } catch (e) { /* 忽略 */ }
+    return { ok: true, url, cleaned };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  }
+}
+
+/** 把探针失败翻译成人能看懂的原因与下一步。 */
+export function explainProbeFailure(err) {
+  const m = String(err || "");
+  if (/handshake failure|SSL alert number 40|EPROTO|sslv3/i.test(m)) {
     return {
-      ok: false, action: "CONFIRM_REQUIRED", key,
-      warning: '删除不可恢复。确认请再次调用并传 confirm="DELETE"。',
+      kind: "STALE_CREDENTIALS",
+      title: "R2 凭据在 Cloudflare 侧被拒绝（TLS 握手失败）",
+      detail:
+        "NoCodeBackend 拿它自己保存的 Cloudflare 凭据去连 R2，Cloudflare 拒绝了这次握手 —— " +
+        "通常是因为那把密钥已在 Cloudflare 轮换/删除，或新令牌权限不足。",
+      actions: [
+        "① 确认新的 R2 API Token 权限选的是【Admin Read & Write】。" +
+          "只选 Object Read & Write 时 NoCodeBackend 无法自动建桶与配 CORS，而且会静默失败（返回 ok:true 但没做事）。",
+        "② 到 NoCodeBackend 控制台的 R2 Storage 页面，把该数据库的 Cloudflare 连接【更新】或【删除后重建】，" +
+          "填入新的 Account ID / Access Key / Secret。" +
+          "插件无法替 NCB 覆盖它在账号层保存的旧连接 —— 这是平台边界。",
+        "③ 改完后回到插件重新点「挂载 R2 存储」，本次会用真实上传验证。",
+      ],
     };
   }
-  const { status, body } = await rest(cfg, "DELETE", "/files/" + encodeURIComponent(key), {});
+  if (/Unauthorized|403|InvalidAccessKeyId|SignatureDoesNotMatch/i.test(m)) {
+    return {
+      kind: "BAD_CREDENTIALS",
+      title: "R2 凭据无效",
+      detail: "Access Key / Secret 不匹配，或该密钥已被删除。",
+      actions: ["到 Cloudflare R2 重新生成 API Token（权限选 Admin Read & Write），再填回插件。"],
+    };
+  }
   return {
-    ok: status < 400 && !(body && body.status === "failed"),
-    key, http: status, result: body,
+    kind: "UNKNOWN",
+    title: "R2 挂载后真实上传失败",
+    detail: m.slice(0, 300),
+    actions: ["按原始错误排查；确认 NoCodeBackend 控制台里该库的 R2 配置存在且正确。"],
   };
 }
 
-/**
- * 为数据库配置 R2：自动建 bucket + 配 CORS。
- * 所有 Cloudflare 参数都是可选的 —— 账号已有连接时 NCB 会自动复用。
- */
+/* ------------------------------------------------------------------ *
+ * 配置 R2（挂载）
+ * ------------------------------------------------------------------ */
+
 export async function r2Setup(cfg, args) {
   const db = dbOf(cfg, args);
   const mcp = clientOf(cfg);
+  const a = args || {};
+
+  /* 凭据来源优先级：本次调用显式传入 > 插件设置页保存的。
+   * 必须【显式传给 NCB】，否则它会用账号里缓存的那份旧连接 ——
+   * 用户轮换密钥后，旧连接必然失败（实测表现为 TLS 握手被拒）。 */
+  const pick = (k1, k2) => {
+    const v = a[k1];
+    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
+    return String((cfg && cfg[k2]) || "").trim();
+  };
+  const creds = {
+    account_id: pick("account_id", "r2AccountId"),
+    access_key_id: pick("access_key_id", "r2AccessKeyId"),
+    secret_access_key: pick("secret_access_key", "r2SecretAccessKey"),
+    bucket_name: pick("bucket_name", "r2BucketName"),
+    public_url: pick("public_url", "r2PublicUrl"),
+  };
   const extra = {};
-  for (const k of ["bucket_name", "public_url", "account_id", "access_key_id", "secret_access_key"]) {
-    const v = (args && args[k]);
-    if (v !== undefined && v !== null && String(v).trim() !== "") extra[k] = String(v).trim();
-  }
+  for (const k of Object.keys(creds)) if (creds[k]) extra[k] = creds[k];
 
   const out = await mcp.setupR2Storage(db, extra);
-  const ok = !(out && out.ok === false);
+
+  // 不采信 setup 的返回值（实测会静默失败却报 ok:true），改做真实探测
+  const probe = await r2Probe(cfg, db);
+  const explained = probe.ok ? null : explainProbeFailure(probe.error);
+
   return {
-    ok,
+    ok: probe.ok,
+    verdict: probe.ok ? "VERIFIED" : "FAILED_VERIFY",
     database: db,
+    credentials_source: Object.keys(extra).length
+      ? (a.account_id || a.access_key_id || a.secret_access_key ? "本次调用传入" : "插件设置页保存的")
+      : "未提供任何凭据（会让 NCB 用它缓存的旧连接）",
     bucket_name: (out && out.bucket_name) || extra.bucket_name || "",
     public_url: (out && out.public_url) || extra.public_url || "",
-    reused_connection: !!(out && out.reused_existing_connection),
-    bucket_created: !!(out && out.bucket_created),
-    cors_configured: !!(out && out.cors_configured),
-    result: out,
-    note: ok
-      ? "R2 已挂到该数据库。用 storage_upload 上传文件即可拿到公开 URL。"
-      : "R2 配置未成功，详见 result。若账号尚未连接 Cloudflare，请填写 account_id / access_key_id / secret_access_key。",
+    // 如实展示 NCB 的说法，但**不作为判定依据**
+    ncb_reported: {
+      ok: out && out.ok,
+      reused_existing_connection: out && out.reused_existing_connection,
+      bucket_created: out && out.bucket_created,
+      cors_configured: out && out.cors_configured,
+    },
+    probe: probe.ok ? { uploaded: true, cleaned: probe.cleaned } : { error: probe.error },
+    diagnosis: explained,
+    note: probe.ok
+      ? "已用真实上传验证：R2 确实可用（不是只看 NCB 的返回值）。"
+      : "⚠️ NCB 报告成功，但**真实上传失败** —— 这个挂载实际上没生效。" +
+        (explained ? "原因：" + explained.title : ""),
+    raw: out,
   };
 }
 
-/**
- * 上传文件。
- *   · 给了 content → 直接上传（文本默认 UTF-8；二进制请给 base64 并设 encoding=base64）
- *   · 不给 content → 返回 presigned 上传 URL，供大文件由客户端直传
- */
+/* ------------------------------------------------------------------ *
+ * 上传 / 列举 / 删除
+ * ------------------------------------------------------------------ */
+
 export async function r2Upload(cfg, args) {
   const db = dbOf(cfg, args);
   const filename = args && args.filename;
@@ -177,7 +244,7 @@ export async function r2Upload(cfg, args) {
   const hasContent = args && args.content != null;
   const hasSecret = !!((cfg && (cfg.secret || cfg.ncb_secret)) || "");
 
-  // 有内容 + 有 Secret Key → 走 REST multipart（二进制不用 base64，省 33% 且更快）
+  // 有内容 + 有 Secret Key → REST multipart（二进制不用 base64，省 33% 且更快）
   if (hasContent && hasSecret) {
     const isText = args.encoding !== "base64";
     let bytes;
@@ -208,7 +275,7 @@ export async function r2Upload(cfg, args) {
   const out = await mcp.uploadFile(db, filename, data, args && args.content_type);
   const url = (out && (out.url || out.publicUrl)) || "";
   return {
-    ok: !(out && out.ok === false),
+    ok: !(out && out.ok === false) && (!!url || !data),
     database: db, filename, url,
     presigned_upload_url: !data ? (out && out.uploadUrl) : undefined,
     via: "mcp", result: out,
@@ -218,31 +285,68 @@ export async function r2Upload(cfg, args) {
   };
 }
 
+/**
+ * 列出该库 R2 桶内的对象。
+ * 注意：这条能力在 Secret Key 的 REST 上，MCP 的 23 个工具里没有。
+ */
+export async function r2List(cfg, args) {
+  const { status, body } = await rest(cfg, "GET", "/files", {});
+  if (status >= 400) return { ok: false, error: `HTTP ${status}`, body };
+  const files = (body && body.files) || [];
+  const limit = Number((args && args.limit) || 100) || 100;
+  return { ok: true, count: files.length, files: files.slice(0, limit), truncated: files.length > limit };
+}
+
+/**
+ * 删除桶内一个对象。key 就是上传时返回的 key（不是完整 URL）。
+ * 破坏性操作，需要显式传 confirm="DELETE"。
+ */
+export async function r2Delete(cfg, args) {
+  const key = args && (args.key || args.filename);
+  if (!key) throw new Error("缺少 key（上传时返回的那个 key，不是完整 URL）");
+  if ((args && args.confirm) !== "DELETE") {
+    return {
+      ok: false, action: "CONFIRM_REQUIRED", key,
+      warning: '删除不可恢复。确认请再次调用并传 confirm="DELETE"。',
+    };
+  }
+  const { status, body } = await rest(cfg, "DELETE", "/files/" + encodeURIComponent(key), {});
+  return {
+    ok: status < 400 && !(body && body.status === "failed"),
+    key, http: status, result: body,
+  };
+}
+
 /** 把 R2 的可用与不可用能力讲清楚，避免 agent 去用不存在的接口。 */
 export function r2Guide() {
   return {
     ok: true,
     endpoint: "Cloudflare R2（由 NoCodeBackend 代管，S3 兼容，零出网费）",
     capabilities: {
-      setup: "r2_setup —— 为当前数据库创建 bucket 并配置 CORS；账号已有 Cloudflare 连接时自动复用凭据",
-      upload_inline: "r2_upload（带 content）—— 小文件直接上传，返回公开 URL",
-      upload_presigned: "r2_upload（不带 content）—— 大文件走 presigned URL 由客户端直传",
-      upload_rest: "r2_upload —— 文本/二进制都可；有 Secret Key 时走 REST multipart，更省",
+      setup: "r2_setup —— 创建 bucket 并配置 CORS；**会用真实上传验证**，不采信 NCB 的返回值",
+      setup_storage: "storage_setup —— 同上（别名）",
+      upload: "r2_upload —— 文本/二进制都可；有 Secret Key 时走 REST multipart，更省",
       list: "r2_list —— 列出桶内对象（走 Secret Key 的 REST；MCP 没有这个接口）",
-      delete: "r2_delete —— 删除对象，需 confirm=\"DELETE\"（走 Secret Key 的 REST）",
+      delete: 'r2_delete —— 删除对象，需 confirm="DELETE"（走 Secret Key 的 REST）',
       read: "拿到 url 后直接 GET（bucket 需开启公开访问或绑定自定义域名）",
     },
-    // 这些确实做不到，如实列出
     not_available: [
       "服务端生成**下载**用的 presigned URL（下载只能靠 bucket 的公开域名）",
-      "读取底层 Cloudflare 凭据（NCB 不暴露，只存在平台控制面）",
+      "读取/覆盖 NoCodeBackend 在账号层保存的旧 Cloudflare 凭据（这是平台边界）",
     ],
     credential_split:
       "创建 bucket 需要 MCP key；上传/列举/删除需要数据库 Secret Key（REST）。" +
       "若数据库由本插件创建，Secret Key 会随创建自动取得并保存，无需手填。",
-    workflow:
-      "r2_upload 拿到 url → memory_save 把 url 与说明存成一条 category=file 的记忆 → " +
-      "之后用 memory_search 就能找回这个文件。",
+    troubleshooting: {
+      "bucket_created: false 但 ok: true":
+        "NoCodeBackend 会在实际失败时也返回 ok:true。以 r2_setup 返回的 verdict/probe 为准，不要看 ncb_reported。",
+      "sslv3 alert handshake failure":
+        "NCB 手里的 Cloudflare 凭据已失效（多半是密钥在 CF 轮换过）。" +
+        "必须去 NCB 控制台的 R2 Storage 页面更新该库的连接——插件改不了账号层保存的凭据。",
+      "新令牌怎么建":
+        "Cloudflare → R2 → Manage API Tokens → Create，权限必须选【Admin Read & Write】，" +
+        "否则 NCB 无法自动建桶与配 CORS。",
+    },
   };
 }
 

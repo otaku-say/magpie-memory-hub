@@ -163,5 +163,34 @@ for (const [btnId, op] of [["btn_db_status", "status"], ["btn_db_storage_setup",
   }
 }
 
+
+console.log("\n=== 5. 独立「保存 R2 设置」按钮（不触发挂载）===");
+{
+  await new Promise((r) => setTimeout(r, 1100));   // 绕开频控
+  lastSet = null; setCalls = 0;
+  els.r2_account_id.value = "acc-123";
+  els.r2_access_key_id.value = "AK-456";
+  els.r2_secret_access_key.value = "SK-789";
+  els.r2_bucket_name.value = "my-bucket";
+  els.r2_public_url.value = "https://cdn.example.com";
+  const b = els.btn_save_r2;
+  check(!!b, "找到按钮 btn_save_r2");
+  if (b) b.fire("click");
+  await new Promise((r) => setTimeout(r, 140));
+  check(setCalls > 0, `options.set 被调用 ${setCalls} 次`);
+  if (lastSet) {
+    check(lastSet.r2_account_id === "acc-123", `r2_account_id 已保存`);
+    check(lastSet.r2_access_key_id === "AK-456", `r2_access_key_id 已保存`);
+    check(lastSet.r2_secret_access_key === "SK-789", `r2_secret_access_key 已保存`);
+    check(lastSet.r2_bucket_name === "my-bucket", `r2_bucket_name 已保存`);
+    check(lastSet.r2_public_url === "https://cdn.example.com", `r2_public_url 已保存`);
+    check(!lastSet._action || lastSet._action.op !== "provision",
+      "只保存、没有误触发挂载信标");
+    check(JSON.stringify(lastSet.memories) === JSON.stringify(REMOTE.memories),
+      "memories 快照仍然保留");
+    check(lastSet.ncb_instance === "my_memory", "其它配置字段仍然保留");
+  }
+}
+
 console.log(fail ? `\n❌ 失败 ${fail} 项` : "\n✅ 设置页行为验收全部通过");
 process.exit(fail ? 1 : 0);

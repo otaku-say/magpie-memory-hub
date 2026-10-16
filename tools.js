@@ -78,6 +78,13 @@ function readOptions(options) {
     storagePublicUrl: o.storage_public_url || "",
     // 宿主每次加载时自愈（结构缺失就补）。默认关：避免给工具枚举引入网络等待。
     autoInit: o.auto_init === true,
+    // R2 凭据：由设置页的「保存 R2 设置」按钮写入。
+    // 挂载时会**显式传给 NCB**，否则它会用账号里缓存的旧连接（密钥轮换后必然失败）。
+    r2AccountId: o.r2_account_id || "",
+    r2AccessKeyId: o.r2_access_key_id || "",
+    r2SecretAccessKey: o.r2_secret_access_key || "",
+    r2BucketName: o.r2_bucket_name || "",
+    r2PublicUrl: o.r2_public_url || "",
     baseUrl: (o.magpie_base_url || "").replace(/\/+$/, ""),
     apiKey: o.magpie_api_key || "",
     extractor: o.extractor_model || "",
