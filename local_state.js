@@ -94,13 +94,54 @@ export function rememberSecret(database, secret) {
   return writeState(st);
 }
 
-/** 取回某个数据库的 Secret Key；没有则返回 ""。 */
+/**
+ * 取回某个数据库的 Secret Key；没有则返回 ""。
+ *
+ * 【为什么不能只做精确匹配】
+ * 捕获时用的是 NCB 返回的【真实库名】（例如 41694_agent_memory），
+ * 而调用方传进来的往往是用户在设置页填的【逻辑库名】（例如 agent_memory）。
+ * 两者不一致时精确匹配会落空 → 表现为「明明一键创建过，却报未配置 Secret Key」，
+ * 于是 R2 的列举/删除全部不可用，探针文件也就永远清不掉（真实踩过）。
+ *
+ * 因此按三级策略查找：
+ *   ① 精确匹配
+ *   ② 归一化匹配：去掉账号数字前缀后再比（41694_agent_memory ↔ agent_memory）
+ *   ③ 唯一记录兜底：本地只存了一条时直接用它（本插件通常只服务一个库）
+ */
 export function lookupSecret(database) {
-  if (!database) return "";
   const st = readState();
-  const e = st.secrets[database];
-  if (!e) return "";
-  return typeof e === "string" ? e : (e && e.v) || "";
+  const secrets = st.secrets && typeof st.secrets === "object" ? st.secrets : {};
+  const names = Object.keys(secrets);
+  if (!names.length) return "";
+  const valueOf = (k) => {
+    const e = secrets[k];
+    return typeof e === "string" ? e : (e && e.v) || "";
+  };
+
+  // ① 精确匹配
+  const want = String(database || "").trim();
+  if (want && secrets[want]) {
+    const v = valueOf(want);
+    if (v) return v;
+  }
+
+  // ② 归一化匹配（忽略账号前缀与大小写）
+  const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
+  if (want) {
+    const target = norm(want);
+    const hit = names.find((k) => norm(k) === target);
+    if (hit) {
+      const v = valueOf(hit);
+      if (v) return v;
+    }
+  }
+
+  // ③ 唯一记录兜底
+  if (names.length === 1) {
+    const v = valueOf(names[0]);
+    if (v) return v;
+  }
+  return "";
 }
 
 /** 记录设置页信标的执行结果（供 page_actions.js 用）。 */
