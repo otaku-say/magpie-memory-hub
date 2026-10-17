@@ -484,11 +484,19 @@ async function runTests() {
         "提炼记忆已入库：4 条事实/决策，2 条踩坑经验",
         "数据来源：Magpie 本地录制（/config/magpie/gateway-conversations）"
       ]
+    },
+    db: {
+      logical: "agent_memory",
+      prefix: "41694_",
+      full: "41694_agent_memory"
     }
   };
 
   env.sandbox.window.__memhubStatus = mockStatus;
   env.sandbox.window.renderStatus(mockStatus);
+
+  assert.strictEqual(env.elements.instance_prefix.textContent, "41694_", "instance_prefix 正确渲染数字前缀 41694_");
+  assert.strictEqual(env.elements.instance_full_name.textContent, "41694_agent_memory", "instance_full_name 正确渲染完整库名 41694_agent_memory");
 
   const ncbText = env.elements.db_action_status.innerText;
   assert.ok(ncbText.includes("一键创建完成"), "db_action_status 包含 ncb.title");

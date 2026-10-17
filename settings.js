@@ -374,7 +374,7 @@
         (Array.isArray(statusObj.lines) && statusObj.lines.some(function (l) { return l.indexOf("未检测到") !== -1; }));
       if (isMissing) {
         html += '<div class="harvest-guide-tip">' +
-          '<strong>💡 开启指引：</strong>打开 <strong>设置 → 插件</strong>，找到内置插件 <strong>「会话」</strong> 把它打开（显示 <strong>「正在记录网关对话」</strong>）。插件本页<strong>无法代你开启</strong>，需先在 Magpie 插件页打开。' +
+          '<strong>💡 开启指引（备选路径）：</strong>若需扫描本地对话录制，请打开 <strong>设置 → 插件</strong>，找到内置插件 <strong>「会话」</strong> 把它打开（显示 <strong>「正在记录网关对话」</strong>）。插件本页<strong>无法代你开启</strong>，需先在 Magpie 插件页打开。<br><em>（提示：若已开启上方的「自动记忆」，网关会直接提供对话，无需开启「会话」录制。）</em>' +
         '</div>';
       }
     }
@@ -391,9 +391,65 @@
     el.innerHTML = html;
   }
 
+  var knownDbPrefix = "";
+
+  function renderDbPrefix(dbData) {
+    var prefixEl = $("instance_prefix");
+    var fullEl = $("instance_full_name");
+    var tipEl = $("instance_full_tip");
+    var inputEl = $("ncb_instance");
+    if (!prefixEl) return;
+
+    if (dbData && typeof dbData === "object") {
+      if (dbData.prefix) {
+        knownDbPrefix = String(dbData.prefix);
+      }
+    }
+
+    var currentVal = (inputEl && inputEl.value.trim()) || (current && current.ncb_instance) || "";
+    var m = currentVal.match(/^(\d+_)(.*)$/);
+    var prefixToDisplay = "";
+    var fullName = currentVal;
+
+    if (m) {
+      prefixToDisplay = m[1];
+      knownDbPrefix = m[1];
+      fullName = currentVal;
+    } else if (knownDbPrefix) {
+      prefixToDisplay = knownDbPrefix;
+      fullName = currentVal ? (knownDbPrefix + currentVal) : "";
+    } else if (dbData && dbData.prefix) {
+      prefixToDisplay = dbData.prefix;
+      fullName = dbData.full || (currentVal ? (dbData.prefix + currentVal) : "");
+    }
+
+    if (prefixToDisplay) {
+      prefixEl.textContent = prefixToDisplay;
+      prefixEl.title = "已解析的账号数字前缀（不可修改）";
+      prefixEl.className = "input-prefix mono";
+      if (fullEl) fullEl.textContent = fullName || "—";
+      if (tipEl) {
+        tipEl.textContent = "（NCB 远端真实库名）";
+        tipEl.style.display = "inline";
+      }
+    } else {
+      prefixEl.textContent = "—";
+      prefixEl.title = "尚未获取到前缀，点「检测 MCP Key」获取";
+      prefixEl.className = "input-prefix mono unk";
+      if (fullEl) fullEl.textContent = currentVal || "—";
+      if (tipEl) {
+        tipEl.textContent = "（点「检测 MCP Key」获取前缀）";
+        tipEl.style.display = "inline";
+      }
+    }
+  }
+
   function renderAllStatus(statusData) {
     statusData = statusData || window.__memhubStatus;
     if (!statusData || typeof statusData !== "object") return;
+    if (statusData.db) {
+      renderDbPrefix(statusData.db);
+    }
     var map = [
       ["ncb", "db_action_status"],
       ["r2", "r2_action_status"],
@@ -1183,7 +1239,14 @@
     window.loadStatus = loadStatus;
     window.renderStatus = renderAllStatus;
     window.renderAllStatus = renderAllStatus;
+    window.renderDbPrefix = renderDbPrefix;
     window.__renderMemhubStatus = renderAllStatus;
+
+    // 数据库名称输入联动前缀展示
+    var ncbInput = $("ncb_instance");
+    if (ncbInput) {
+      ncbInput.addEventListener("input", function () { renderDbPrefix(); });
+    }
 
     if (!window.magpie || !window.magpie.options) {
       say("桥接脚本未加载", "bad");
@@ -1198,6 +1261,7 @@
         fill(current);
         paintMode(current);
         paintDbStatus(current._action);
+        renderDbPrefix(window.__memhubStatus ? window.__memhubStatus.db : null);
         var warn = check(current);
         if (warn) say(warn, "warn");
         loadStatus();

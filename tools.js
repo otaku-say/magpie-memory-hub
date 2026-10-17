@@ -22,7 +22,7 @@ import { r2Setup, r2Upload, r2List, r2Delete, r2Guide, r2Check } from "./r2.js";
 import { lookupSecret, lookupDatabase } from "./local_state.js";
 import { makeMcpClient } from "./mcp_client.js";
 import { checkLocalModel, MODEL_SPEC, modelDir } from "./model_check.js";
-import { runPendingAction, readAction, writeCardStatus, isModelDownloading, startBackgroundModelDownload } from "./page_actions.js";
+import { runPendingAction, readAction, writeCardStatus, parseDbInfo, isModelDownloading, startBackgroundModelDownload } from "./page_actions.js";
 import { harvestGateway, isTestMode } from "./gateway_harvest.js";
 
 const NCB_BASE = "https://api.nocodebackend.com";
@@ -555,7 +555,8 @@ async function pitfallSave(client, cfg, args, ctx) {
   if (!rootCause) throw new Error("root_cause 不能为空");
   if (!solution) throw new Error("solution 不能为空");
 
-  const fp = fingerprint(`${project}:${component}:${symptom}`);
+  const fp = (args.content_fingerprint && String(args.content_fingerprint).trim()) || fingerprint(`${project}:${component}:${symptom}`);
+  const initialRecurrence = typeof args.recurrence === "number" && args.recurrence >= 1 ? Math.floor(args.recurrence) : 1;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
 
   if (justWritten("p:" + fp)) {
@@ -567,7 +568,7 @@ async function pitfallSave(client, cfg, args, ctx) {
   );
   if (exist.length) {
     const row = exist[0];
-    const next = (Number(row.recurrence) || 1) + 1;
+    const next = (Number(row.recurrence) || 1) + initialRecurrence;
     try {
       await client.update("pitfalls", row.id, { recurrence: next, last_occurred_at: now, updated_at: now });
       markRecent("p:" + fp);
@@ -582,7 +583,7 @@ async function pitfallSave(client, cfg, args, ctx) {
     created = await client.create("pitfalls", {
       project, client: clientVal, component, symptom, root_cause: rootCause, solution,
       severity, error_type: errorType, tags, content_fingerprint: fp,
-      recurrence: 1, last_occurred_at: now,
+      recurrence: initialRecurrence, last_occurred_at: now,
       created_at: now, updated_at: now,
     });
   } catch (e) {
@@ -592,7 +593,7 @@ async function pitfallSave(client, cfg, args, ctx) {
         (r) => r.content_fingerprint === fp
       )[0];
       if (dup) {
-        const next = (Number(dup.recurrence) || 1) + 1;
+        const next = (Number(dup.recurrence) || 1) + initialRecurrence;
         try { await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now }); } catch (_) {}
         return jsonOut({ action: "NOOP", id: dup.id, recurrence: next, note: "唯一索引拦下重复" });
       }
@@ -1040,6 +1041,7 @@ const TOOLS = {
         dir: { type: "string", description: "自定义对话落盘目录路径（可选，默认自动探测）" },
         force_rescan: { type: "boolean", description: "是否强制重新扫描所有文件（忽略增量状态，默认 false）" },
         project: { type: "string", description: "项目命名空间（可选，默认 global）" },
+        min_evidence: { type: "number", description: "证据累计门禁阈值（默认 3；规则首次观察时不落盘，累计达到该次数才入库）" },
       },
     },
     run: (args, ctx) => harvestGateway(args, {
@@ -1060,6 +1062,17 @@ const TOOLS = {
 export const MagpieMemoryHub = async (input, options) => {
   const cfg = readOptions(options);
   const client = (options && (options._client || options.client)) || makeClient(cfg);
+
+  // 同步将当前库的前缀解析状态写入 _status.js，供设置页即时只读展示真实库名
+  try {
+    const rawDb = (options && (options.ncb_instance || options.instance)) || cfg.instance || "";
+    if (rawDb) {
+      const dbInfo = parseDbInfo(rawDb);
+      writeCardStatus("db", dbInfo);
+    }
+  } catch (e) {
+    console.error("[memory-hub] db prefix sync error:", (e && e.message) || e);
+  }
 
   /* ---- 设置页按钮提交的待办任务 ----
    * 页面无法直接触发宿主动作（Magpie 没有这个通道），只能把「要做什么」

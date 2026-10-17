@@ -33,20 +33,21 @@ export function statePath() {
 /** 读状态。任何异常都退化为空状态，绝不让调用方崩。 */
 export function readState() {
   const p = statePath();
-  if (!p) return { secrets: {}, actions: {}, gateway_harvest: {}, _ok: false };
+  if (!p) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, _ok: false };
   try {
-    if (!fs.existsSync(p)) return { secrets: {}, actions: {}, gateway_harvest: {}, _ok: true, _missing: true };
+    if (!fs.existsSync(p)) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, _ok: true, _missing: true };
     const o = JSON.parse(fs.readFileSync(p, "utf8"));
-    if (!o || typeof o !== "object") return { secrets: {}, actions: {}, gateway_harvest: {}, _ok: true };
+    if (!o || typeof o !== "object") return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, _ok: true };
     return {
       current: typeof o.current === "string" ? o.current : "",
       secrets: o.secrets && typeof o.secrets === "object" ? o.secrets : {},
       actions: o.actions && typeof o.actions === "object" ? o.actions : {},
       gateway_harvest: o.gateway_harvest && typeof o.gateway_harvest === "object" ? o.gateway_harvest : {},
+      pending_patterns: o.pending_patterns && typeof o.pending_patterns === "object" ? o.pending_patterns : {},
       _ok: true,
     };
   } catch (e) {
-    return { secrets: {}, actions: {}, gateway_harvest: {}, _ok: false, _err: String(e && e.message || e) };
+    return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, _ok: false, _err: String(e && e.message || e) };
   }
 }
 
@@ -61,6 +62,7 @@ export function writeState(state) {
       secrets: state.secrets && typeof state.secrets === "object" ? state.secrets : {},
       actions: state.actions && typeof state.actions === "object" ? state.actions : {},
       gateway_harvest: state.gateway_harvest && typeof state.gateway_harvest === "object" ? state.gateway_harvest : {},
+      pending_patterns: state.pending_patterns && typeof state.pending_patterns === "object" ? state.pending_patterns : {},
     });
     delete out._ok;
     delete out._missing;
@@ -214,3 +216,167 @@ export function lookupRealDatabase(database) {
 
   return want;
 }
+
+/* ================================================================== *
+ * P0 & P2: Headroom TrafficLearner LRU 门禁暂存队列管理
+ * ================================================================== */
+
+export const DEFAULT_MIN_EVIDENCE = 3;
+export const DEFAULT_PENDING_TTL_MS = 21 * 24 * 60 * 60 * 1000; // 21 天未复现硬淘汰 (Headroom :1946)
+export const DEFAULT_MAX_PENDING = 1000; // 上限 1000 条
+
+/** 安全提取条目时间戳（区分缺失与合法值） */
+export function getEntryTimestamp(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const ts = entry.last_seen != null ? entry.last_seen : entry.first_seen;
+  const num = Number(ts);
+  return Number.isFinite(num) && num > 0 ? num : null;
+}
+
+/**
+ * 记录一次证据观察。
+ * - 若 count + 1 >= minEvidence：从 pending 移除，返回 { shouldGraduate: true, entry, count }
+ * - 否则更新 pending 并返回 { shouldGraduate: false, count, needed: minEvidence }
+ */
+export function recordPendingEvidence(fingerprint, payload, options = {}) {
+  if (!fingerprint) return { shouldGraduate: false, count: 0, needed: 0 };
+
+  const minEvidence = typeof options.minEvidence === "number" ? options.minEvidence : DEFAULT_MIN_EVIDENCE;
+  const ttlMs = typeof options.ttlMs === "number" ? options.ttlMs : DEFAULT_PENDING_TTL_MS;
+  const maxPending = typeof options.maxPending === "number" ? options.maxPending : DEFAULT_MAX_PENDING;
+  const now = typeof options.now === "number" ? options.now : Date.now();
+  const kind = options.kind || "pitfall";
+
+  // minEvidence <= 1 时直接放行毕业
+  if (minEvidence <= 1) {
+    return {
+      shouldGraduate: true,
+      entry: {
+        fingerprint,
+        kind,
+        count: 1,
+        first_seen: now,
+        last_seen: now,
+        payload: payload || {},
+      },
+      count: 1,
+    };
+  }
+
+  const st = readState();
+  const pending = st.pending_patterns && typeof st.pending_patterns === "object" ? st.pending_patterns : {};
+
+  // 1. 清理过期项 (21 天未复现硬淘汰) 与损坏脏项
+  for (const [k, v] of Object.entries(pending)) {
+    if (!v || typeof v !== "object") {
+      delete pending[k];
+      continue;
+    }
+    const ts = getEntryTimestamp(v);
+    if (ts === null || (now - ts > ttlMs)) {
+      delete pending[k];
+    }
+  }
+
+  // 2. 更新或新建条目
+  let entry = pending[fingerprint];
+  if (entry) {
+    entry.count = (entry.count || 0) + 1;
+    entry.last_seen = now;
+    if (payload) {
+      entry.payload = payload;
+    }
+  } else {
+    // 容量上限检查：若超过上限，LRU 淘汰 last_seen 最早的一条
+    while (Object.keys(pending).length >= maxPending) {
+      const keys = Object.keys(pending);
+      let oldestKey = keys[0];
+      let oldestTime = getEntryTimestamp(pending[oldestKey]) || 0;
+      for (const k of keys) {
+        const t = getEntryTimestamp(pending[k]) || 0;
+        if (t < oldestTime) {
+          oldestTime = t;
+          oldestKey = k;
+        }
+      }
+      delete pending[oldestKey];
+    }
+
+    entry = {
+      fingerprint,
+      kind,
+      count: 1,
+      first_seen: now,
+      last_seen: now,
+      payload: payload || {},
+    };
+    pending[fingerprint] = entry;
+  }
+
+  // 3. 门禁阈值判断
+  if (entry.count >= minEvidence) {
+    // 达到门槛，正式毕业进写入队列，从 pending 移除
+    const graduatedEntry = { ...entry };
+    delete pending[fingerprint];
+    st.pending_patterns = pending;
+    writeState(st);
+    return {
+      shouldGraduate: true,
+      entry: graduatedEntry,
+      count: entry.count,
+    };
+  }
+
+  // 未达门槛，仅更新 pending 计数
+  st.pending_patterns = pending;
+  writeState(st);
+  return {
+    shouldGraduate: false,
+    entry: { ...entry },
+    count: entry.count,
+    needed: minEvidence,
+  };
+}
+
+export function getPendingEvidence(fingerprint) {
+  const st = readState();
+  return (st.pending_patterns && st.pending_patterns[fingerprint]) || null;
+}
+
+export function clearPendingEvidence(fingerprint) {
+  const st = readState();
+  if (st.pending_patterns && st.pending_patterns[fingerprint]) {
+    delete st.pending_patterns[fingerprint];
+    return writeState(st);
+  }
+  return false;
+}
+
+export function listPendingEvidence() {
+  const st = readState();
+  return Object.values(st.pending_patterns || {});
+}
+
+export function cleanExpiredPending(ttlMs = DEFAULT_PENDING_TTL_MS, now = Date.now()) {
+  const st = readState();
+  const pending = st.pending_patterns && typeof st.pending_patterns === "object" ? st.pending_patterns : {};
+  let removed = 0;
+  for (const [k, v] of Object.entries(pending)) {
+    if (!v || typeof v !== "object") {
+      delete pending[k];
+      removed++;
+      continue;
+    }
+    const ts = getEntryTimestamp(v);
+    if (ts === null || (now - ts > ttlMs)) {
+      delete pending[k];
+      removed++;
+    }
+  }
+  if (removed > 0) {
+    st.pending_patterns = pending;
+    writeState(st);
+  }
+  return removed;
+}
+

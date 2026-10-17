@@ -309,6 +309,76 @@ select {
   white-space: nowrap;
 }
 
+/* ---------- 数据库名称前缀只读展示 ---------- */
+.input-with-prefix {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+}
+
+.input-with-prefix .input-prefix {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  height: var(--btn-h);
+  background: color-mix(in srgb, var(--magpie-card) 70%, var(--magpie-line));
+  color: var(--magpie-muted);
+  border: 1px solid var(--magpie-line);
+  border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+  font-family: var(--magpie-code);
+  font-size: var(--fs-code);
+  white-space: nowrap;
+  user-select: none;
+  cursor: default;
+  box-sizing: border-box;
+}
+
+.input-with-prefix .input-prefix.unk {
+  color: var(--magpie-muted);
+  opacity: .7;
+}
+
+.input-with-prefix input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.input-with-prefix input:focus {
+  position: relative;
+  z-index: 1;
+}
+
+.db-full-hint {
+  margin-top: 6px;
+  font-size: var(--fs-hint);
+  color: var(--magpie-muted);
+  line-height: 1.4;
+}
+
+.db-full-hint .db-full-label {
+  color: var(--magpie-muted);
+}
+
+.db-full-hint code {
+  font-family: var(--magpie-code);
+  font-size: var(--fs-code);
+  color: var(--magpie-fg);
+  background: color-mix(in srgb, var(--magpie-card) 60%, var(--magpie-bg));
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--magpie-line);
+}
+
+.db-full-hint .db-full-tip {
+  margin-left: 6px;
+  color: var(--magpie-muted);
+  font-size: var(--fs-hint);
+}
+
 /* ---------- 统一按钮规范 ---------- */
 button {
   font-family: var(--magpie-font);

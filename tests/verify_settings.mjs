@@ -358,6 +358,11 @@ console.log("\n=== 11. 状态回传渲染测试（伪造 window.__memhubStatus �
         "提炼记忆已入库：5 条事实/决策，2 条踩坑经验",
         "数据来源：Magpie 本地录制（/config/magpie/gateway-conversations）"
       ]
+    },
+    db: {
+      logical: "my_memory",
+      prefix: "41694_",
+      full: "41694_my_memory"
     }
   };
 
@@ -365,6 +370,9 @@ console.log("\n=== 11. 状态回传渲染测试（伪造 window.__memhubStatus �
   if (typeof global.window.renderStatus === "function") {
     global.window.renderStatus(mockStatus);
   }
+
+  check(els.instance_prefix && els.instance_prefix.textContent === "41694_", "instance_prefix 正确渲染数字前缀 41694_");
+  check(els.instance_full_name && els.instance_full_name.textContent === "41694_my_memory", "instance_full_name 正确渲染完整真实库名 41694_my_memory");
 
   const ncbText = (els.db_action_status && els.db_action_status.innerText) || "";
   check(ncbText.includes("一键创建完成"), "db_action_status 包含 ncb.title");

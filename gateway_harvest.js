@@ -23,7 +23,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { lookupGatewayHarvest, rememberGatewayHarvest } from "./local_state.js";
+import {
+  lookupGatewayHarvest,
+  rememberGatewayHarvest,
+  recordPendingEvidence,
+  DEFAULT_MIN_EVIDENCE,
+} from "./local_state.js";
 import { writeCardStatus } from "./page_actions.js";
 
 export const GATEWAY_CONV_DIRNAME = "gateway-conversations";
@@ -126,6 +131,159 @@ const NOISE_PATTERNS = [
   /^\s*(正在|刚刚|已经)(执行|运行|处理|加载)/,
 ];
 
+/** 双轨制：判定是否为用户显式意图沉淀的记忆/避坑指令（穿透门禁） */
+export function isExplicitUserMemory(text) {
+  if (!text || typeof text !== "string") return false;
+  // 若包含角色标签，严格限定在用户发言（[user]: ...）部分检测，绝不把模型回复的解释性「注意：」当成用户意图
+  let target = text;
+  if (text.includes("[user]:") || text.includes("[assistant]:")) {
+    const userParts = [];
+    const blocks = text.split(/(?=\[(?:user|assistant|model|system)\]:)/i);
+    for (const b of blocks) {
+      if (/^\s*\[user\]:/i.test(b)) {
+        userParts.push(b.replace(/^\s*\[user\]:\s*/i, ""));
+      }
+    }
+    target = userParts.join("\n");
+  }
+  if (!target) return false;
+
+  // 必须是显式前缀指令（行首或句首标点引出的记忆/避坑意图）
+  return /(?:^|\n|[。！？；：!?;:\n]\s*)(?:记下来|记住|避坑|备忘|必须记住|一定要记|务必遵守|mark|remember)[:：]/i.test(target) ||
+         /(?:^|\n|[。！？；：!?;:\n]\s*)(?:注意|规则|规范要求)[:：]/i.test(target);
+}
+
+/** Levenshtein 动态规划编辑距离计算 */
+export function levenshteinDistance(s1, s2) {
+  const str1 = String(s1 || "");
+  const str2 = String(s2 || "");
+  const m = str1.length;
+  const n = str2.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = str1[i - 1] === str2[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return dp[m][n];
+}
+
+/** 通用排查/观察工具黑名单（Headroom :382-421） */
+export const GENERIC_NOISE_TOOLS = new Set([
+  "cat", "grep", "rg", "awk", "sed", "head", "tail", "sort", "uniq",
+  "wc", "xargs", "find", "echo", "true", "false", "test", "more", "less"
+]);
+
+/** 提取命令行的首个可执行二进制程序名 */
+export function extractExecutable(cmdLine) {
+  if (!cmdLine || typeof cmdLine !== "string") return "";
+  let clean = cmdLine.trim().replace(/^[$#>]\s*/, "");
+  clean = clean.replace(/^(?:sudo|time|nohup|exec|env)\s+/i, "");
+  const m = clean.match(/^([a-zA-Z0-9_.-]+)/);
+  if (!m) return "";
+  const token = m[1].replace(/\\/g, "/");
+  return path.basename(token).toLowerCase();
+}
+
+/** 判定是否为通用排查命令调用（只读/检查用，绝不可当作故障或解法） */
+export function isGenericToolInvocation(line) {
+  const bin = extractExecutable(line);
+  return GENERIC_NOISE_TOOLS.has(bin);
+}
+
+/** 判定一行文本是否具备命令行调用的外观 */
+export function isLikelyCommandLine(line) {
+  const s = String(line || "").trim();
+  if (/^[$#>]\s+[a-zA-Z0-9_.-]+/.test(s)) return true;
+  const bin = extractExecutable(s);
+  if (!bin) return false;
+  const commonBins = new Set([
+    "npm", "npx", "pnpm", "yarn", "pip", "pip3", "python", "python3", "uv",
+    "cargo", "gem", "brew", "git", "curl", "wget", "docker", "kill", "killall",
+    "apt", "apt-get", "systemctl", "service", "pytest", "node", "make", "bash",
+    "sh", "source", "chmod", "chown", "mv", "cp", "rm", "mkdir", "cat", "grep",
+    "rg", "awk", "sed", "head", "tail", "sort", "uniq", "wc", "xargs", "find"
+  ]);
+  return commonBins.has(bin);
+}
+
+export function normalizeCommandArgs(cmd) {
+  return String(cmd || "")
+    .trim()
+    .replace(/^[$#>]\s*/, "")
+    .replace(/\s+/g, " ")
+    .split(" ")
+    .filter((tok) => tok && !tok.startsWith("-"));
+}
+
+export function haveSubstantiveArgsOverlap(cmd1, cmd2) {
+  const tokens1 = normalizeCommandArgs(cmd1).slice(1);
+  const tokens2 = normalizeCommandArgs(cmd2).slice(1);
+  const set2 = new Set(tokens2.map((t) => t.toLowerCase()));
+  for (const t of tokens1) {
+    if (t.length >= 3 && set2.has(t.toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Headroom :382-421 命令重试配对校验 */
+export function isCommandRetryCompatible(failedCmd, solutionCmd, errorType = "general") {
+  const binA = extractExecutable(failedCmd);
+  const binB = extractExecutable(solutionCmd);
+  if (!binA || !binB) return true;
+
+  // 1. 通用噪音工具不可作为重试对
+  if (GENERIC_NOISE_TOOLS.has(binA) || GENERIC_NOISE_TOOLS.has(binB)) {
+    return false;
+  }
+
+  // 2. 同二进制情况
+  if (binA === binB) {
+    const s1 = String(failedCmd).trim();
+    const s2 = String(solutionCmd).trim();
+    const maxLen = Math.max(s1.length, s2.length);
+    const editDist = levenshteinDistance(s1, s2);
+    const normDist = maxLen > 0 ? editDist / maxLen : 0;
+    return normDist <= 0.40 || haveSubstantiveArgsOverlap(s1, s2);
+  }
+
+  // 3. 异二进制情况 (binA !== binB)
+  const allowedCrossBins = {
+    missing_dependency: new Set(["pip", "pip3", "npm", "pnpm", "yarn", "cargo", "brew", "apt", "apt-get", "uv"]),
+    missing_command: new Set(["apt", "apt-get", "brew", "npm", "pip", "cargo", "uv"]),
+    port_conflict: new Set(["kill", "killall", "fuser"]),
+    permission: new Set(["chmod", "chown", "sudo"]),
+    missing_path: new Set(["mkdir", "touch", "cp", "mv", "ln"]),
+  };
+
+  const validTargetBins = allowedCrossBins[errorType];
+  if (validTargetBins && validTargetBins.has(binB)) {
+    return true;
+  }
+
+  return false;
+}
+
+/** 向上回溯寻找引发报错的命令行 */
+function findPrecedingCommand(rawLines, atIndex) {
+  for (let j = atIndex; j >= Math.max(0, atIndex - 3); j--) {
+    const l = (rawLines[j] || "").trim();
+    if (isLikelyCommandLine(l)) {
+      return l;
+    }
+  }
+  return null;
+}
+
 function sig(s) {
   return String(s || "")
     .replace(/\s+/g, " ")
@@ -221,6 +379,8 @@ export function mineFailures(text) {
     const line = rawLines[i].trim();
     if (!line || line.length < 5) continue;
     if (isCodeOrSyntaxNoise(line)) continue;
+    // 排除通用排查命令调用（cat/grep/rg 等绝不是故障本身）
+    if (isGenericToolInvocation(line)) continue;
 
     // 剔除行内 code 后若不再匹配，说明关键字完全在行内代码中（例如 `fail(error.AccessDenied)`）
     const lineWithoutInline = stripInlineCode(line).trim();
@@ -247,6 +407,7 @@ export function mineFailures(text) {
 
   for (const f of fails) {
     const window = rawLines.slice(f.at + 1, f.at + 60);
+    const failedCmd = findPrecedingCommand(rawLines, f.at);
 
     // 首先检查后续窗口中是否有成功/解决的确认信号
     let hasOkSignal = false;
@@ -265,7 +426,31 @@ export function mineFailures(text) {
     for (const l of window) {
       const trimmed = l.trim();
       if (!trimmed || isPureStatusOrNoise(trimmed)) continue;
+      // 排除通用排查工具（cat/grep/rg 等只读/分析指令绝不是解法）
+      if (isGenericToolInvocation(trimmed)) continue;
+
       if (ACTION_CMD_RE.test(trimmed) || FIX_DESC_RE.test(trimmed)) {
+        // 命令重试校验（Headroom :382-421）：若存在引发报错的命令且候选解法也是命令
+        if (failedCmd && isLikelyCommandLine(trimmed)) {
+          let prelimEtype = "general";
+          const lowF = f.raw.toLowerCase();
+          if (lowF.includes("modulenotfound") || lowF.includes("importerror")) {
+            prelimEtype = "missing_dependency";
+          } else if (lowF.includes("command not found")) {
+            prelimEtype = "missing_command";
+          } else if (lowF.includes("no such file")) {
+            prelimEtype = "missing_path";
+          } else if (lowF.includes("permission denied")) {
+            prelimEtype = "permission";
+          } else if (lowF.includes("already in use")) {
+            prelimEtype = "port_conflict";
+          } else if (lowF.includes("connection refused") || lowF.includes("timed out")) {
+            prelimEtype = "network";
+          }
+          if (!isCommandRetryCompatible(failedCmd, trimmed, prelimEtype)) {
+            continue;
+          }
+        }
         solutionLine = trimmed;
         break;
       }
@@ -277,8 +462,15 @@ export function mineFailures(text) {
       continue;
     }
 
-    const solution = sig(solutionLine);
-    const key = f.symptom + "|||" + solution;
+    // P2: 存储字段与指纹字段严格分离
+    // 入库保留真实原文，绝不提前使用 sig() 破坏真实命令参数
+    const rawSymptom = f.raw.trim().slice(0, 500);
+    const rawSolution = solutionLine.trim().slice(0, 500);
+    const maskedSymptom = sig(rawSymptom);
+    const maskedSolution = sig(rawSolution);
+    const contentFp = crypto.createHash("sha256").update(`${maskedSymptom}|||${maskedSolution}`).digest("hex").slice(0, 32);
+
+    const key = maskedSymptom + "|||" + maskedSolution;
     if (seen.has(key)) continue;
     seen.add(key);
 
@@ -302,12 +494,13 @@ export function mineFailures(text) {
 
     out.push({
       component: etype,
-      symptom: f.symptom,
-      root_cause: `执行过程中出现 ${f.symptom}，后续通过调整成功解决`,
-      solution,
+      symptom: rawSymptom,
+      root_cause: `执行过程中出现 ${rawSymptom}，后续通过执行 ${rawSolution} 成功解决`,
+      solution: rawSolution,
       error_type: etype,
       severity: (etype === "missing_dependency" || etype === "port_conflict") ? "high" : "medium",
       tags: `auto-harvest,gateway,${etype}`,
+      content_fingerprint: contentFp,
     });
   }
 
@@ -334,6 +527,48 @@ export function isLikelyFilePathOrName(p) {
   if (/^[a-zA-Z_$][a-zA-Z0-9_$]*(?:\.[a-zA-Z_$][a-zA-Z0-9_$]*){2,}$/.test(s)) return false;
   if (/(?:prototype|hasOwnProperty|constructor|__proto__|Object|Function|Array)\b/.test(s)) return false;
   return /^[a-zA-Z0-9_.~-]+\.[a-zA-Z0-9_-]+$/.test(s);
+}
+
+/** Headroom :308-335 路径纠错编辑距离与基名校验 */
+export function isValidPathCorrection(errP, okP) {
+  const p1 = String(errP || "").trim();
+  const p2 = String(okP || "").trim();
+  if (!p1 || !p2 || p1 === p2) return false;
+
+  if (!isLikelyFilePath(p2) || !isLikelyFilePathOrName(p1)) {
+    return false;
+  }
+
+  // 严格排除 JS 属性链如 Object.prototype.hasOwnProperty.call
+  if (/(?:prototype|hasOwnProperty|constructor|__proto__|Object|Function|Array)\b/.test(p1) ||
+      /(?:prototype|hasOwnProperty|constructor|__proto__|Object|Function|Array)\b/.test(p2)) {
+    return false;
+  }
+
+  const base1 = path.basename(p1.replace(/\\/g, "/"));
+  const base2 = path.basename(p2.replace(/\\/g, "/"));
+
+  // 1. 基名相同（例如迁移/重命名目录 /a/b/file.txt -> /x/y/file.txt）
+  if (base1 && base2 && base1 === base2) {
+    return true;
+  }
+
+  // 2. 或编辑距离 <= max(2, floor(len / 3))
+  const maxLen = Math.max(p1.length, p2.length);
+  const allowedDist = Math.max(2, Math.floor(maxLen / 3));
+  const dist = levenshteinDistance(p1, p2);
+  if (dist <= allowedDist) {
+    return true;
+  }
+
+  const baseMaxLen = Math.max(base1.length, base2.length);
+  const baseAllowedDist = Math.max(2, Math.floor(baseMaxLen / 3));
+  const baseDist = levenshteinDistance(base1, base2);
+  if (baseDist <= baseAllowedDist) {
+    return true;
+  }
+
+  return false;
 }
 
 /** 环境事实提取 */
@@ -424,7 +659,7 @@ export function mineEnvironmentFacts(text) {
     const errP = pMatch[1].trim();
     const okP = pMatch[2].trim();
     if (errP && okP && errP !== okP) {
-      if (!isLikelyFilePath(okP) || !isLikelyFilePathOrName(errP)) {
+      if (!isValidPathCorrection(errP, okP)) {
         continue;
       }
       const base = path.basename(okP.replace(/\\/g, "/"));
@@ -829,6 +1064,12 @@ export async function harvestGateway(args, context) {
         continue;
       }
 
+      // 双轨制：用户显式知识沉淀指令穿透门禁直接入库
+      const isExplicit = isExplicitUserMemory(dialogueText);
+      const minEvidence = options.min_evidence !== undefined
+        ? Number(options.min_evidence)
+        : (cfg.min_evidence !== undefined ? Number(cfg.min_evidence) : DEFAULT_MIN_EVIDENCE);
+
       // 规则提取
       const failures = mineFailures(dialogueText);
       const facts = mineEnvironmentFacts(dialogueText);
@@ -838,6 +1079,23 @@ export async function harvestGateway(args, context) {
       if (typeof saveMemory === "function") {
         for (const item of facts.concat(decisions)) {
           if (signal && signal.aborted) { aborted = true; break; }
+
+          // P0 证据累计门禁（显式指令直接穿透）
+          if (!isExplicit && minEvidence > 1) {
+            const itemFp = crypto.createHash("sha256").update(`${targetProject}:${item.category}:${item.title}`).digest("hex").slice(0, 32);
+            const pendingRes = recordPendingEvidence("m:" + itemFp, {
+              ...item,
+              project: targetProject,
+              client: agent,
+            }, {
+              kind: "memory",
+              minEvidence,
+            });
+            if (!pendingRes.shouldGraduate) {
+              continue; // 未达到门禁累计次数，仅在 pending 计数，不落盘
+            }
+          }
+
           try {
             const res = await saveMemory(client, cfg, {
               project: targetProject,
@@ -863,6 +1121,26 @@ export async function harvestGateway(args, context) {
       if (typeof pitfallSave === "function") {
         for (const p of failures) {
           if (signal && signal.aborted) { aborted = true; break; }
+
+          const pFp = p.content_fingerprint || crypto.createHash("sha256").update(`${targetProject}:${p.component}:${sig(p.symptom)}`).digest("hex").slice(0, 32);
+          let recurrence = 1;
+
+          // P0 证据累计门禁（显式指令直接穿透）
+          if (!isExplicit && minEvidence > 1) {
+            const pendingRes = recordPendingEvidence(`p:${targetProject}:${pFp}`, {
+              ...p,
+              project: targetProject,
+              client: agent,
+            }, {
+              kind: "pitfall",
+              minEvidence,
+            });
+            if (!pendingRes.shouldGraduate) {
+              continue; // 未达到门禁累计次数，仅在 pending 计数，不落盘
+            }
+            recurrence = pendingRes.count;
+          }
+
           try {
             const resRaw = await pitfallSave(client, cfg, {
               project: targetProject,
@@ -874,6 +1152,8 @@ export async function harvestGateway(args, context) {
               severity: p.severity || "medium",
               error_type: p.error_type || "general",
               tags: p.tags,
+              content_fingerprint: pFp,
+              recurrence,
             }, { agent, _ctx: { agent } });
             let res = resRaw;
             if (typeof resRaw === "string") {

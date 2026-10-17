@@ -82,7 +82,7 @@ try {
     model: "claude-3-5-sonnet",
     status: 200,
     input: [
-      { role: "user", text: "测试环境怎么跑？我在跑 pytest 时报错了。" }
+      { role: "user", text: "避坑：测试环境怎么跑？我在跑 pytest 时报错了。" }
     ],
     output: [
       {
@@ -102,7 +102,7 @@ try {
     Model: "gpt-4o",
     Status: 200,
     Input: [
-      { role: "user", text: "请确定项目的依赖选型与架构规范。" }
+      { role: "user", text: "记下来：请确定项目的依赖选型与架构规范。" }
     ],
     Output: [
       {

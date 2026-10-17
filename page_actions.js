@@ -34,6 +34,7 @@ import path from "node:path";
 import { dbInit, dbReset, dbStatus, dbProvision, storageSetup, ncbCheck, secretCheck, RESET_CONFIRM } from "./db_tools.js";
 import { r2Setup, r2Check, cleanProbes } from "./r2.js";
 import { checkLocalModel, downloadModel, modelDir, human, MODEL_SPEC } from "./model_check.js";
+import { lookupRealDatabase } from "./local_state.js";
 
 /** 插件目录下的状态文件路径（供 iframe 内设置页通过 script 标签加载）。 */
 export const STATUS_JS_PATH = fileURLToPath(new URL("./_status.js", import.meta.url));
@@ -601,16 +602,61 @@ export function formatCardStatus(key, rawResult, opHint) {
 }
 
 /**
+ * 从名称或 local_state 解析数据库逻辑名、数字前缀与完整名。
+ * 格式：{ logical: "agent_memory", prefix: "41694_", full: "41694_agent_memory" }
+ */
+export function parseDbInfo(rawName, fallbackLogical) {
+  const s = String(rawName || "").trim();
+  const fallback = String(fallbackLogical || "").trim();
+  const candidate = s || fallback;
+  if (!candidate) {
+    return { logical: "", prefix: "", full: "" };
+  }
+
+  // 1. 若候选名称本身已经以数字前缀开头（如 41694_agent_memory）
+  const directMatch = candidate.match(/^(\d+_)(.*)$/);
+  if (directMatch) {
+    return {
+      logical: directMatch[2] || candidate,
+      prefix: directMatch[1],
+      full: candidate,
+    };
+  }
+
+  // 2. 复用 local_state.js 的 lookupRealDatabase 同步归一化查找真实库名
+  let resolved = "";
+  try {
+    resolved = lookupRealDatabase(candidate);
+  } catch (_) {}
+
+  const resolvedMatch = String(resolved || "").match(/^(\d+_)(.*)$/);
+  if (resolvedMatch) {
+    return {
+      logical: candidate,
+      prefix: resolvedMatch[1],
+      full: resolved,
+    };
+  }
+
+  // 3. 尚未解析出带前缀的真实名（显示占位）
+  return {
+    logical: candidate,
+    prefix: "",
+    full: resolved || candidate,
+  };
+}
+
+/**
  * 把单张卡片的执行结果合并写入 _status.js（同时维护内部真相源 _status.json）。
  *
  * 保证：
  *   - 原子写：先写 .tmp 再 renameSync
- *   - 合并写：只更新 key（ncb 或 r2），不抹掉对方
+ *   - 合并写：只更新 key（ncb, r2, model, gateway, db），不抹掉对方
  *   - 静默降级：只读目录或写文件报错时不抛异常，只在 console.error 里打日志
  */
 export function writeCardStatus(key, payloadOrResult, opHint, customStatusPath) {
-  if (key !== "ncb" && key !== "r2" && key !== "model" && key !== "gateway") {
-    console.error(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2", "model" or "gateway"`);
+  if (key !== "ncb" && key !== "r2" && key !== "model" && key !== "gateway" && key !== "db") {
+    console.error(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2", "model", "gateway" or "db"`);
     return false;
   }
 
@@ -645,8 +691,21 @@ export function writeCardStatus(key, payloadOrResult, opHint, customStatusPath) 
     }
 
     // 2. 格式化本次更新的卡片项
-    const entry = formatCardStatus(key, payloadOrResult, opHint);
-    current[key] = entry;
+    if (key === "db") {
+      const entry = Object.assign({ at: Date.now() }, payloadOrResult || {});
+      current.db = entry;
+    } else {
+      const entry = formatCardStatus(key, payloadOrResult, opHint);
+      current[key] = entry;
+
+      // 顺带更新 db 前缀状态（如果 payloadOrResult 携带了数据库信息）
+      if (payloadOrResult && payloadOrResult.database) {
+        const dbInfo = parseDbInfo(payloadOrResult.database);
+        if (dbInfo && (dbInfo.prefix || !current.db || !current.db.prefix)) {
+          current.db = Object.assign({ at: Date.now() }, dbInfo);
+        }
+      }
+    }
 
     // 3. 序列化
     const jsonStr = JSON.stringify(current, null, 2);

@@ -89,7 +89,7 @@ def load_config(args):
         "compress_engine": "auto",   # auto | kompress | llmlingua2 | none
         "compress_threshold": 0.5,
         # --- 任务 A: 失败学习证据门槛 ---
-        "min_evidence": 5,
+        "min_evidence": 3,
         "evidence_file": os.path.expanduser("~/.magpie-memory-hub-evidence.json"),
         "evidence_max_entries": 5000,
         "evidence_ttl_days": 90,
@@ -162,7 +162,7 @@ def load_config(args):
     try:
         cfg["min_evidence"] = int(cfg["min_evidence"])
     except Exception:
-        cfg["min_evidence"] = 5
+        cfg["min_evidence"] = 3
     try:
         cfg["promotion_min_hits"] = int(cfg["promotion_min_hits"])
     except Exception:
@@ -267,6 +267,148 @@ OK_PATTERNS = [
 ]
 
 
+def levenshtein_distance(s1, s2):
+    m, n = len(s1), len(s2)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m + 1):
+        dp[i][0] = i
+    for j in range(n + 1):
+        dp[0][j] = j
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            cost = 0 if s1[i - 1] == s2[j - 1] else 1
+            dp[i][j] = min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
+    return dp[m][n]
+
+
+GENERIC_NOISE_TOOLS = frozenset({
+    "cat", "grep", "rg", "awk", "sed", "head", "tail", "sort", "uniq",
+    "wc", "xargs", "find", "echo", "true", "false", "test", "more", "less"
+})
+
+
+def extract_executable(cmd_line):
+    if not cmd_line:
+        return ""
+    clean = re.sub(r"^[$#>]\s*", "", str(cmd_line).strip())
+    clean = re.sub(r"^(?:sudo|time|nohup|exec|env)\s+", "", clean, flags=re.I)
+    m = re.match(r"^([a-zA-Z0-9_.\-]+)", clean)
+    if not m:
+        return ""
+    token = m.group(1).replace("\\", "/")
+    return os.path.basename(token).lower()
+
+
+def is_generic_tool_invocation(line):
+    bin_name = extract_executable(line)
+    return bin_name in GENERIC_NOISE_TOOLS
+
+
+def is_likely_command_line(line):
+    s = str(line or "").strip()
+    if re.match(r"^[$#>]\s+[a-zA-Z0-9_.\-]+", s):
+        return True
+    bin_name = extract_executable(s)
+    if not bin_name:
+        return False
+    common_bins = {
+        "npm", "npx", "pnpm", "yarn", "pip", "pip3", "python", "python3", "uv",
+        "cargo", "gem", "brew", "git", "curl", "wget", "docker", "kill", "killall",
+        "apt", "apt-get", "systemctl", "service", "pytest", "node", "make", "bash",
+        "sh", "source", "chmod", "chown", "mv", "cp", "rm", "mkdir", "cat", "grep",
+        "rg", "awk", "sed", "head", "tail", "sort", "uniq", "wc", "xargs", "find"
+    }
+    return bin_name in common_bins
+
+
+def normalize_command_args(cmd):
+    s = re.sub(r"^[$#>]\s*", "", str(cmd or "").strip())
+    s = re.sub(r"\s+", " ", s)
+    return [tok for tok in s.split(" ") if tok and not tok.startswith("-")]
+
+
+def have_substantive_args_overlap(cmd1, cmd2):
+    t1 = normalize_command_args(cmd1)[1:]
+    t2 = normalize_command_args(cmd2)[1:]
+    set2 = {t.lower() for t in t2}
+    for t in t1:
+        if len(t) >= 3 and t.lower() in set2:
+            return True
+    return False
+
+
+def is_command_retry_compatible(failed_cmd, solution_cmd, error_type="general"):
+    bin_a = extract_executable(failed_cmd)
+    bin_b = extract_executable(solution_cmd)
+    if not bin_a or not bin_b:
+        return True
+    if bin_a in GENERIC_NOISE_TOOLS or bin_b in GENERIC_NOISE_TOOLS:
+        return False
+    if bin_a == bin_b:
+        s1, s2 = str(failed_cmd).strip(), str(solution_cmd).strip()
+        max_len = max(len(s1), len(s2))
+        dist = levenshtein_distance(s1, s2)
+        norm_dist = (dist / max_len) if max_len > 0 else 0
+        return norm_dist <= 0.40 or have_substantive_args_overlap(s1, s2)
+    allowed_cross_bins = {
+        "missing_dependency": {"pip", "pip3", "npm", "pnpm", "yarn", "cargo", "brew", "apt", "apt-get", "uv"},
+        "missing_command": {"apt", "apt-get", "brew", "npm", "pip", "cargo", "uv"},
+        "port_conflict": {"kill", "killall", "fuser"},
+        "permission": {"chmod", "chown", "sudo"},
+        "missing_path": {"mkdir", "touch", "cp", "mv", "ln"},
+    }
+    valid_target_bins = allowed_cross_bins.get(error_type, set())
+    return bin_b in valid_target_bins
+
+
+def find_preceding_command(lines, at_index):
+    for j in range(at_index, max(-1, at_index - 4), -1):
+        if j < len(lines):
+            l = lines[j].strip()
+            if is_likely_command_line(l):
+                return l
+    return None
+
+
+SCAFFOLDING_PATTERNS = [
+    r"(?is)<app-context[\s\S]*?(?:<\/app-context>|$)",
+    r"(?is)<system-reminder[\s\S]*?(?:<\/system-reminder>|$)",
+    r"(?is)<permissions instructions[\s\S]*?(?:<\/permissions instructions>|$)",
+    r"(?is)<skills_instructions[\s\S]*?(?:<\/skills_instructions>|$)",
+    r"(?is)<context[\s\S]*?(?:<\/context>|$)",
+    r"(?is)<instructions[\s\S]*?(?:<\/instructions>|$)",
+    r"(?i)#\s*agents\.md\s+instructions\s+for[^\n]*",
+    r"(?i)another language model started to solve[^\n]*",
+    r"(?im)^\[developer instructions\][\s\S]*?(?:\n\n|$)",
+]
+
+
+def strip_scaffolding(text):
+    if not text:
+        return ""
+    s = str(text)
+    for pat in SCAFFOLDING_PATTERNS:
+        s = re.sub(pat, "", s)
+    return s.strip()
+
+
+def is_explicit_user_memory(text):
+    """判定是否为用户显式意图沉淀的记忆/避坑指令（穿透门禁）"""
+    if not text:
+        return False
+    s = str(text)
+    if "用户提问：" in s or "[user]:" in s:
+        parts = []
+        for seg in re.split(r"(?=(?:用户提问：|\[user\]:|助手回复：|\[assistant\]:))", s):
+            if seg.startswith("用户提问：") or seg.startswith("[user]:"):
+                parts.append(re.sub(r"^(?:用户提问：|\[user\]:)\s*", "", seg))
+        s = "\n".join(parts)
+    if not s:
+        return False
+    return bool(re.search(r"(?:^|\n|[。！？；：!?;:\n]\s*)(?:记下来|记住|避坑|备忘|必须记住|一定要记|务必遵守|mark|remember)[:：]", s, re.I) or
+                re.search(r"(?:^|\n|[。！？；：!?;:\n]\s*)(?:注意|规则|规范要求)[:：]", s, re.I))
+
+
 def _sig(s):
     """把报错压成可聚类的签名：去掉数字/路径/引号等易变部分"""
     s = re.sub(r"\s+", " ", str(s)).strip()
@@ -293,6 +435,8 @@ def mine_failures(text):
             continue
         if is_code_or_syntax_noise(line):
             continue
+        if is_generic_tool_invocation(line):
+            continue
 
         line_without_inline = strip_inline_code(line).strip()
         for pat in FAIL_PATTERNS:
@@ -311,6 +455,7 @@ def mine_failures(text):
     for f in fails:
         # 在失败之后的一段窗口里找成功信号与处置动作
         window = lines[f["at"] + 1: f["at"] + 60]
+        failed_cmd = find_preceding_command(lines, f["at"])
         has_ok_signal = False
         for l in window:
             for pat in OK_PATTERNS:
@@ -325,7 +470,29 @@ def mine_failures(text):
             trimmed = l.strip()
             if not trimmed or is_pure_status_or_noise(trimmed):
                 continue
+            if is_generic_tool_invocation(trimmed):
+                continue
+
             if ACTION_CMD_RE.search(trimmed) or FIX_DESC_RE.search(trimmed):
+                # 命令重试校验
+                if failed_cmd and is_likely_command_line(trimmed):
+                    prelim_etype = "general"
+                    low_f = f["raw"].lower()
+                    if "modulenotfound" in low_f or "importerror" in low_f:
+                        prelim_etype = "missing_dependency"
+                    elif "command not found" in low_f:
+                        prelim_etype = "missing_command"
+                    elif "no such file" in low_f:
+                        prelim_etype = "missing_path"
+                    elif "permission denied" in low_f:
+                        prelim_etype = "permission"
+                    elif "already in use" in low_f:
+                        prelim_etype = "port_conflict"
+                    elif "connection refused" in low_f or "timed out" in low_f:
+                        prelim_etype = "network"
+                    if not is_command_retry_compatible(failed_cmd, trimmed, prelim_etype):
+                        continue
+
                 solution_line = trimmed
                 break
 
@@ -334,11 +501,17 @@ def mine_failures(text):
         if not has_ok_signal and not re.search(r"(?:解决|修复|搞定|奏效|恢复|生效|成功|fixed|resolved)", solution_line, re.I):
             continue
 
-        solution = _sig(solution_line)
-        key = (f["symptom"], solution)
+        # P2: 存储字段与指纹分离，保留原始文本
+        raw_symptom = f["raw"].strip()[:500]
+        raw_solution = solution_line.strip()[:500]
+        masked_symptom = _sig(raw_symptom)
+        masked_solution = _sig(raw_solution)
+        key = (masked_symptom, masked_solution)
         if key in seen:
             continue
         seen.add(key)
+
+        content_fp = hashlib.sha256(f"{masked_symptom}|||{masked_solution}".encode("utf-8")).hexdigest()[:32]
 
         # 错误类型：按特征归类
         etype = "general"
@@ -359,10 +532,13 @@ def mine_failures(text):
             etype = "http_error"
 
         out.append({
-            "symptom": f["symptom"],
-            "solution": solution,
+            "component": etype,
+            "symptom": raw_symptom,
+            "solution": raw_solution,
+            "root_cause": f"执行过程中出现 {raw_symptom}，后续通过执行 {raw_solution} 成功解决",
             "error_type": etype,
             "severity": "high" if etype in ("missing_dependency", "port_conflict") else "medium",
+            "content_fingerprint": content_fp,
         })
     return out
 
@@ -457,10 +633,36 @@ def is_likely_file_path_or_name(p):
     return bool(re.match(r"^[a-zA-Z0-9_.~-]+\.[a-zA-Z0-9_-]+$", s))
 
 
+def is_valid_path_correction(err_p, ok_p):
+    p1 = str(err_p or "").strip()
+    p2 = str(ok_p or "").strip()
+    if not p1 or not p2 or p1 == p2:
+        return False
+    if not is_likely_file_path(p2) or not is_likely_file_path_or_name(p1):
+        return False
+    proto_re = r"\b(?:prototype|hasOwnProperty|constructor|__proto__|Object|Function|Array)\b"
+    if re.search(proto_re, p1) or re.search(proto_re, p2):
+        return False
+    base1 = os.path.basename(p1.replace("\\", "/"))
+    base2 = os.path.basename(p2.replace("\\", "/"))
+    if base1 and base2 and base1 == base2:
+        return True
+    max_len = max(len(p1), len(p2))
+    allowed_dist = max(2, max_len // 3)
+    if levenshtein_distance(p1, p2) <= allowed_dist:
+        return True
+    base_max_len = max(len(base1), len(base2))
+    base_allowed_dist = max(2, base_max_len // 3)
+    if levenshtein_distance(base1, base2) <= base_allowed_dist:
+        return True
+    return False
+
+
 def _clean_dialogue_text(text):
     if not text:
         return ""
     s = re.sub(r"\x1b\[[0-9;]*m", "", str(text))
+    s = strip_scaffolding(s)
     return strip_code_blocks(s).strip()
 
 
@@ -595,7 +797,7 @@ def mine_environment_facts(text):
     for m in re.finditer(en_path_re, cleaned, re.I):
         err_p, ok_p = m.group(1).strip(), m.group(2).strip()
         if err_p and ok_p and err_p != ok_p:
-            if not is_likely_file_path(ok_p) or not is_likely_file_path_or_name(err_p):
+            if not is_valid_path_correction(err_p, ok_p):
                 continue
             base = os.path.basename(ok_p.replace("\\", "/"))
             results.append({
@@ -611,7 +813,7 @@ def mine_environment_facts(text):
     for m in re.finditer(cn_path_re, cleaned, re.I | re.S):
         err_p, ok_p = m.group(1).strip(), m.group(2).strip()
         if err_p and ok_p and err_p != ok_p:
-            if not is_likely_file_path(ok_p) or not is_likely_file_path_or_name(err_p):
+            if not is_valid_path_correction(err_p, ok_p):
                 continue
             base = os.path.basename(ok_p.replace("\\", "/"))
             results.append({
@@ -848,7 +1050,8 @@ def save_pitfall(ncb, cfg, p, cache):
     if not symptom or not solution:
         return {"action": "SKIP"}
 
-    fp = fingerprint(f"{project}:{component}:{symptom}")
+    fp = str(p.get("content_fingerprint") or fingerprint(f"{project}:{component}:{symptom}")).strip()
+    rec = int(p.get("recurrence") or 1)
     if fp in cache:
         return {"action": "NOOP", "cached": True}
     cache.add(fp)
@@ -856,7 +1059,7 @@ def save_pitfall(ncb, cfg, p, cache):
     exist = [r for r in ncb.all("pitfalls", {"project": project}) if r.get("content_fingerprint") == fp]
     if exist:
         rid = exist[0]["id"]
-        n = int(exist[0].get("recurrence") or 1) + 1
+        n = int(exist[0].get("recurrence") or 1) + rec
         ncb.update("pitfalls", rid,
                    {"recurrence": n, "last_occurred_at": now_str(),
                     "updated_at": now_str()})   # NCB 不生效 ON UPDATE，须显式写
@@ -874,7 +1077,7 @@ def save_pitfall(ncb, cfg, p, cache):
             "error_type": str(p.get("error_type") or ""),
             "tags": str(p.get("tags") or "").lower(),
             "content_fingerprint": fp,
-            "recurrence": 1,
+            "recurrence": rec,
             "last_occurred_at": now_str(),
             # 同上：NCB 不生效列默认值，必须显式写。
             "created_at": now_str(),
@@ -1074,11 +1277,11 @@ def reset_evidence_collector(path=None):
         _evidence_collectors.clear()
 
 
-def record_pitfall(ncb, cfg, p, cache, accumulator=None, dry_run=False):
+def record_pitfall(ncb, cfg, p, cache, accumulator=None, dry_run=False, is_explicit=False):
     """
     带有证据门槛的失败模式记录：
-    同一指纹在本地状态文件里累计，达到 min_evidence（默认 5）才真正入库。
-    min_evidence <= 1 时立即入库（向后兼容）。
+    同一指纹在本地状态文件里累计，达到 min_evidence（默认 3）才真正入库。
+    min_evidence <= 1 或用户显式指令时立即入库。
     """
     project = str(p.get("project") or cfg.get("project", "global")).strip()
     component = str(p.get("component") or "unknown").strip()
@@ -1087,8 +1290,10 @@ def record_pitfall(ncb, cfg, p, cache, accumulator=None, dry_run=False):
     if not symptom or not solution:
         return {"action": "SKIP"}
 
-    fp = fingerprint(f"{project}:{component}:{symptom}")
-    min_ev = int(cfg.get("min_evidence") if cfg.get("min_evidence") is not None else 5)
+    fp = str(p.get("content_fingerprint") or fingerprint(f"{project}:{component}:{symptom}")).strip()
+    min_ev = int(cfg.get("min_evidence") if cfg.get("min_evidence") is not None else 3)
+    if is_explicit:
+        min_ev = 1
 
     if accumulator is None:
         accumulator = get_evidence_collector(cfg, log)
@@ -1103,6 +1308,9 @@ def record_pitfall(ncb, cfg, p, cache, accumulator=None, dry_run=False):
             "symptom": symptom,
             "solution": solution,
         }
+
+    if res.get("count"):
+        p["recurrence"] = res["count"]
 
     if dry_run:
         return {"action": "DRYRUN", "count": res.get("count"), "content_fingerprint": fp, **p}
@@ -1519,15 +1727,18 @@ class SnapshotPusher:
 def process_turn(cfg, ncb, turn, caches, dry_run):
     stats = {"memories": [], "pitfalls": [], "errors": [], "compressed": None}
     convo = f"用户提问：\n{turn.get('prompt', '')}\n\n助手回复：\n{turn.get('response', '')}"
+    is_explicit = is_explicit_user_memory(convo)
 
     # ---- ① 失败学习（零 LLM 成本，纯启发式）----
     try:
         accumulator = caches.get("evidence") if caches else None
         pit_cache = caches["pitfall"] if caches and "pitfall" in caches else set()
         for p in mine_failures(convo):
-            item = dict(p, project=cfg["project"], component="auto")
+            item = dict(p, project=cfg["project"])
+            if not item.get("component"):
+                item["component"] = "auto"
             res = record_pitfall(ncb, cfg, item, pit_cache,
-                                 accumulator=accumulator, dry_run=dry_run)
+                                 accumulator=accumulator, dry_run=dry_run, is_explicit=is_explicit)
             stats["pitfalls"].append(res)
     except Exception as e:
         stats["errors"].append(f"失败学习: {e}")

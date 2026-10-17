@@ -29,9 +29,37 @@ import {
   mineArchitecturalDecisions,
   mineFailures,
   isTestMode,
+  isExplicitUserMemory,
 } from "./gateway_harvest.js";
 import { makeMcpClient, buildSelect, buildInsert, sqlValue } from "./mcp_client.js";
-import { lookupSecret, lookupDatabase } from "./local_state.js";
+import {
+  lookupSecret,
+  lookupDatabase,
+  recordPendingEvidence,
+  DEFAULT_MIN_EVIDENCE,
+} from "./local_state.js";
+
+/** Headroom :68-80 脚手架注入前缀黑名单 */
+export const SCAFFOLDING_PATTERNS = [
+  /<app-context[\s\S]*?(?:<\/app-context>|$)/gi,
+  /<system-reminder[\s\S]*?(?:<\/system-reminder>|$)/gi,
+  /<permissions instructions[\s\S]*?(?:<\/permissions instructions>|$)/gi,
+  /<skills_instructions[\s\S]*?(?:<\/skills_instructions>|$)/gi,
+  /<context[\s\S]*?(?:<\/context>|$)/gi,
+  /<instructions[\s\S]*?(?:<\/instructions>|$)/gi,
+  /#\s*agents\.md\s+instructions\s+for[^\n]*/gi,
+  /another language model started to solve[^\n]*/gi,
+  /\[developer instructions\][\s\S]*?(?:\n\n|$)/gi,
+];
+
+export function stripScaffolding(text) {
+  if (!text) return "";
+  let s = String(text);
+  for (const pat of SCAFFOLDING_PATTERNS) {
+    s = s.replace(pat, "");
+  }
+  return s.trim();
+}
 
 /* ================================================================== *
  * 1. 进程内近期去重与辅助结构
@@ -74,6 +102,10 @@ export function extractLastUserTurn(messages) {
     const m = messages[i];
     if (!m) continue;
     const role = m.role || "user";
+    // 丢弃 role === "system" 与 role === "tool" 与 role === "function"（Headroom :68-80 / mem0 utils.py:65）
+    if (role === "system" || role === "tool" || role === "function") {
+      continue;
+    }
     if (role === "user") {
       let text = "";
       if (typeof m.content === "string") {
@@ -96,16 +128,10 @@ export function extractLastUserTurn(messages) {
           .filter(Boolean)
           .join("\n");
       }
-      if (text && text.trim()) {
-        return `[user]: ${text.trim()}`;
+      const stripped = stripScaffolding(text);
+      if (stripped && stripped.trim()) {
+        return `[user]: ${stripped.trim()}`;
       }
-    }
-  }
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m && m.role !== "assistant" && m.role !== "model") {
-      const text = typeof m.content === "string" ? m.content : "";
-      if (text.trim()) return `[${m.role || "user"}]: ${text.trim()}`;
     }
   }
   return "";
@@ -117,6 +143,10 @@ export function extractTextFromMessages(messages) {
   for (const m of messages) {
     if (!m) continue;
     const role = m.role || "user";
+    // 过滤系统与工具回显
+    if (role === "system" || role === "tool" || role === "function") {
+      continue;
+    }
     let text = "";
     if (typeof m.content === "string") {
       text = m.content;
@@ -138,8 +168,9 @@ export function extractTextFromMessages(messages) {
         .filter(Boolean)
         .join("\n");
     }
-    if (text && text.trim()) {
-      parts.push(`[${role}]: ${text.trim()}`);
+    const stripped = stripScaffolding(text);
+    if (stripped && stripped.trim()) {
+      parts.push(`[${role}]: ${stripped.trim()}`);
     }
   }
   return parts.join("\n");
@@ -275,12 +306,16 @@ export function buildDialogueText(body, reply) {
       }
     }
   }
-  if (userText) parts.push(userText);
+  if (userText) {
+    const stripped = stripScaffolding(userText);
+    if (stripped && stripped.trim()) parts.push(stripped.trim());
+  }
 
   // 响应侧：本次模型生成的最新回复
   const assistantText = extractTextFromReply(reply);
   if (assistantText && assistantText.trim()) {
-    parts.push(`[assistant]: ${assistantText.trim()}`);
+    const stripped = stripScaffolding(assistantText);
+    if (stripped && stripped.trim()) parts.push(`[assistant]: ${stripped.trim()}`);
   }
 
   return parts.join("\n\n");
@@ -290,9 +325,9 @@ export function buildDialogueText(body, reply) {
  * 3. 提炼并安全入库
  * ================================================================== */
 
-export async function processDialogueAndHarvest(dialogueText, meta = {}, client = null) {
+export async function processDialogueAndHarvest(dialogueText, meta = {}, client = null, options = {}) {
   if (!dialogueText || dialogueText.length < 20) {
-    return { memoriesSaved: 0, pitfallsSaved: 0, skipped: true, reason: "dialogue too short" };
+    return { memoriesSaved: 0, pitfallsSaved: 0, pendingSaved: 0, skipped: true, reason: "dialogue too short" };
   }
 
   const project = String(meta.project || "global").trim();
@@ -300,8 +335,14 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
 
   // 严禁在测试环境中向 global 真实写入
   if (project === "global" && isTestMode()) {
-    return { memoriesSaved: 0, pitfallsSaved: 0, skipped: true, reason: "test environment blocked global write" };
+    return { memoriesSaved: 0, pitfallsSaved: 0, pendingSaved: 0, skipped: true, reason: "test environment blocked global write" };
   }
+
+  // 双轨制：显式记忆沉淀指令直接穿透门禁
+  const isExplicit = isExplicitUserMemory(dialogueText) || options.bypass_gate === true;
+  const minEvidence = typeof options.min_evidence === "number"
+    ? options.min_evidence
+    : (typeof meta.min_evidence === "number" ? meta.min_evidence : DEFAULT_MIN_EVIDENCE);
 
   // 规则启发式提炼
   const facts = mineEnvironmentFacts(dialogueText);
@@ -310,6 +351,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
 
   let memoriesSaved = 0;
   let pitfallsSaved = 0;
+  let pendingSaved = 0;
 
   // 1. 入库 memories（环境事实与架构决策）
   const memoryCandidates = facts.concat(decisions);
@@ -320,6 +362,18 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
 
     const fp = fingerprint(`${project}:${item.category}:${title}:${content}`);
     if (isRecent("m:" + fp)) continue;
+
+    // P0 证据门禁：非显式表达必须在 pending 累计达到 minEvidence
+    if (!isExplicit && minEvidence > 1) {
+      const pendingRes = recordPendingEvidence("m:" + fp, { ...item, project, agent }, {
+        kind: "memory",
+        minEvidence,
+      });
+      if (!pendingRes.shouldGraduate) {
+        pendingSaved++;
+        continue;
+      }
+    }
 
     if (client) {
       try {
@@ -377,8 +431,23 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     const symptom = String(item.symptom || "").trim();
     if (!symptom) continue;
 
-    const fp = fingerprint(`${project}:${component}:${symptom}`);
-    if (isRecent("p:" + fp)) continue;
+    const fp = item.content_fingerprint || fingerprint(`${project}:${component}:${symptom}`);
+    const pitKey = `p:${project}:${fp}`;
+    if (isRecent(pitKey)) continue;
+
+    let recurrence = 1;
+    // P0 证据门禁：非显式表达必须在 pending 累计达到 minEvidence
+    if (!isExplicit && minEvidence > 1) {
+      const pendingRes = recordPendingEvidence(pitKey, { ...item, project, agent }, {
+        kind: "pitfall",
+        minEvidence,
+      });
+      if (!pendingRes.shouldGraduate) {
+        pendingSaved++;
+        continue;
+      }
+      recurrence = pendingRes.count;
+    }
 
     if (client) {
       try {
@@ -390,7 +459,17 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
         });
         const isDupe = Array.isArray(existing?.data) && existing.data.length > 0;
         if (isDupe) {
-          markRecent("p:" + fp);
+          const row = existing.data[0];
+          const next = (Number(row.recurrence) || 1) + recurrence;
+          const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+          try {
+            await client.update("pitfalls", row.id, {
+              recurrence: next,
+              last_occurred_at: now,
+              updated_at: now,
+            });
+          } catch (_) {}
+          markRecent(pitKey);
           continue;
         }
 
@@ -406,14 +485,14 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
           error_type: item.error_type || "general",
           tags: item.tags || "auto-harvest,gateway",
           content_fingerprint: fp,
-          recurrence: 1,
+          recurrence,
           created_at: now,
           updated_at: now,
           invalid_at: null,
           invalid_reason: "",
           last_occurred_at: now,
         });
-        markRecent("p:" + fp);
+        markRecent(pitKey);
         pitfallsSaved++;
       } catch (err) {
         // 静默容错，fail-open
@@ -424,7 +503,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     }
   }
 
-  return { memoriesSaved, pitfallsSaved, skipped: false };
+  return { memoriesSaved, pitfallsSaved, pendingSaved, skipped: false };
 }
 
 /* ================================================================== *
@@ -506,7 +585,7 @@ export async function onResponse(reply, ctx) {
       }
     }
 
-    await processDialogueAndHarvest(dialogueText, meta, client);
+    await processDialogueAndHarvest(dialogueText, meta, client, opts);
   } catch (e) {
     // 极致 fail-open：吞掉一切异常，绝不向上抛出
   }

@@ -287,7 +287,7 @@ Starting server on port 8080... OK done!
   };
 
   const testDialogue = `
-[user]: 请帮我配置运行环境。
+[user]: 记下来：请帮我配置运行环境。
 [assistant]: 执行 source /home/test_proj/venv/bin/activate 激活 Python 环境。
 技术选型统一采用 vite 替代 webpack 构建前端。
 运行出现 command not found: pytest，改用 python -m unittest 执行测试。
@@ -491,7 +491,7 @@ ModuleNotFoundError: No module named 'requests'
       { role: "assistant", content: "第一轮助手回复：会议纪要如下..." },
       { role: "user", content: "第二轮用户输入：讨论今天的天气" },
       { role: "assistant", content: "第二轮助手回复：今天天气晴朗" },
-      { role: "user", content: "第三轮用户输入：请问项目如何激活虚拟环境？" },
+      { role: "user", content: "第三轮用户输入：记下来：请问项目如何激活虚拟环境？" },
     ],
   };
   const currentReply = {
