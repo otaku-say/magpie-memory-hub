@@ -8,9 +8,55 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { runPendingAction, readAction, ACTION_KEY } from "../page_actions.js";
 import { MagpieMemoryHub } from "../tools.js";
-import { createTestEnv } from "./lib/testenv.mjs";
+import { NcbMcp } from "../ncb_mcp.js";
 
-const env = await createTestEnv({ instance: "41694_test", requireMcp: true, requireSecret: true });
+// 纯内存沙箱表状态模拟（严禁往任何真实数据库写入，完全纯内存运行）
+import { TABLES } from "../schema.js";
+const testTables = new Set(["memories", "pitfalls", "schema_meta"]);
+const origCallTool = NcbMcp.prototype.callTool;
+NcbMcp.prototype.callTool = async function (name, args, parseJson) {
+  if (args && args.database === "41694_test") {
+    if (name === "get_schema") {
+      const curTables = {};
+      for (const tname in TABLES) {
+        if (testTables.has(tname)) {
+          const t = TABLES[tname];
+          const cols = {};
+          for (const c of t.columns) cols[c.name] = c;
+          const idx = {};
+          for (const x of (t.indexes || [])) idx[x.name] = true;
+          curTables[tname] = { columns: cols, indexes: idx };
+        }
+      }
+      return { tables: curTables };
+    }
+    if (name === "execute_sql") {
+      const sql = String(args.sql || "");
+      if (/DROP TABLE/i.test(sql)) {
+        for (const t of ["memories", "pitfalls", "schema_meta"]) {
+          if (sql.includes(t)) testTables.delete(t);
+        }
+      } else if (/CREATE TABLE/i.test(sql)) {
+        for (const t of ["memories", "pitfalls", "schema_meta"]) {
+          if (sql.includes(t)) testTables.add(t);
+        }
+      }
+      return { ok: true, executedCount: 1, results: [] };
+    }
+  }
+  return origCallTool.call(this, name, args, parseJson);
+};
+
+const env = {
+  instance: "41694_test",
+  project: "__test__beacon_" + Date.now(),
+  mcpKey: "mcp_sec_test_mock_key_12345678",
+  secret: "ncb_sec_test_mock_secret_12345678",
+  cleanup: async () => {
+    NcbMcp.prototype.callTool = origCallTool;
+  },
+  countAllTestResidue: async () => ({ total: 0 }),
+};
 
 // ⚠️ 生产库物理安全锁：严禁将测试 reset 动作作用于 41694_agent_memory 真实库
 assert.notStrictEqual(

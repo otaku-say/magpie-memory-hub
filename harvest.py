@@ -282,32 +282,59 @@ def mine_failures(text):
     从一段对话文本里挖「失败 → 之后奏效」的配对。
     返回 [{symptom, solution, error_type}]，只保留确实找到了后续成功信号的那些。
     """
-    lines = [l for l in str(text).splitlines()]
+    cleaned = _clean_dialogue_text(text)
+    if _is_dialogue_noise(cleaned):
+        return []
+
+    lines = [l.strip() for l in cleaned.splitlines()]
     fails = []
     for i, line in enumerate(lines):
+        if not line or len(line) < 5:
+            continue
+        if is_code_or_syntax_noise(line):
+            continue
+
+        line_without_inline = strip_inline_code(line).strip()
         for pat in FAIL_PATTERNS:
             m = re.search(pat, line)
             if m:
-                fails.append({"at": i, "raw": m.group(0), "symptom": _sig(m.group(0))})
+                matched_str = m.group(0)
+                if not re.search(pat, line_without_inline) and ("(" in matched_str or ")" in matched_str or "." in matched_str):
+                    continue
+                if re.search(r"\bfail\s*\(", line, re.I):
+                    continue
+                fails.append({"at": i, "raw": matched_str, "symptom": _sig(matched_str)})
                 break
 
     out = []
     seen = set()
     for f in fails:
-        # 在失败之后的一段窗口里找成功信号，把它当作解法线索
+        # 在失败之后的一段窗口里找成功信号与处置动作
         window = lines[f["at"] + 1: f["at"] + 60]
-        ok_line = None
-        for j, l in enumerate(window):
+        has_ok_signal = False
+        for l in window:
             for pat in OK_PATTERNS:
                 if re.search(pat, l):
-                    ok_line = l.strip()
+                    has_ok_signal = True
                     break
-            if ok_line:
+            if has_ok_signal:
                 break
-        if not ok_line:
+
+        solution_line = None
+        for l in window:
+            trimmed = l.strip()
+            if not trimmed or is_pure_status_or_noise(trimmed):
+                continue
+            if ACTION_CMD_RE.search(trimmed) or FIX_DESC_RE.search(trimmed):
+                solution_line = trimmed
+                break
+
+        if not solution_line:
+            continue
+        if not has_ok_signal and not re.search(r"(?:解决|修复|搞定|奏效|恢复|生效|成功|fixed|resolved)", solution_line, re.I):
             continue
 
-        solution = _sig(ok_line)
+        solution = _sig(solution_line)
         key = (f["symptom"], solution)
         if key in seen:
             continue
@@ -355,11 +382,86 @@ NOISE_PATTERNS = [
 ]
 
 
+def strip_code_blocks(text):
+    if not text:
+        return ""
+    s = re.sub(r"```[\s\S]*?```", "", str(text))
+    s = re.sub(r"~~~[\s\S]*?~~~", "", s)
+    return s
+
+
+def strip_inline_code(text):
+    if not text:
+        return ""
+    return re.sub(r"`[^`\r\n]+`", "", str(text))
+
+
+def is_code_or_syntax_noise(line):
+    s = str(line or "").strip()
+    if not s:
+        return True
+    if re.search(r"(?:^\/|\/[gimsuy]*\s*,?$)", s) and ("\\b" in s or "(?i)" in s):
+        return True
+    if re.search(r"^(?:const|let|var|function|return|import|export|class|def|fn|struct|interface|type)\b", s):
+        return True
+    if re.search(r"^[+-]\s*(?:var|const|let|function|return|if|else|bool|int|string)\b", s):
+        return True
+    if re.search(r"^[\"']?[\w.-]+[\"']?\s*:\s*[\"'<]", s):
+        return True
+    if re.search(r";\s*$", s) and ("=" in s or "(" in s or "{" in s):
+        return True
+    return False
+
+
+ACTION_CMD_RE = re.compile(
+    r"(?:^|[;&|`\s])(?:sudo\s+)?(?:apt|apt-get|npm|npx|pnpm|yarn|pip|pip3|python3?|uv|cargo|gem|brew|git|export|source|\.|mv|cp|rm|mkdir|chmod|chown|systemctl|service|curl|wget|docker|kill|killall)\s+[^\n]{2,120}",
+    re.I
+)
+
+FIX_DESC_RE = re.compile(
+    r"(?:(?:建议|请|必须|统一|改用|已)?(?:通过|采用|使用|执行|运行|改用|安装|配置|调整|更新|升级|修复|修改|重新)\s*[^\n]{2,80}?(?:解决|修复|搞定|奏效|恢复|生效|成功|pass)|(?:解决(?:方法|方案|办法)?|修复(?:方法|方案|办法)?|处置(?:方法|方案)?|应对措施|workaround)[：:\s]+[^\n]{3,120}|(?:已|后续)?(?:通过|改用|切换到|重新安装|修复为|添加|配置)\s*[^\n]{3,120}|(?:fix(?:ed)?|solution|resolved?)\s*(?:by|via|with|using|to)?[：:\s]+[^\n]{3,120})",
+    re.I
+)
+
+
+def is_pure_status_or_noise(line):
+    s = str(line or "").strip()
+    if is_code_or_syntax_noise(s):
+        return True
+    if re.search(r"^(?:exit code\s*0|\d+\s+passed|success|ok|passed|done|green)[.!]?$", s, re.I):
+        return True
+    if re.search(r"^\d+\s+passed\s+in\s+[\d.]+s", s, re.I):
+        return True
+    return False
+
+
+def is_likely_file_path(p):
+    s = str(p or "").strip()
+    if "/" not in s and "\\" not in s:
+        return False
+    if re.search(r"\b(?:prototype|hasOwnProperty|constructor|__proto__|Object|Function|Array)\b", s):
+        return False
+    if re.match(r"^[a-zA-Z_$][a-zA-Z0-9_$]*(?:\.[a-zA-Z_$][a-zA-Z0-9_$]*)+$", s):
+        return False
+    return True
+
+
+def is_likely_file_path_or_name(p):
+    s = str(p or "").strip()
+    if "/" in s or "\\" in s:
+        return is_likely_file_path(s)
+    if re.match(r"^[a-zA-Z_$][a-zA-Z0-9_$]*(?:\.[a-zA-Z_$][a-zA-Z0-9_$]*){2,}$", s):
+        return False
+    if re.search(r"\b(?:prototype|hasOwnProperty|constructor|__proto__|Object|Function|Array)\b", s):
+        return False
+    return bool(re.match(r"^[a-zA-Z0-9_.~-]+\.[a-zA-Z0-9_-]+$", s))
+
+
 def _clean_dialogue_text(text):
     if not text:
         return ""
     s = re.sub(r"\x1b\[[0-9;]*m", "", str(text))
-    return s.strip()
+    return strip_code_blocks(s).strip()
 
 
 def _is_dialogue_noise(text):
@@ -493,6 +595,8 @@ def mine_environment_facts(text):
     for m in re.finditer(en_path_re, cleaned, re.I):
         err_p, ok_p = m.group(1).strip(), m.group(2).strip()
         if err_p and ok_p and err_p != ok_p:
+            if not is_likely_file_path(ok_p) or not is_likely_file_path_or_name(err_p):
+                continue
             base = os.path.basename(ok_p.replace("\\", "/"))
             results.append({
                 "category": "fact",
@@ -507,6 +611,8 @@ def mine_environment_facts(text):
     for m in re.finditer(cn_path_re, cleaned, re.I | re.S):
         err_p, ok_p = m.group(1).strip(), m.group(2).strip()
         if err_p and ok_p and err_p != ok_p:
+            if not is_likely_file_path(ok_p) or not is_likely_file_path_or_name(err_p):
+                continue
             base = os.path.basename(ok_p.replace("\\", "/"))
             results.append({
                 "category": "fact",

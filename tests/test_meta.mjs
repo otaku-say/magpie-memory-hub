@@ -22,34 +22,35 @@ const ROOT = path.resolve(fileURLToPath(new URL(".", import.meta.url)));
 const TESTS_DIR = ROOT;
 
 const WRITE_PATTERNS = [
-  /\bmemory_save\b/i,
-  /\bpitfall_save\b/i,
-  /\bINSERT\s+INTO\b/i,
-  /\.(?:create|remove)\s*\(\s*["'](?:memories|pitfalls)["']/i,
-  /\bharvest_gateway\b/i,
+  /\.(?:memory_save|pitfall_save)\.execute\s*\(/i,
+  /\.(?:create|remove|update)\s*\(\s*["'](?:memories|pitfalls)["']/i,
+  /INSERT\s+INTO\s+["`']?(?:memories|pitfalls)["`']?/i,
+  /UPDATE\s+["`']?(?:memories|pitfalls)["`']?/i,
+  /\.harvest_gateway\.execute\s*\(/i,
+  /\bharvestGateway\s*\(/i,
+  /\bprocessDialogueAndHarvest\s*\(/i,
 ];
 
 const ISOLATION_PATTERNS = [
-  /env\.project/i,
-  /createTestEnv/i,
-  /__test__/i,
-  /\bproject\b/i,
+  /\bcreateTestEnv\b/,
+  /\bmockDbClient\b/,
+  /\bmemoryStore\b/,
+  /\bglobalMemoryStore\b/,
 ];
 
 const CLEANUP_PATTERNS = [
-  /cleanup\s*\(/i,
-  /DELETE\s+FROM/i,
-  /mcp\.remove/i,
+  /\benv\.cleanup\s*\(/,
+  /\bcleanup\s*\(/,
+  /\bcleanupQualityTest\s*\(/,
+  /DELETE\s+FROM\s+["`']?(?:memories|pitfalls)["`']?/i,
 ];
 
 const RESIDUE_ASSERT_PATTERNS = [
   /countAllTestResidue/i,
   /residue/i,
-  /===\s*0/i,
-  /==\s*0/i,
-  /total\s*===\s*0/i,
-  /strictEqual\([^,]+,\s*0/i,
-  /check\([^,]*0/i,
+  /totalResidue/i,
+  /cleanRes\.(?:memoriesDeleted|pitfallsDeleted)/i,
+  /residue\.total/i,
 ];
 
 const KEY_TEST_FILES = [
@@ -77,12 +78,18 @@ export function scanTestFile(filePath, rawContent) {
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/.*$/gm, "");
 
-  // 1. 检查数据库写操作隔离与清理
+  // 1. 检查数据库写操作隔离与清理（严禁污染真实库，严禁向 global 写入）
   const hasDbWrite = WRITE_PATTERNS.some((p) => p.test(content));
   if (hasDbWrite) {
     const hasIsolation = ISOLATION_PATTERNS.some((p) => p.test(content));
     const hasCleanup = CLEANUP_PATTERNS.some((p) => p.test(content));
     const hasResidueAssert = RESIDUE_ASSERT_PATTERNS.some((p) => p.test(content));
+
+    // 严密防线 1：严禁任何写库测试包含 project: "global" 写入
+    const hasGlobalLeak = /project:\s*["']global["']/.test(content);
+    if (hasGlobalLeak) {
+      issues.push(`[DB泄漏违规] 测试用例严禁直接写入 project='global'（存在污染用户真实库风险）！必须使用 env.project 或 mock 隔离命名空间`);
+    }
 
     if (!hasIsolation) {
       issues.push(`[DB隔离违规] 存在写库操作，但未包含 project 命名空间隔离`);
@@ -92,6 +99,15 @@ export function scanTestFile(filePath, rawContent) {
     }
     if (!hasResidueAssert) {
       issues.push(`[DB残余断言违规] 存在写库操作，但未断言清理后残余数为 0`);
+    }
+
+    // 严密防线 2：测试必须能自证隔离生效（使用受控 mock 桩对象，或基于 createTestEnv 绑定断言 env.project）
+    const hasSelfProof =
+      (/\bcreateTestEnv\b/.test(content) && /\benv\.project\b/.test(content)) ||
+      (/\bmockDbClient\b/.test(content) && /\bmemoryStore\b/.test(content)) ||
+      (/\bfakeCrashingClient\b/.test(content));
+    if (!hasSelfProof) {
+      issues.push(`[DB自证隔离缺失] 写库测试必须能自证隔离生效（必须使用 createTestEnv 并绑定 env.project，或使用受控内存 mock 桩，杜绝假装隔离）`);
     }
   }
 
@@ -141,9 +157,37 @@ export function runMetaCheck(options = {}) {
     }
   }
 
+  // 反证测试 1：验证门禁对写 global 恶意用例具备拦截能力
+  const fakeSample = `
+    import { createTestEnv } from "./lib/testenv.mjs";
+    client.create("memories", { project: "global", title: "leak" });
+    cleanup();
+    assert.strictEqual(residue, 0);
+  `;
+  const fakeRes = scanTestFile("sample_fake_leak.mjs", fakeSample);
+  assert.ok(
+    fakeRes.issues.some((i) => i.includes("DB泄漏违规")),
+    "[反证门失败] test_meta 门禁未能拦截假装隔离且向 global 泄露的测试样本！"
+  );
+
+  // 反证测试 2：构造「假装隔离」（写了 project 但其实是真实 client，未引用 createTestEnv / 明确 mock 桩）的样本文件
+  const fakePretendIsolationSample = `
+    import { makeMcpClient } from "../mcp_client.js";
+    const client = makeMcpClient({ instance: "41694_agent_memory", mcpKey: "real_token" });
+    const project = "my_custom_project";
+    await client.create("memories", { project, title: "pretend" });
+    cleanup();
+    assert.strictEqual(residue, 0);
+  `;
+  const fakePretendRes = scanTestFile("sample_fake_pretend.mjs", fakePretendIsolationSample);
+  assert.ok(
+    fakePretendRes.issues.some((i) => i.includes("DB隔离违规") || i.includes("DB自证隔离缺失")),
+    "[反证门失败] test_meta 门禁未能拦截假装隔离（写了 project 但使用真实 client 且无隔离设施）的样本！"
+  );
+
   if (!silent) {
     console.log("=================================================================");
-    console.log(`【测试元检查】正在扫描 ${testFiles.length} 个测试文件规范合规性`);
+    console.log(`【测试元检查】正在扫描 ${testFiles.length} 个测试文件规范合规性（已通过反证门拦截测试）`);
     console.log("=================================================================\n");
   }
 

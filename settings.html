@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.10.0</span>
+    <span class="version-tag">v6.11.0</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、上下文压缩、R2 存储。</p>
 
@@ -95,8 +95,8 @@
           <span class="badge rec">推荐 填</span>
         </div>
         <div class="hint">
-          <div class="hint-desc">数据库的专属访问密钥，用于 R2 列举/删除与对象清理。它只在建库时返回一次，插件无法自行取回。</div>
-          <div class="hint-diff"><strong>填写</strong>：前往 NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key 填入；<strong>留空</strong>：若数据库由本插件一键创建，会自动捕获；若既未填写也未捕获，记忆读写不受影响，但 R2 列举与删除不可用。</div>
+          <div class="hint-desc">数据库专属访问密钥，用于 R2 列举/删除与探针清理。Secret Key 只在建库时返回一次，MCP Key 无法读取，插件也无法自行取回。</div>
+          <div class="hint-diff"><strong>手动填写</strong>：前往 NoCodeBackend 控制台 → 数据库设置 → 复制 Secret Key 填入；<strong>留空</strong>：记忆读写不受影响，但 R2 列举与探针清理不可用。</div>
         </div>
         <div class="control">
           <input class="mono" type="password" id="ncb_secret" placeholder="从 NCB 控制台复制 Secret Key 填入" autocomplete="off" spellcheck="false">
@@ -211,7 +211,7 @@
         </div>
         <div class="hint">
           <div class="hint-desc">用于存放多媒体附件与记忆备份的 Cloudflare R2 存储桶名。</div>
-          <div class="hint-diff"><strong>留空</strong>：挂载时自动按 <code>&lt;数据库名&gt;-storage</code> 规则创建；<strong>填写</strong>：绑定并挂载到指定的已有存储桶。</div>
+          <div class="hint-diff"><strong>留空</strong>：挂载时默认与数据库名相同（同源同名）；<strong>填写</strong>：绑定并挂载到指定的已有存储桶。</div>
         </div>
         <div class="control">
           <input class="mono" type="text" id="r2_bucket_name" placeholder="留空自动生成" spellcheck="false">
@@ -601,7 +601,7 @@
         <li>自动补齐缺失的数据表（<code>memories</code>、<code>pitfalls</code>、<code>schema_meta</code>）、列与索引</li>
         <li><strong>若同名已存在不会破坏数据</strong>：将走复用/补齐策略，绝不删除已有数据</li>
         <li><strong>不会动 R2 存储</strong>（如需挂载 R2，请在下方 R2 卡片单独点击「挂载 R2 存储」）</li>
-        <li>自动提取并保存数据库的 Secret Key，后续无需手填</li>
+        <li><strong>新建库时自动保存密钥</strong>：若本次新建数据库，将保存 NCB 仅在建库时返回一次的 Secret Key；复用已有库则无法读取，须手动填入</li>
       </ul>
     </div>
     <div class="modal-actions">

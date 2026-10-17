@@ -20,8 +20,8 @@ const P = (v) => { if (typeof v !== "string") return v; try { return JSON.parse(
 const env = await createTestEnv({ instance: "41694_agent_memory", requireMcp: true });
 
 try {
-  // ⚠️ 故意只给 mcp_key，不给 ncb_secret —— 这正是用户要的最终形态
-  const hub = await MagpieMemoryHub({}, { ncb_instance: env.instance, mcp_key: env.mcpKey });
+  // ⚠️ 故意只给 mcp_key，不给 ncb_secret —— 这正是用户要的最终形态；注入隔离 client 杜绝污染真实库
+  const hub = await MagpieMemoryHub({}, { ncb_instance: env.instance, mcp_key: env.mcpKey, _client: env.client, client: env.client });
   const S = hub.tool;
 
   console.log("=== 只填 MCP key（无 Secret Key）时的记忆读写 ===");

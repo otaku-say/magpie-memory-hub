@@ -95,7 +95,7 @@ console.log("=================================================================\n
   // 故意让内部提炼执行并抛错
   let errorCaught = false;
   try {
-    await processDialogueAndHarvest(sampleDialogue, { project: "global" }, fakeCrashingClient);
+    await processDialogueAndHarvest(sampleDialogue, { project: "__test_failopen__" }, fakeCrashingClient);
   } catch (e) {
     errorCaught = true;
   }
@@ -148,12 +148,28 @@ console.log("=================================================================\n
   }
   assert.strictEqual(clientDelivered.length, sseChunks.length, "分块数量保持严格一致");
 
-  // 验证网关合并后的统一结构在 onResponse 中能正确还原
-  const mockUnifiedReply = {
+  // 验证网关合并后的四种协议统一结构在 onResponse 中能正确还原
+  const mockChatReply = {
     choices: [{ message: { role: "assistant", content: "你好，我是Magpie" } }],
   };
-  const extractedText = extractTextFromReply(mockUnifiedReply);
-  assert.strictEqual(extractedText, "你好，我是Magpie", "统一解码后回复文本还原正确");
+  assert.strictEqual(extractTextFromReply(mockChatReply), "你好，我是Magpie", "Chat 解码后回复文本还原正确");
+
+  const mockAnthropicReply = {
+    role: "assistant",
+    content: [{ type: "text", text: "你好，我是Anthropic" }],
+  };
+  assert.strictEqual(extractTextFromReply(mockAnthropicReply), "你好，我是Anthropic", "Anthropic 解码后回复文本还原正确");
+
+  const mockResponsesReply = {
+    object: "response",
+    output: [{ type: "message", content: [{ type: "output_text", text: "你好，我是Responses" }] }],
+  };
+  assert.strictEqual(extractTextFromReply(mockResponsesReply), "你好，我是Responses", "Responses 解码后回复文本还原正确");
+
+  const mockGeminiReply = {
+    candidates: [{ content: { parts: [{ text: "思考过程", thought: true }, { text: "你好，我是Gemini" }] } }],
+  };
+  assert.strictEqual(extractTextFromReply(mockGeminiReply), "你好，我是Gemini", "Gemini 解码后回复文本还原正确且过滤思考");
   console.log("  ✓ 流式分块边界与字节完全保真，完整回复解码无误\n");
 }
 
@@ -250,9 +266,9 @@ Starting server on port 8080... OK done!
       const store = table === "memories" ? memoryStore : pitfallStore;
       const rows = [];
       for (const row of store.values()) {
-        if (row.project === params.project) {
-          rows.push({ ...row });
-        }
+        if (params.project && row.project !== params.project) continue;
+        if (params.content_fingerprint && row.content_fingerprint !== params.content_fingerprint) continue;
+        rows.push({ ...row });
       }
       return { data: rows };
     },
@@ -321,6 +337,214 @@ Starting server on port 8080... OK done!
   console.log("  ✓ 隔离写入、查重去重与残余为 0 校验全部通过\n");
 }
 
+// -----------------------------------------------------------------------------
+// 7. 真实样本产出质量回归（高价值保留 + 噪音过滤 + 反证真故障提炼 + 增量本轮提取）
+// -----------------------------------------------------------------------------
+{
+  console.log("▶ [Test 7] 真实样本产出质量回归测试（高价值保留 + 噪音彻底过滤 + 反证提炼）...");
+
+  const testProject = `__test_harvest_quality_${Date.now()}__`;
+  const memoryStore = new Map();
+  const pitfallStore = new Map();
+  let nextId = 1;
+
+  const mockDbClient = {
+    list: async (table, params) => {
+      const store = table === "memories" ? memoryStore : pitfallStore;
+      const rows = [];
+      for (const row of store.values()) {
+        if (params.project && row.project !== params.project) continue;
+        if (params.content_fingerprint && row.content_fingerprint !== params.content_fingerprint) continue;
+        rows.push({ ...row });
+      }
+      return { data: rows };
+    },
+    create: async (table, data) => {
+      const store = table === "memories" ? memoryStore : pitfallStore;
+      const id = nextId++;
+      const saved = { ...data, id };
+      store.set(id, saved);
+      return saved;
+    },
+    remove: async (table, id) => {
+      const store = table === "memories" ? memoryStore : pitfallStore;
+      const had = store.delete(id);
+      return { affectedRows: had ? 1 : 0 };
+    },
+  };
+
+  // 7.1 原有高价值产出回归断言
+  console.log("  --> 验证 3 条高价值产出持续保留...");
+  // 高价值 1：Python 虚拟环境激活
+  const venvDialogue = `
+[user]: 请问如何运行当前项目里的测试？
+[assistant]: 请使用 Python 虚拟环境：source /root/.venv/activate 来激活环境，然后再运行测试。
+`.trim();
+  const venvFacts = mineEnvironmentFacts(venvDialogue);
+  assert.ok(
+    venvFacts.some((f) => f.title.includes("Python 虚拟环境激活") && f.content.includes("source /root/.venv/activate")),
+    "高价值产出 1 断言通过：'Python 虚拟环境激活' 依然被成功提炼"
+  );
+
+  // 高价值 2：选型决策: 采用 mcp_client 替换 db_tools
+  const depDialogue = `
+[user]: 数据层客户端该怎么设计？
+[assistant]: 架构选型决策：统一决定采用 mcp_client 替代 db_tools 作为数据持久层客户端。
+`.trim();
+  const depDecisions = mineArchitecturalDecisions(depDialogue);
+  assert.ok(
+    depDecisions.some((d) => d.title.includes("选型决策: 采用 mcp_client 替换 db_tools")),
+    "高价值产出 2 断言通过：'选型决策: 采用 mcp_client 替换 db_tools' 依然被成功提炼"
+  );
+
+  // 高价值 3：工具规范: npm 代替 pnpm
+  const toolNormDialogue = `
+[user]: 项目使用哪个包管理器构建？
+[assistant]: 环境工具规范要求：建议使用 npm 代替 pnpm 执行构建命令。
+`.trim();
+  const toolFacts = mineEnvironmentFacts(toolNormDialogue);
+  assert.ok(
+    toolFacts.some((f) => f.title.includes("工具规范: npm 代替 pnpm")),
+    "高价值产出 3 断言通过：'工具规范: npm 代替 pnpm' 依然被成功提炼"
+  );
+  console.log("  ✓ 3 条高价值产出全部被准确提炼保留");
+
+  // 7.2 真实噪音样本彻底过滤断言（必须产出 0 条伪记忆/伪踩坑）
+  console.log("  --> 验证真实库中发现的 5 种噪音样本被彻底过滤...");
+
+  // 噪音 1：代码块内的正则定义被当做 symptom，okLine 变量当做 solution
+  const noiseRegexDialogue = `
+[user]: 帮我看下这段正则提取逻辑：
+[assistant]: \`\`\`javascript
+const FAIL_PATTERNS = [
+  /\\b(?:ERROR|FATAL|FAILED|FAIL|Error:)\\b[^\\n]{0,120}/i,
+];
+const solution = sig(okLine);
+\`\`\`
+这段正则写得不错。
+`.trim();
+  const noise1Failures = mineFailures(noiseRegexDialogue);
+  assert.strictEqual(noise1Failures.length, 0, "噪音 1 拦截成功：代码块内的正则与属性不会被当成故障与解法 (0 条)");
+
+  // 噪音 2：Zig 源码中的 fail(error.AccessDenied) 与 diff 中的 - var done: bool = false;
+  const noiseZigDialogue = `
+[user]: 请审查这段认证处理代码：
+[assistant]: \`\`\`zig
+if (!hasPerm) {
+    return fail(error.AccessDenied);
+}
+- var done: bool = false;
++ var done: bool = true;
+\`\`\`
+`.trim();
+  const noise2Failures = mineFailures(noiseZigDialogue);
+  assert.strictEqual(noise2Failures.length, 0, "噪音 2 拦截成功：Zig 源码函数调用与 diff 绝不入库为踩坑 (0 条)");
+
+  // 噪音 3：JSON 回显与属性行
+  const noiseJsonDialogue = `
+[user]: 之前采集的数据是什么格式？
+[assistant]: \`\`\`json
+{
+  "symptom": "ModuleNotFoundError: No module named requests，后续通过调整成功解决",
+  "solution": "ok: true"
+}
+\`\`\`
+`.trim();
+  const noise3Failures = mineFailures(noiseJsonDialogue);
+  assert.strictEqual(noise3Failures.length, 0, "噪音 3 拦截成功：JSON 代码块回显绝不入库为踩坑 (0 条)");
+
+  // 噪音 4：路径正则匹配 JS 对象链式属性 (Object.prototype.hasOwnProperty.call)
+  const noisePathDialogue = `
+[user]: GLOBAL.md 路径报错了
+[assistant]: 文件 GLOBAL.md 不存在，正确路径为 Object.prototype.hasOwnProperty.call。
+`.trim();
+  const noise4Facts = mineEnvironmentFacts(noisePathDialogue);
+  assert.strictEqual(noise4Facts.length, 0, "噪音 4 拦截成功：JS 对象链式属性绝不被误判为文件路径 (0 条)");
+
+  // 噪音 5：行内代码函数调用与无处置动作
+  const noiseInlineCodeDialogue = `
+[user]: 报错原因分析
+[assistant]: 我们在第 12 行调用了 \`fail(error.AccessDenied)\` 抛出错误，后续没有执行任何命令。
+`.trim();
+  const noise5Failures = mineFailures(noiseInlineCodeDialogue);
+  assert.strictEqual(noise5Failures.length, 0, "噪音 5 拦截成功：行内代码函数调用且无处置动作绝不入库 (0 条)");
+  console.log("  ✓ 5 类真实噪音样本全部被彻底拦截（产出均为 0）");
+
+  // 7.3 反证测试：故意喂入真故障 + 真实处置动作，断言必定能被提炼
+  console.log("  --> 反证测试：输入真故障 + 真实处置动作，断言必定提炼成功...");
+  const realFixDialogue = `
+[user]: 执行测试遇到了依赖缺失报错：
+ModuleNotFoundError: No module named 'requests'
+[assistant]: 检测到环境中缺少 requests 库。处置方案：请执行 pip install requests 安装依赖包，后续运行测试已全部通过 (success)。
+`.trim();
+  const realFailures = mineFailures(realFixDialogue);
+  assert.strictEqual(realFailures.length, 1, "反证通过：真实故障与真实命令解法成功提炼 1 条踩坑记录");
+  assert.strictEqual(realFailures[0].component, "missing_dependency", "反证通过：错误类型准确识别为 missing_dependency");
+  assert.ok(realFailures[0].solution.includes("pip install requests"), "反证通过：解法准确包含处置命令 pip install requests");
+  console.log("  ✓ 反证测试通过：真故障与真解法准确提炼，证明功能正常有效运转");
+
+  // 7.4 只提炼本轮增量验证（buildDialogueText 仅取最后一轮用户输入 + 本次回复）
+  console.log("  --> 验证只提炼本轮增量（不扫描历史回合）...");
+  const multiTurnBody = {
+    messages: [
+      { role: "user", content: "第一轮用户输入：讨论昨天的会议" },
+      { role: "assistant", content: "第一轮助手回复：会议纪要如下..." },
+      { role: "user", content: "第二轮用户输入：讨论今天的天气" },
+      { role: "assistant", content: "第二轮助手回复：今天天气晴朗" },
+      { role: "user", content: "第三轮用户输入：请问项目如何激活虚拟环境？" },
+    ],
+  };
+  const currentReply = {
+    choices: [
+      { message: { role: "assistant", content: "请执行 source /var/minis/workspace/.venv/activate 激活 Python 环境。" } },
+    ],
+  };
+
+  const incrementalDialogue = buildDialogueText(multiTurnBody, currentReply);
+  assert.ok(!incrementalDialogue.includes("讨论昨天的会议"), "增量验证通过：历史第 1 轮不出现在提炼文本中");
+  assert.ok(!incrementalDialogue.includes("讨论今天的天气"), "增量验证通过：历史第 2 轮不出现在提炼文本中");
+  assert.ok(incrementalDialogue.includes("请问项目如何激活虚拟环境？"), "增量验证通过：包含最后一轮用户输入");
+  assert.ok(incrementalDialogue.includes("source /var/minis/workspace/.venv/activate"), "增量验证通过：包含本次助手回复");
+  console.log("  ✓ 只提炼本轮增量验证通过：完全杜绝全量历史反复重扫");
+
+  // 7.5 入库全流程与时间戳校验
+  console.log("  --> 验证提炼入库流程与时间戳显式写入...");
+  const harvestResult = await processDialogueAndHarvest(
+    incrementalDialogue,
+    { project: testProject, agent: "quality-agent" },
+    mockDbClient
+  );
+  assert.ok(harvestResult.memoriesSaved > 0, `成功写入记忆: ${harvestResult.memoriesSaved}`);
+
+  const savedList = await mockDbClient.list("memories", { project: testProject });
+  assert.strictEqual(savedList.data.length, 1, "准确存入 1 条记忆");
+  const memRow = savedList.data[0];
+  assert.ok(memRow.created_at, "记忆数据必须显式包含 created_at");
+  assert.ok(memRow.updated_at, "记忆数据必须显式包含 updated_at");
+  assert.strictEqual(typeof memRow.created_at, "string", "created_at 必须为有效字符串时间戳");
+  assert.strictEqual(typeof memRow.updated_at, "string", "updated_at 必须为有效字符串时间戳");
+  console.log("  ✓ 时间戳显式写入校验通过");
+
+  // 清理逻辑 (Cleanup) 与残余数 === 0 断言
+  async function cleanupQualityTest() {
+    for (const m of savedList.data) {
+      await mockDbClient.remove("memories", m.id);
+    }
+    const pits = await mockDbClient.list("pitfalls", { project: testProject });
+    for (const p of pits.data) {
+      await mockDbClient.remove("pitfalls", p.id);
+    }
+  }
+  await cleanupQualityTest();
+
+  const residualMem = await mockDbClient.list("memories", { project: testProject });
+  const residualPit = await mockDbClient.list("pitfalls", { project: testProject });
+  const totalResidue = residualMem.data.length + residualPit.data.length;
+  assert.strictEqual(totalResidue, 0, `测试后数据残余断言失败：预期 0，实得 ${totalResidue}`);
+  console.log(`  - 清理后残余数: ${totalResidue} (断言通过: residue === 0)`);
+  console.log("  ✓ 质量回归测试隔离写入与残余为 0 校验全部通过\n");
+}
+
 console.log("=================================================================");
-console.log("✅ 全部 6 项严谨性与保真度测试 100% 通过！");
+console.log("✅ 全部 7 项严谨性与保真度测试 100% 通过！");
 console.log("=================================================================");

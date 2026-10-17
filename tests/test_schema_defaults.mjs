@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (f) => readFileSync(join(ROOT, f), "utf8");
 
-const FILES = ["tools.js", "harvest.py", "schema.js", "db_tools.js"];
+const FILES = ["tools.js", "harvest.py", "schema.js", "db_tools.js", "gateway_harvest.hooks.js"];
 const SRC = Object.fromEntries(FILES.map((f) => [f, read(f)]));
 
 let failed = 0;

@@ -182,6 +182,8 @@ try {
       ncb_instance: env.instance,
       mcp_key: env.mcpKey,
       ncb_secret: env.secret,
+      _client: env.client,
+      client: env.client,
     });
 
     assert.ok(hub.tool.ncb_check, "hub.tool 缺少 ncb_check 工具");

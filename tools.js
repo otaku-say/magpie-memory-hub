@@ -23,7 +23,7 @@ import { lookupSecret, lookupDatabase } from "./local_state.js";
 import { makeMcpClient } from "./mcp_client.js";
 import { checkLocalModel, MODEL_SPEC, modelDir } from "./model_check.js";
 import { runPendingAction, readAction, writeCardStatus, isModelDownloading, startBackgroundModelDownload } from "./page_actions.js";
-import { harvestGateway } from "./gateway_harvest.js";
+import { harvestGateway, isTestMode } from "./gateway_harvest.js";
 
 const NCB_BASE = "https://api.nocodebackend.com";
 
@@ -222,7 +222,8 @@ async function fetchAll(client, table, params) {
     if (!batch.length) break;
     out.push(...batch);
     const meta = res && res.metadata;
-    if (!meta || !meta.hasMore) break;
+    const hasMore = (meta && typeof meta.hasMore === "boolean") ? meta.hasMore : (batch.length >= FETCH_LIMIT);
+    if (!hasMore) break;
   }
   return out;
 }
@@ -434,7 +435,14 @@ async function memorySearch(client, cfg, args) {
   const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
   const terms = termsOf(args.query);
 
-  const all = await fetchAll(client, "memories", { lifecycle_status: "active" });
+  const fetchParams = { lifecycle_status: "active" };
+  if (args.project) fetchParams.project = String(args.project).trim();
+  if (args.category) fetchParams.category = String(args.category).trim();
+  if (args.scope_level) fetchParams.scope_level = String(args.scope_level).trim();
+  if (args.client) fetchParams.client = String(args.client).trim();
+  if (args.origin) fetchParams.origin = String(args.origin).trim();
+
+  const all = await fetchAll(client, "memories", fetchParams);
   let pool = all;
   if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
   if (args.category) pool = pool.filter((r) => String(r.category || "") === args.category);
@@ -472,7 +480,11 @@ async function memorySearch(client, cfg, args) {
 
 async function memoryList(client, cfg, args) {
   const limit = Math.max(1, Math.min(Number(args.limit) || 20, 100));
-  let all = (await fetchAll(client, "memories", { lifecycle_status: "active" })).filter(
+  const fetchParams = { lifecycle_status: "active" };
+  if (args.project) fetchParams.project = String(args.project).trim();
+  if (args.client) fetchParams.client = String(args.client).trim();
+
+  let all = (await fetchAll(client, "memories", fetchParams)).filter(
     (r) => r.lifecycle_status !== "superseded"
   );
   if (args.project) all = all.filter((r) => String(r.project || "") === String(args.project));
@@ -498,7 +510,10 @@ async function memoryContext(client, cfg, args) {
   const budget = Number(args.max_chars) || cfg.maxBudget;
   const terms = termsOf(args.query);
 
-  let pool = (await fetchAll(client, "memories", { lifecycle_status: "active" })).filter(
+  const fetchParams = { lifecycle_status: "active" };
+  if (args.project) fetchParams.project = String(args.project).trim();
+
+  let pool = (await fetchAll(client, "memories", fetchParams)).filter(
     (r) => r.lifecycle_status !== "superseded"
   );
   if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
@@ -593,7 +608,12 @@ async function pitfallSearch(client, cfg, args) {
   const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
   const terms = termsOf(args.query);
 
-  const all = await fetchAll(client, "pitfalls", {});
+  const fetchParams = {};
+  if (args.project) fetchParams.project = String(args.project).trim();
+  if (args.client) fetchParams.client = String(args.client).trim();
+  if (args.component) fetchParams.component = String(args.component).trim();
+
+  const all = await fetchAll(client, "pitfalls", fetchParams);
   let pool = all;
   if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
   if (args.client) pool = pool.filter((r) => String(r.client || "") === String(args.client));
@@ -656,8 +676,12 @@ async function memoryForget(client, cfg, args) {
       .filter((r) => Number(r.id) === Number(args.id));
   } else if (args.query) {
     const terms = termsOf(args.query);
-    const all = await fetchAll(client, "memories", { lifecycle_status: "active" });
-    targets = all
+    const fetchParams = { lifecycle_status: "active" };
+    if (args.project) fetchParams.project = String(args.project).trim();
+    const all = await fetchAll(client, "memories", fetchParams);
+    let pool = all;
+    if (args.project) pool = pool.filter((r) => String(r.project || "") === String(args.project));
+    targets = pool
       .map((r) => ({ row: r, hit: scoreMemory(r, terms) }))
       .filter((x) => x.hit > 0)
       .sort((a, b) => b.hit - a.hit)
@@ -841,14 +865,14 @@ const TOOLS = {
   },
 
   db_provision: {
-    description: "【一键全自动】只填 MCP key 即可：自动创建记忆库与全部表/字段/索引，并可选自动挂载 R2 存储。会先检查同名数据库——NoCodeBackend 遇到重名会静默加后缀另建一个新库（导致数据被劈开），所以这里强制先查再建：默认 on_exist=reuse 复用已有库（只补结构、不破坏数据），也可选 fail（报错让用户改名）或 auto_rename（允许新建带后缀的库）。数据库由本插件创建时会自动取得并保存其 Secret Key，用户无需手填。",
+    description: "【一键全自动】只填 MCP key 即可：自动创建记忆库与全部表/字段/索引。会先检查同名数据库——NoCodeBackend 遇到重名会静默加后缀另建一个新库（导致数据被劈开），所以这里强制先查再建：默认 on_exist=reuse 复用已有库（只补结构、不破坏数据），也可选 fail（报错让用户改名）或 auto_rename（允许新建带后缀的库）。新建库时会自动保存返回的 Secret Key；复用已有库则无法读取，需手动填写。",
     args: {
       type: "object",
       properties: {
         database: { type: "string", description: "要创建的数据库名（逻辑名即可，NCB 会自动加账号前缀）。默认取设置页的 ncb_instance" },
         on_exist: { type: "string", enum: ["reuse", "auto_rename", "fail"], description: "同名已存在时的策略，默认 reuse" },
         with_r2: { type: "boolean", description: "是否同时挂载 R2 存储，默认 false，需要时才挂" },
-        bucket_name: { type: "string", description: "R2 bucket 名，默认 <数据库名>-storage" },
+        bucket_name: { type: "string", description: "R2 bucket 名，默认与数据库名相同" },
         public_url: { type: "string", description: "R2 公开域名，如 https://cdn.example.com" },
         account_id: { type: "string", description: "Cloudflare 账号 ID（账号已连接过可留空，会自动复用）" },
         access_key_id: { type: "string", description: "Cloudflare R2 Access Key ID（同上可留空）" },
@@ -957,7 +981,7 @@ const TOOLS = {
       type: "object",
       properties: {
         database: { type: "string", description: "数据库实例名，默认取插件配置" },
-        bucket_name: { type: "string", description: "自定义 bucket 名，默认 <数据库名>-storage" },
+        bucket_name: { type: "string", description: "自定义 bucket 名，默认与数据库名相同" },
         public_url: { type: "string", description: "自定义域名或 r2.dev 公开地址" },
       },
     },
@@ -1035,7 +1059,7 @@ const TOOLS = {
 
 export const MagpieMemoryHub = async (input, options) => {
   const cfg = readOptions(options);
-  const client = makeClient(cfg);
+  const client = (options && (options._client || options.client)) || makeClient(cfg);
 
   /* ---- 设置页按钮提交的待办任务 ----
    * 页面无法直接触发宿主动作（Magpie 没有这个通道），只能把「要做什么」
@@ -1059,7 +1083,7 @@ export const MagpieMemoryHub = async (input, options) => {
   /* ---- auto_init 自愈 ----
    * 不 await：初始化可能要一次网络往返，而工具枚举不该为此等待。
    * 宿主进程长驻，这个 promise 会自行跑完。 */
-  if (cfg.autoInit && cfg.mcpKey) {
+  if (cfg.autoInit && cfg.mcpKey && !isTestMode()) {
     dbInit(cfg, {}).catch((e) => {
       console.error("[memory-hub] auto_init 失败：" + String(e && e.message || e));
     });
@@ -1067,8 +1091,9 @@ export const MagpieMemoryHub = async (input, options) => {
 
   /* ---- auto_harvest 自动增量提炼 ----
    * 不 await：增量扫描在后台异步执行，不给常规工具枚举引入网络/磁盘延迟。
-   * 仅在 options.auto_harvest 为 true 时开启，默认 false 以防隐私越界。 */
-  if (cfg.autoHarvest) {
+   * 仅在 options.auto_harvest 为 true 时开启，默认 false 以防隐私越界。
+   * 严禁在测试环境中启动真实增量扫描。 */
+  if (cfg.autoHarvest && !isTestMode()) {
     harvestGateway({}, {
       _client: client,
       _cfg: cfg,
@@ -1088,8 +1113,53 @@ export const MagpieMemoryHub = async (input, options) => {
       execute: async (args, ctx) => {
         const callerAgent = (ctx && ctx.agent) != null ? ctx.agent : "";
         const abortSignal = (ctx && ctx.abort) || null;
+        if (abortSignal && abortSignal.aborted) {
+          const abortErr = new Error("操作已被取消 (aborted)");
+          abortErr.name = "AbortError";
+          throw abortErr;
+        }
         const callCfg = Object.assign({}, cfg, { signal: abortSignal });
-        const callClient = makeClient(callCfg, abortSignal);
+        const baseClient = (options && (options._client || options.client)) || null;
+        let callClient;
+        if (baseClient) {
+          const checkAbort = () => {
+            if (abortSignal && abortSignal.aborted) {
+              const err = new Error("操作已被取消 (aborted)");
+              err.name = "AbortError";
+              throw err;
+            }
+          };
+          const waitWithAbort = (ms) => new Promise((resolve, reject) => {
+            checkAbort();
+            const t = setTimeout(() => {
+              if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
+              resolve();
+            }, ms);
+            const onAbort = () => {
+              clearTimeout(t);
+              const err = new Error("操作已被取消 (aborted)");
+              err.name = "AbortError";
+              reject(err);
+            };
+            if (abortSignal) abortSignal.addEventListener("abort", onAbort, { once: true });
+          });
+
+          callClient = {
+            ...baseClient,
+            create: async (t, d) => { checkAbort(); return await baseClient.create(t, d); },
+            list: async (t, p) => {
+              checkAbort();
+              if (abortSignal) await waitWithAbort(15);
+              checkAbort();
+              return await baseClient.list(t, p);
+            },
+            update: async (t, id, d) => { checkAbort(); return await baseClient.update(t, id, d); },
+            remove: async (t, id) => { checkAbort(); return await baseClient.remove(t, id); },
+            raw: async (sql) => { checkAbort(); return await baseClient.raw(sql); },
+          };
+        } else {
+          callClient = makeClient(callCfg, abortSignal);
+        }
         const result = await def.run(args || {}, {
           _client: callClient,
           _cfg: callCfg,

@@ -297,12 +297,10 @@ async function execute(action, cfg, fs, sp, state) {
   if (action.secret) args.secret = action.secret;
   if (action.op === "reset") args.confirm = action.confirm || "";
   if (action.op === "provision") {
-    // 重名策略等参数随信标一起传进来
+    // 重名策略等参数随信标一起传进来；按要求一键创建数据库绝不默认创建 R2 存储
     if (action.on_exist) args.on_exist = action.on_exist;
-    if (action.with_r2 !== undefined) args.with_r2 = action.with_r2;
-    for (const k of ["bucket_name", "public_url", "account_id", "access_key_id", "secret_access_key", "region"]) {
-      if (action[k]) args[k] = action[k];
-    }
+    args.with_r2 = false;
+    if (action.region) args.region = action.region;
   }
   if (action.op === "storage_setup") {
     // 挂载时把插件里保存的 R2 凭据一并传下去（信标里带的优先）

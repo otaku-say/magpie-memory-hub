@@ -39,6 +39,7 @@ export function readState() {
     const o = JSON.parse(fs.readFileSync(p, "utf8"));
     if (!o || typeof o !== "object") return { secrets: {}, actions: {}, gateway_harvest: {}, _ok: true };
     return {
+      current: typeof o.current === "string" ? o.current : "",
       secrets: o.secrets && typeof o.secrets === "object" ? o.secrets : {},
       actions: o.actions && typeof o.actions === "object" ? o.actions : {},
       gateway_harvest: o.gateway_harvest && typeof o.gateway_harvest === "object" ? o.gateway_harvest : {},
@@ -56,6 +57,7 @@ export function writeState(state) {
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     const out = Object.assign({}, state, {
+      current: typeof state.current === "string" ? state.current : "",
       secrets: state.secrets && typeof state.secrets === "object" ? state.secrets : {},
       actions: state.actions && typeof state.actions === "object" ? state.actions : {},
       gateway_harvest: state.gateway_harvest && typeof state.gateway_harvest === "object" ? state.gateway_harvest : {},
@@ -181,4 +183,34 @@ export function lookupDatabase() {
 export function knownDatabases() {
   const st = readState();
   return Object.keys(st.secrets);
+}
+
+/**
+ * 从逻辑库名解析出真正的远端数据库实例名（带账号前缀，如 41694_agent_memory）。
+ * NCB 的 REST 接口必须使用带账号前缀的真实库名；若传逻辑名会直接返回 403 (Invalid secret_key)。
+ */
+export function lookupRealDatabase(database) {
+  const want = String(database || "").trim();
+  if (!want) return "";
+  if (/^\d+_/.test(want)) return want;
+
+  const st = readState();
+  const secrets = st.secrets && typeof st.secrets === "object" ? st.secrets : {};
+  const names = Object.keys(secrets);
+
+  const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
+  const target = norm(want);
+
+  // ① 从已记录 Secret 的真实库名中反查
+  const hit = names.find((k) => norm(k) === target);
+  if (hit) return hit;
+
+  // ② 从 st.current 比对
+  if (st.current && norm(st.current) === target) return st.current;
+
+  // ③ 唯一真实库兜底
+  if (names.length === 1 && /^\d+_/.test(names[0])) return names[0];
+  if (st.current && /^\d+_/.test(st.current)) return st.current;
+
+  return want;
 }

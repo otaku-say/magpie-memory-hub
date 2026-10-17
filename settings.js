@@ -383,7 +383,7 @@
       var secVal = $("ncb_secret") ? $("ncb_secret").value.trim() : "";
       if (!secVal) {
         html += '<div class="secret-guide-tip">' +
-          '<strong>💡 Secret Key 提示：</strong>当前未在设置页显式填写 Secret Key。R2 的列举与删除需要它；若需获取，请前往 <strong>NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key</strong> 填入（它只在建库时返回一次，插件无法自行取回）。' +
+          '<strong>💡 Secret Key 提示：</strong>当前未在设置页显式填写 Secret Key。Secret Key 只在建库时返回一次，MCP Key 无法读取，插件也无法自行取回；R2 的列举与探针清理需要它。若需获取，请前往 <strong>NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key</strong> 填入。' +
         '</div>';
       }
     }
@@ -639,25 +639,6 @@
 
   /* ---------------- 提交信标 ---------------- */
   function submitAction(op, extra) {
-    if (!window.magpie || !window.magpie.options) {
-      say("桥接未就绪", "bad");
-      paintDbStatus(null, "桥接脚本未加载，无法提交任务", "bad");
-      return;
-    }
-
-    var now = Date.now();
-    if (now - lastSubmitTime < 1000) {
-      var freqMsg = "操作过于频繁，请稍后再试（频控限制 1 秒/次）";
-      say(freqMsg, "warn");
-      paintDbStatus(null, freqMsg, "warn");
-      return;
-    }
-
-    lastSubmitTime = now;
-    setActionButtonsDisabled(true);
-    paintDbStatus(null, "正在提交信标任务…", "");
-    say("正在提交…");
-
     var targetCard = "ncb";
     if (op === "storage_setup" || op === "r2_check" || op === "clean_probe") {
       targetCard = "r2";
@@ -666,6 +647,27 @@
     } else if (op === "harvest_gateway") {
       targetCard = "gateway";
     }
+    var currentContainerId = containerMap[targetCard] || "db_action_status";
+
+    if (!window.magpie || !window.magpie.options) {
+      say("桥接未就绪", "bad");
+      paintDbStatus(null, "桥接脚本未加载，无法提交任务", "bad", currentContainerId);
+      return;
+    }
+
+    var now = Date.now();
+    if (now - lastSubmitTime < 1000) {
+      var freqMsg = "操作过于频繁，请稍后再试（频控限制 1 秒/次）";
+      say(freqMsg, "warn");
+      paintDbStatus(null, freqMsg, "warn", currentContainerId);
+      return;
+    }
+
+    lastSubmitTime = now;
+    setActionButtonsDisabled(true);
+    // 立即向当前点击卡片的状态容器渲染即时等待反馈，消除「点不动/没反应」现象
+    paintDbStatus(null, "正在提交信标任务…", "", currentContainerId);
+    say("正在提交…");
 
     // 全量替换防丢：必须先 get() 获取远端全部 options，再合并写入
     Promise.resolve(window.magpie.options.get()).then(function (remote) {
@@ -683,11 +685,7 @@
 
       if (op === "provision") {
         action.on_exist = ($("on_exist") && $("on_exist").value) || payload.on_exist || "reuse";
-        if (payload.r2_bucket_name) action.bucket_name = payload.r2_bucket_name;
-        if (payload.r2_public_url) action.public_url = payload.r2_public_url;
-        if (payload.r2_account_id) action.account_id = payload.r2_account_id;
-        if (payload.r2_access_key_id) action.access_key_id = payload.r2_access_key_id;
-        if (payload.r2_secret_access_key) action.secret_access_key = payload.r2_secret_access_key;
+        action.with_r2 = false; // 一键创建数据库绝不默认创建 R2 存储（按要求仅在 R2 卡片点挂载时创建）
       } else if (op === "storage_setup") {
         if (payload.r2_bucket_name) action.bucket_name = payload.r2_bucket_name;
         if (payload.r2_public_url) action.public_url = payload.r2_public_url;
@@ -705,7 +703,7 @@
         action.secret_access_key = sk;
         action.bucket_name = bkt;
         action.public_url = pub;
-      } else if (op === "secret_check") {
+      } else if (op === "secret_check" || op === "clean_probe") {
         var sec = payload.ncb_secret || ($("ncb_secret") ? $("ncb_secret").value.trim() : "");
         if (sec) action.secret = sec;
       }
@@ -765,7 +763,7 @@
       var msg = is429
         ? "操作过于频繁，请稍后再试（频控限制 1 秒/次）"
         : ("获取配置失败：" + errStr);
-      paintDbStatus(null, msg, is429 ? "warn" : "bad");
+      paintDbStatus(null, msg, is429 ? "warn" : "bad", currentContainerId);
       say(msg, is429 ? "warn" : "bad");
     });
   }

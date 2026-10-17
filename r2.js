@@ -17,7 +17,7 @@
  *   以真实操作为准给出判定。
  */
 import { NcbMcp } from "./ncb_mcp.js";
-import { lookupSecret } from "./local_state.js";
+import { lookupSecret, lookupRealDatabase, rememberDatabase } from "./local_state.js";
 
 const REST_BASE = "https://api.nocodebackend.com";
 
@@ -48,10 +48,50 @@ function dbOf(cfg, args) {
   return db;
 }
 
+/**
+ * 解析出真实的远端数据库名（带账号前缀，如 41694_agent_memory）。
+ * 依据实测：NCB 的 REST 接口（/files 等）强制要求带账号前缀的真实名，
+ * 逻辑名（agent_memory）一律返回 403 (Invalid secret_key)。
+ * 保证「桶名」「REST 调用的 Instance」「列表/删除时的库名」三者同源。
+ */
+export async function resolveRealDatabase(cfg, name) {
+  const want = String(name || "").trim();
+  if (!want) return "";
+  if (/^\d+_/.test(want)) return want;
+
+  const local = lookupRealDatabase(want);
+  if (local && /^\d+_/.test(local)) return local;
+
+  const mcpKey = (cfg && (cfg.mcpKey || cfg.mcp_key)) || "";
+  if (mcpKey) {
+    try {
+      const mcp = new NcbMcp({ apiKey: mcpKey, signal: (cfg && cfg.signal) || null });
+      const text = await mcp.listDatabasesText();
+      const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
+      const target = norm(want);
+      const lines = String(text || "").split(/\r?\n/);
+      const candidates = [];
+      for (const line of lines) {
+        const m = line.match(/^-\s*([A-Za-z0-9_]+)/);
+        if (m) candidates.push(m[1]);
+      }
+      const hit = candidates.find((c) => norm(c) === target) || (candidates.length === 1 ? candidates[0] : "");
+      if (hit && /^\d+_/.test(hit)) {
+        try { rememberDatabase(hit); } catch (_) {}
+        return hit;
+      }
+    } catch (_) {}
+  }
+
+  return local || want;
+}
+
 /** NoCodeBackend 的 REST 客户端（用数据库 Secret Key 认证）。 */
 function restClient(cfg) {
   const secret = (cfg && (cfg.secret || cfg.ncb_secret)) || "";
-  const instance = (cfg && (cfg.instance || cfg.ncb_instance)) || "";
+  const rawInstance = (cfg && (cfg.instance || cfg.ncb_instance)) || "";
+  // 必须使用真实库名（带账号数字前缀），逻辑名在 REST 侧会直接 403
+  const instance = lookupRealDatabase(rawInstance) || rawInstance;
   if (!secret) {
     const err = new Error(
       "未配置数据库 Secret Key。R2 的「列举 / 删除」走 NoCodeBackend 的 REST，需要 Secret Key；" +
@@ -138,7 +178,8 @@ export async function r2Probe(cfg, database) {
     throw abortErr;
   }
   const mcp = clientOf(cfg);
-  const db = database || dbOf(cfg, {});
+  const rawDb = database || dbOf(cfg, {});
+  const db = await resolveRealDatabase(cfg, rawDb);
   /* 【固定文件名，不要带时间戳】
    * 早先用 "_memhub_probe_" + Date.now() + ".txt"，于是每次检测都新增一个文件。
    * 一旦删除失败（没 secret、key 对不上、权限不足），这些探针就会在 R2 里越堆越多。
@@ -161,13 +202,16 @@ export async function r2Probe(cfg, database) {
       const prefix = (out && (out.prefix || out.path)) ? String(out.prefix || out.path) : "";
       if (prefix) keys.push(prefix.replace(/\/+$/, "") + "/" + name);
       keys.push(name);
-      const hasSecret = !!((cfg && (cfg.secret || cfg.ncb_secret)) || (lookupSecret ? lookupSecret(db) : ""));
+      const capturedSecret = lookupSecret(db) || lookupSecret(rawDb) || "";
+      const secretVal = (cfg && (cfg.secret || cfg.ncb_secret)) || capturedSecret || "";
+      const hasSecret = !!secretVal;
       if (!hasSecret) {
         cleanNote = "探针文件已留在 R2 存储中，因为删除需要数据库 Secret Key，而当前尚未填写（只有 MCP Key 时只能上传）。如需删除探针，请前往 NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key 填入设置页，然后点击「清理探针文件」或调用 storage_delete。";
       } else {
+        const restCfg = Object.assign({}, cfg, { instance: db, secret: secretVal });
         for (const k of keys) {
           try {
-            const r = await rest(cfg, "DELETE", "/files/" + encodeURIComponent(k), {});
+            const r = await rest(restCfg, "DELETE", "/files/" + encodeURIComponent(k), {});
             if (r.status < 400) { cleaned = true; break; }
           } catch (e) {
             if (e.name === "AbortError" || (signal && signal.aborted)) throw e;
@@ -243,7 +287,8 @@ export function explainProbeFailure(err) {
  * ------------------------------------------------------------------ */
 
 export async function r2Setup(cfg, args) {
-  const db = dbOf(cfg, args);
+  const rawDb = dbOf(cfg, args);
+  const db = await resolveRealDatabase(cfg, rawDb);
   const mcp = clientOf(cfg);
   const a = args || {};
 
@@ -255,11 +300,14 @@ export async function r2Setup(cfg, args) {
     if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
     return String((cfg && cfg[k2]) || "").trim();
   };
+  // 用户明确要求：存储桶名称与数据库名称相同（不加 -storage 后缀，与 REST 调用同一源头）
+  const defaultBucket = db;
+  const bucketName = pick("bucket_name", "r2BucketName") || defaultBucket;
   const creds = {
     account_id: pick("account_id", "r2AccountId"),
     access_key_id: pick("access_key_id", "r2AccessKeyId"),
     secret_access_key: pick("secret_access_key", "r2SecretAccessKey"),
-    bucket_name: pick("bucket_name", "r2BucketName"),
+    bucket_name: bucketName,
     public_url: pick("public_url", "r2PublicUrl"),
   };
   const extra = {};
@@ -307,7 +355,8 @@ export async function r2Check(cfg, args) {
   const a = args || {};
   let db = "";
   try {
-    db = dbOf(cfg, a);
+    const rawDb = dbOf(cfg, a);
+    db = await resolveRealDatabase(cfg, rawDb);
   } catch (e) {
     return {
       ok: false,
@@ -328,7 +377,7 @@ export async function r2Check(cfg, args) {
   }
 
   const pick = (kArg, kCfg) => (a[kArg] != null && a[kArg] !== "" ? a[kArg] : (cfg && cfg[kCfg]) || "");
-  const bucketName = pick("bucket_name", "r2BucketName");
+  const bucketName = pick("bucket_name", "r2BucketName") || db;
   const publicUrl = pick("public_url", "r2PublicUrl");
   const hasInputCreds = Boolean(a.account_id || a.access_key_id || a.secret_access_key);
   const hasSavedCreds = Boolean(cfg && (cfg.r2AccountId || cfg.r2AccessKeyId || cfg.r2SecretAccessKey));
@@ -423,7 +472,10 @@ export async function r2Upload(cfg, args) {
  * 注意：这条能力在 Secret Key 的 REST 上，MCP 的 23 个工具里没有。
  */
 export async function r2List(cfg, args) {
-  const { status, body } = await rest(cfg, "GET", "/files", {});
+  const rawDb = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
+  const db = rawDb ? await resolveRealDatabase(cfg, rawDb) : "";
+  const clientCfg = db ? Object.assign({}, cfg, { instance: db }) : cfg;
+  const { status, body } = await rest(clientCfg, "GET", "/files", {});
   if (status >= 400) return { ok: false, error: `HTTP ${status}`, body };
   const files = (body && body.files) || [];
   const limit = Number((args && args.limit) || 100) || 100;
@@ -435,6 +487,9 @@ export async function r2List(cfg, args) {
  * 破坏性操作，需要显式传 confirm="DELETE"。
  */
 export async function r2Delete(cfg, args) {
+  const rawDb = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
+  const db = rawDb ? await resolveRealDatabase(cfg, rawDb) : "";
+  const clientCfg = db ? Object.assign({}, cfg, { instance: db }) : cfg;
   const key = args && (args.key || args.filename);
   if (!key) throw new Error("缺少 key（上传时返回的那个 key，不是完整 URL）");
   if ((args && args.confirm) !== "DELETE") {
@@ -443,7 +498,7 @@ export async function r2Delete(cfg, args) {
       warning: '删除不可恢复。确认请再次调用并传 confirm="DELETE"。',
     };
   }
-  const { status, body } = await rest(cfg, "DELETE", "/files/" + encodeURIComponent(key), {});
+  const { status, body } = await rest(clientCfg, "DELETE", "/files/" + encodeURIComponent(key), {});
   return {
     ok: status < 400 && !(body && body.status === "failed"),
     key, http: status, result: body,
@@ -497,22 +552,23 @@ function utf8ToBase64(s) {
  * 走现有的信标机制，结果写回 R2 卡片。
  */
 export async function cleanProbes(cfg, args) {
-  const db = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
+  const rawDb = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
+  const db = await resolveRealDatabase(cfg, rawDb);
   const manual = String((args && args.secret) || (cfg && (cfg.ncb_secret || cfg.secret)) || "").trim();
-  const captured = db ? lookupSecret(db) : (lookupSecret("") || "");
+  const captured = db ? (lookupSecret(db) || lookupSecret(rawDb)) : (lookupSecret("") || "");
   const secret = manual || captured || "";
 
   if (!secret) {
     return {
       ok: false,
       action: "NO_SECRET",
-      database: db,
+      database: db || rawDb,
       deleted_count: 0,
       title: "未配置 Secret Key，无法清理探针",
       lines: [
-        `目标数据库：${db || "未指定"}`,
-        "探针文件清理走 REST 接口，必须使用数据库 Secret Key",
-        "只有 MCP Key 时只能上传探针，无法扫描或删除 R2 中的残留文件",
+        `目标数据库：${db || rawDb || "未指定"}`,
+        "Secret Key 只在建库时返回一次，MCP Key 无法读取它，插件也拿不到",
+        "探针文件清理走 REST 接口，必须使用数据库 Secret Key（只有 MCP Key 时无法列举或删除）",
         "解决办法：前往 NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key 填入设置页",
         "提示：也可以登录 Cloudflare R2 控制台手动删除带有 _memhub_probe 前缀的文件",
       ],
@@ -528,11 +584,11 @@ export async function cleanProbes(cfg, args) {
     return {
       ok: false,
       action: "ERROR",
-      database: db,
+      database: db || rawDb,
       deleted_count: 0,
       title: "扫描 R2 存储桶失败",
       lines: [
-        `目标数据库：${db || "当前库"}`,
+        `目标数据库：${db || rawDb || "当前库"}`,
         `网络或接口异常：${String((err && err.message) || err).slice(0, 100)}`,
         "无法获取桶内文件列表，清理中止",
       ],
@@ -544,12 +600,14 @@ export async function cleanProbes(cfg, args) {
     return {
       ok: false,
       action: "AUTH_FAILED",
-      database: db,
+      database: db || rawDb,
       deleted_count: 0,
-      title: isAuth ? "Secret Key 无效，无法清理探针" : "列举 R2 存储桶对象失败",
+      title: isAuth ? "Secret Key 无效（被 NCB 拒绝），无法清理探针" : "列举 R2 存储桶对象失败",
       lines: [
-        `目标数据库：${db || "当前库"}`,
-        isAuth ? "Secret Key 鉴权失败：数据库若删除重建过，NCB 会换新密钥" : `错误信息：${String(listRes.error || "").slice(0, 100)}`,
+        `目标数据库：${db || rawDb || "当前库"}`,
+        isAuth
+          ? "Secret Key 鉴权失败（403/401），两个最常见原因：① 误把 MCP Key 当成 Secret Key ② 数据库重建后换了新密钥，当前手里是旧的"
+          : `错误信息：${String(listRes.error || "").slice(0, 100)}`,
         "无法获取桶内文件列表，清理中止",
         "建议去 NoCodeBackend 控制台重新复制 Secret Key 填入设置页，或去 Cloudflare 手动删除",
       ],

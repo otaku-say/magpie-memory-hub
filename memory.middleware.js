@@ -43,6 +43,7 @@ function cleanText(text) {
   s = s.replace(/\[system-reminder\][\s\S]*?\[\/system-reminder\]/gi, "");
   s = s.replace(/\[Persistent Memory Context\][\s\S]*?(?=\n\n|$)/gi, "");
   s = s.replace(/\[Memory Instruction\][\s\S]*?(?=\n\n|$)/gi, "");
+  s = s.replace(/\[Memory Check[^\n\]]*\][\s\S]*?(?=\n\n|$)/gi, "");
   return s.replace(/^\s+|\s+$/g, "");
 }
 

@@ -28,6 +28,7 @@ import {
   mineEnvironmentFacts,
   mineArchitecturalDecisions,
   mineFailures,
+  isTestMode,
 } from "./gateway_harvest.js";
 import { makeMcpClient, buildSelect, buildInsert, sqlValue } from "./mcp_client.js";
 import { lookupSecret, lookupDatabase } from "./local_state.js";
@@ -67,6 +68,49 @@ export function fingerprint(text) {
  * 2. 跨协议对话文本提取
  * ================================================================== */
 
+export function extractLastUserTurn(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m) continue;
+    const role = m.role || "user";
+    if (role === "user") {
+      let text = "";
+      if (typeof m.content === "string") {
+        text = m.content;
+      } else if (Array.isArray(m.content)) {
+        text = m.content
+          .map((p) => {
+            if (!p) return "";
+            if (typeof p === "string") return p;
+            if (p.type === "text" && typeof p.text === "string") return p.text;
+            if (typeof p.content === "string") return p.content;
+            if (Array.isArray(p.content)) {
+              return p.content
+                .map((cp) => (typeof cp === "string" ? cp : (cp && cp.text) || ""))
+                .filter(Boolean)
+                .join("\n");
+            }
+            return "";
+          })
+          .filter(Boolean)
+          .join("\n");
+      }
+      if (text && text.trim()) {
+        return `[user]: ${text.trim()}`;
+      }
+    }
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m && m.role !== "assistant" && m.role !== "model") {
+      const text = typeof m.content === "string" ? m.content : "";
+      if (text.trim()) return `[${m.role || "user"}]: ${text.trim()}`;
+    }
+  }
+  return "";
+}
+
 export function extractTextFromMessages(messages) {
   if (!Array.isArray(messages)) return "";
   const parts = [];
@@ -83,6 +127,12 @@ export function extractTextFromMessages(messages) {
           if (typeof p === "string") return p;
           if (p.type === "text" && typeof p.text === "string") return p.text;
           if (typeof p.content === "string") return p.content;
+          if (Array.isArray(p.content)) {
+            return p.content
+              .map((cp) => (typeof cp === "string" ? cp : (cp && cp.text) || ""))
+              .filter(Boolean)
+              .join("\n");
+          }
           return "";
         })
         .filter(Boolean)
@@ -130,22 +180,39 @@ export function extractTextFromReply(reply) {
   // 3. Gemini generateContent 格式
   if (Array.isArray(reply.candidates) && reply.candidates[0]?.content?.parts) {
     return reply.candidates[0].content.parts
+      .filter((p) => !p?.thought)
       .map((p) => (typeof p === "string" ? p : (p && p.text) || ""))
       .filter(Boolean)
       .join("\n");
   }
 
-  // 4. OpenAI Responses API 格式
+  // 4. OpenAI Responses API 格式 (output[].content[].text, type 为 output_text 或 text)
   if (Array.isArray(reply.output)) {
     const parts = [];
     for (const out of reply.output) {
-      if (Array.isArray(out?.content)) {
+      if (!out) continue;
+      if (typeof out.content === "string" && out.content.trim()) {
+        parts.push(out.content.trim());
+      } else if (Array.isArray(out.content)) {
         for (const item of out.content) {
-          if (item?.type === "text" && typeof item.text === "string") parts.push(item.text);
+          if (!item) continue;
+          if (typeof item === "string" && item.trim()) {
+            parts.push(item.trim());
+          } else if (
+            (item.type === "output_text" || item.type === "text" || !item.type) &&
+            typeof item.text === "string" &&
+            item.text.trim()
+          ) {
+            parts.push(item.text.trim());
+          }
         }
       }
     }
     if (parts.length) return parts.join("\n");
+  }
+
+  if (typeof reply.output_text === "string" && reply.output_text.trim()) {
+    return reply.output_text.trim();
   }
 
   return "";
@@ -153,27 +220,64 @@ export function extractTextFromReply(reply) {
 
 export function buildDialogueText(body, reply) {
   const parts = [];
-  // 请求侧
+  // 请求侧：仅取本轮增量（最后一轮用户输入），绝不反复扫描全部历史对话
   let userText = "";
   if (body) {
     if (Array.isArray(body.messages)) {
-      userText = extractTextFromMessages(body.messages);
+      userText = extractLastUserTurn(body.messages);
     } else if (typeof body.prompt === "string" && body.prompt.trim()) {
       userText = `[user]: ${body.prompt.trim()}`;
     } else if (Array.isArray(body.contents)) {
-      // Gemini contents
-      const geminiParts = [];
-      for (const c of body.contents) {
-        const role = c.role === "model" ? "assistant" : "user";
-        const t = (c.parts || []).map((p) => p.text || "").join("\n").trim();
-        if (t) geminiParts.push(`[${role}]: ${t}`);
+      // Gemini contents：仅取最后一轮非 model 的 user 内容
+      for (let i = body.contents.length - 1; i >= 0; i--) {
+        const c = body.contents[i];
+        if (!c) continue;
+        if (c.role !== "model") {
+          const t = (c.parts || [])
+            .filter((p) => !p?.thought)
+            .map((p) => (typeof p === "string" ? p : (p && p.text) || ""))
+            .filter(Boolean)
+            .join("\n")
+            .trim();
+          if (t) {
+            userText = `[user]: ${t}`;
+            break;
+          }
+        }
       }
-      userText = geminiParts.join("\n");
+    } else if (body.input !== undefined) {
+      // Responses API: body.input 可以是纯字符串，也可以是数组
+      if (typeof body.input === "string" && body.input.trim()) {
+        userText = `[user]: ${body.input.trim()}`;
+      } else if (Array.isArray(body.input)) {
+        for (let i = body.input.length - 1; i >= 0; i--) {
+          const it = body.input[i];
+          if (!it) continue;
+          const role = it.role || (it.type === "function_call_output" ? "tool" : "user");
+          if (role === "user") {
+            let t = "";
+            if (typeof it.content === "string") {
+              t = it.content;
+            } else if (Array.isArray(it.content)) {
+              t = it.content
+                .map((cp) => (typeof cp === "string" ? cp : (cp && cp.text) || ""))
+                .filter(Boolean)
+                .join("\n");
+            } else if (typeof it.output === "string") {
+              t = it.output;
+            }
+            if (t && t.trim()) {
+              userText = `[user]: ${t.trim()}`;
+              break;
+            }
+          }
+        }
+      }
     }
   }
   if (userText) parts.push(userText);
 
-  // 响应侧
+  // 响应侧：本次模型生成的最新回复
   const assistantText = extractTextFromReply(reply);
   if (assistantText && assistantText.trim()) {
     parts.push(`[assistant]: ${assistantText.trim()}`);
@@ -193,6 +297,11 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
 
   const project = String(meta.project || "global").trim();
   const agent = String(meta.agent || "gateway").trim();
+
+  // 严禁在测试环境中向 global 真实写入
+  if (project === "global" && isTestMode()) {
+    return { memoriesSaved: 0, pitfallsSaved: 0, skipped: true, reason: "test environment blocked global write" };
+  }
 
   // 规则启发式提炼
   const facts = mineEnvironmentFacts(dialogueText);
@@ -214,11 +323,13 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
 
     if (client) {
       try {
-        // 查重
-        const existing = await client.list("memories", { project, limit: 100 });
-        const isDupe = (existing.data || []).some(
-          (r) => r.content_fingerprint === fp
-        );
+        // 查重：按 content_fingerprint 精确索引查询，彻底根治超过 100 条分页截断导致的失效
+        const existing = await client.list("memories", {
+          project,
+          content_fingerprint: fp,
+          limit: 1,
+        });
+        const isDupe = Array.isArray(existing?.data) && existing.data.length > 0;
         if (isDupe) {
           markRecent("m:" + fp);
           continue;
@@ -242,6 +353,8 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
           superseded_by_id: null,
           revision: 1,
           retrieval_count: 0,
+          created_at: now,
+          updated_at: now,
           invalid_at: null,
           invalid_reason: "",
           expires_at: null,
@@ -269,10 +382,13 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
 
     if (client) {
       try {
-        const existing = await client.list("pitfalls", { project, limit: 100 });
-        const isDupe = (existing.data || []).some(
-          (r) => r.content_fingerprint === fp
-        );
+        // 查重：按 content_fingerprint 精确索引查询，彻底根治超过 100 条分页截断导致的失效
+        const existing = await client.list("pitfalls", {
+          project,
+          content_fingerprint: fp,
+          limit: 1,
+        });
+        const isDupe = Array.isArray(existing?.data) && existing.data.length > 0;
         if (isDupe) {
           markRecent("p:" + fp);
           continue;
@@ -291,6 +407,8 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
           tags: item.tags || "auto-harvest,gateway",
           content_fingerprint: fp,
           recurrence: 1,
+          created_at: now,
+          updated_at: now,
           invalid_at: null,
           invalid_reason: "",
           last_occurred_at: now,
@@ -332,6 +450,7 @@ export async function onRequest(body, ctx) {
     ctx.state.origin = ctx.origin || "";
     ctx.state.model = ctx.model || "";
     ctx.state.startTime = Date.now();
+    ctx.state.requestBody = body;
 
     // 绝不修改原始请求体
     return undefined;
@@ -350,6 +469,11 @@ export async function onResponse(reply, ctx) {
     const opts = (ctx && ctx.options) || {};
     // 默认关闭校验
     if (opts.auto_harvest !== true) {
+      return;
+    }
+
+    // 严禁在测试环境或非生产跑批中触发写库
+    if (isTestMode()) {
       return;
     }
 

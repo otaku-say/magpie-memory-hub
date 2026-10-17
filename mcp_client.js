@@ -169,10 +169,21 @@ export function makeMcpClient(cfg, signal) {
   }
 
   return {
-    // 与 REST 版 list 的返回形状对齐：{ data: [...] }
+    // 与 REST 版 list 的返回形状对齐：{ data: [...], metadata: { hasMore, page, limit } }
     list: async (table, params) => {
+      const p = params || {};
+      const limRaw = String(p.limit == null ? "" : p.limit).trim();
+      const limit = /^\d+$/.test(limRaw) && Number(limRaw) > 0 ? Math.floor(Number(limRaw)) : 200;
       const r = await run(buildSelect(table, params));
-      return { data: Array.isArray(r.rows) ? r.rows : [] };
+      const rows = Array.isArray(r.rows) ? r.rows : [];
+      return {
+        data: rows,
+        metadata: {
+          hasMore: rows.length >= limit,
+          page: Number(p.page) || 1,
+          limit,
+        },
+      };
     },
     create: async (table, data) => {
       const r = await run(buildInsert(table, data));

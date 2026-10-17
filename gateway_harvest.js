@@ -137,9 +137,57 @@ function sig(s) {
     .slice(0, 200);
 }
 
+/** 剥离 Markdown 代码块（``` 与 ~~~ 围栏） */
+export function stripCodeBlocks(text) {
+  if (!text) return "";
+  return String(text)
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/~~~[\s\S]*?~~~/g, "");
+}
+
+/** 剥离行内代码 `...`（用于检测关键字是否仅处于源码引用中） */
+export function stripInlineCode(text) {
+  if (!text) return "";
+  return String(text).replace(/`[^`\r\n]+`/g, "");
+}
+
 function cleanDialogueText(text) {
   if (!text) return "";
-  return String(text).replace(/\x1b\[[0-9;]*m/g, "").trim();
+  const noAnsi = String(text).replace(/\x1b\[[0-9;]*m/g, "");
+  // 抽取前先去掉 Markdown 代码块围栏，避免源码被当成日志/故障
+  return stripCodeBlocks(noAnsi).trim();
+}
+
+/** 判定是否为源码语法行、配置行或属性行噪音 */
+function isCodeOrSyntaxNoise(line) {
+  const s = String(line || "").trim();
+  if (!s) return true;
+  // 正则定义行，如 /.../i, 或 /\b(?:ERROR...)/
+  if (/(?:^\/|\/[gimsuy]*\s*,?$)/.test(s) && (s.includes("\\b") || s.includes("(?i)"))) return true;
+  // 编程语言语句或声明
+  if (/^(?:const|let|var|function|return|import|export|class|def|fn|struct|interface|type)\b/.test(s)) return true;
+  // Git diff 行，如 - var done: bool = false; 或 + var done: ...
+  if (/^[+-]\s*(?:var|const|let|function|return|if|else|bool|int|string)\b/.test(s)) return true;
+  // JSON/JS 属性键值行，如 "symptom": "...", 或 "solution": "..."
+  if (/^["']?[\w.-]+["']?\s*:\s*["'<]/.test(s)) return true;
+  // 结尾为分号的代码行且包含等号或函数调用
+  if (/;\s*$/.test(s) && (s.includes("=") || s.includes("(") || s.includes("{"))) return true;
+  return false;
+}
+
+// 处置动作命令特征（高置信度操作指令）
+const ACTION_CMD_RE = /(?:^|[;&|`\s])(?:sudo\s+)?(?:apt|apt-get|npm|npx|pnpm|yarn|pip|pip3|python3?|uv|cargo|gem|brew|git|export|source|\.|mv|cp|rm|mkdir|chmod|chown|systemctl|service|curl|wget|docker|kill|killall)\s+[^\n]{2,120}/i;
+
+// 明确自然语言修复/处置动作语义
+const FIX_DESC_RE = /(?:(?:建议|请|必须|统一|改用|已)?(?:通过|采用|使用|执行|运行|改用|安装|配置|调整|更新|升级|修复|修改|重新)\s*[^\n]{2,80}?(?:解决|修复|搞定|奏效|恢复|生效|成功|pass)|(?:解决(?:方法|方案|办法)?|修复(?:方法|方案|办法)?|处置(?:方法|方案)?|应对措施|workaround)[：:\s]+[^\n]{3,120}|(?:已|后续)?(?:通过|改用|切换到|重新安装|修复为|添加|配置)\s*[^\n]{3,120}|(?:fix(?:ed)?|solution|resolved?)\s*(?:by|via|with|using|to)?[：:\s]+[^\n]{3,120})/i;
+
+function isPureStatusOrNoise(line) {
+  const s = String(line || "").trim();
+  if (isCodeOrSyntaxNoise(s)) return true;
+  // 纯退出码或测试通过计数行
+  if (/^(?:exit code\s*0|\d+\s+passed|success|ok|passed|done|green)[.!]?$/i.test(s)) return true;
+  if (/^\d+\s+passed\s+in\s+[\d.]+s/i.test(s)) return true;
+  return false;
 }
 
 function isDialogueNoise(text) {
@@ -163,14 +211,31 @@ function isValidMemoryCandidate(cand) {
 
 /** 失败学习：提取「失败现象 → 后续奏效解法」配对 */
 export function mineFailures(text) {
-  const lines = String(text || "").split(/\r?\n/);
+  const cleaned = cleanDialogueText(text);
+  if (isDialogueNoise(cleaned)) return [];
+
+  const rawLines = cleaned.split(/\r?\n/);
   const fails = [];
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i].trim();
+    if (!line || line.length < 5) continue;
+    if (isCodeOrSyntaxNoise(line)) continue;
+
+    // 剔除行内 code 后若不再匹配，说明关键字完全在行内代码中（例如 `fail(error.AccessDenied)`）
+    const lineWithoutInline = stripInlineCode(line).trim();
+
     for (const pat of FAIL_PATTERNS) {
       const m = pat.exec(line);
       if (m) {
+        // 如果去除行内代码后不再匹配，且原匹配含代码特征（括号、点号等），判定为源码引用，剔除
+        if (!pat.test(lineWithoutInline) && (m[0].includes("(") || m[0].includes(")") || m[0].includes("."))) {
+          continue;
+        }
+        // 排除代码函数调用 fail(
+        if (/\bfail\s*\(/i.test(line)) {
+          continue;
+        }
         fails.push({ at: i, raw: m[0], symptom: sig(m[0]) });
         break;
       }
@@ -181,20 +246,38 @@ export function mineFailures(text) {
   const seen = new Set();
 
   for (const f of fails) {
-    const window = lines.slice(f.at + 1, f.at + 60);
-    let okLine = null;
+    const window = rawLines.slice(f.at + 1, f.at + 60);
+
+    // 首先检查后续窗口中是否有成功/解决的确认信号
+    let hasOkSignal = false;
     for (const l of window) {
       for (const pat of OK_PATTERNS) {
         if (pat.test(l)) {
-          okLine = l.trim();
+          hasOkSignal = true;
           break;
         }
       }
-      if (okLine) break;
+      if (hasOkSignal) break;
     }
-    if (!okLine) continue;
 
-    const solution = sig(okLine);
+    // 寻找真正的处置动作或解法说明（宁可不报，也不要报错）
+    let solutionLine = null;
+    for (const l of window) {
+      const trimmed = l.trim();
+      if (!trimmed || isPureStatusOrNoise(trimmed)) continue;
+      if (ACTION_CMD_RE.test(trimmed) || FIX_DESC_RE.test(trimmed)) {
+        solutionLine = trimmed;
+        break;
+      }
+    }
+
+    // 如果未找到明确解法行，或未确认后续成功/解决，放弃收录
+    if (!solutionLine) continue;
+    if (!hasOkSignal && !/(?:解决|修复|搞定|奏效|恢复|生效|成功|fixed|resolved)/i.test(solutionLine)) {
+      continue;
+    }
+
+    const solution = sig(solutionLine);
     const key = f.symptom + "|||" + solution;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -223,12 +306,34 @@ export function mineFailures(text) {
       root_cause: `执行过程中出现 ${f.symptom}，后续通过调整成功解决`,
       solution,
       error_type: etype,
-      severity: "medium",
+      severity: (etype === "missing_dependency" || etype === "port_conflict") ? "high" : "medium",
       tags: `auto-harvest,gateway,${etype}`,
     });
   }
 
   return out;
+}
+
+export function isLikelyFilePath(p) {
+  const s = String(p || "").trim();
+  // 必须含有路径分隔符 / 或 \
+  if (!/[/\\]/.test(s)) return false;
+  // 严禁匹配 JS 属性链，如 Object.prototype.hasOwnProperty.call
+  if (/^[a-zA-Z_$][a-zA-Z0-9_$]*(?:\.[a-zA-Z_$][a-zA-Z0-9_$]*)+$/.test(s)) return false;
+  if (/(?:prototype|hasOwnProperty|constructor|__proto__|Object|Function|Array)\b/.test(s)) return false;
+  return true;
+}
+
+export function isLikelyFilePathOrName(p) {
+  const s = String(p || "").trim();
+  if (/[/\\]/.test(s)) {
+    return isLikelyFilePath(s);
+  }
+  // 纯文件名（如 GLOBAL.md 或 settings.html）
+  // 严禁包含 2 个以上点号且无斜杠的属性链（如 a.b.c）
+  if (/^[a-zA-Z_$][a-zA-Z0-9_$]*(?:\.[a-zA-Z_$][a-zA-Z0-9_$]*){2,}$/.test(s)) return false;
+  if (/(?:prototype|hasOwnProperty|constructor|__proto__|Object|Function|Array)\b/.test(s)) return false;
+  return /^[a-zA-Z0-9_.~-]+\.[a-zA-Z0-9_-]+$/.test(s);
 }
 
 /** 环境事实提取 */
@@ -274,30 +379,54 @@ export function mineEnvironmentFacts(text) {
   }
 
   // 3. 环境执行工具规范（如 uv run python vs python3 / pnpm vs npm）
-  const toolNormRe = /(?:建议|请|必须|统一|改用|推荐|需要)?(?:使用|采用|运行|执行)\s*[`'"]?([a-zA-Z0-9_.-]+(?:\s+[a-zA-Z0-9_.-]+)*)[`'"]?\s*(?:执行|运行|来跑|再)?\s*(?:而不是|而非|不用|不要用|代替)\s*[`'"]?([a-zA-Z0-9_.-]+(?:\s+[a-zA-Z0-9_.-]+)*)[`'"]?/gi;
-  let tnMatch;
-  while ((tnMatch = toolNormRe.exec(cleaned)) !== null) {
-    const preferred = tnMatch[1].trim();
-    const avoid = tnMatch[2].trim();
-    if (preferred && avoid && preferred !== avoid && !GENERIC_PRONOUNS.has(preferred.toLowerCase()) && !GENERIC_PRONOUNS.has(avoid.toLowerCase())) {
-      results.push({
-        category: "fact",
-        scope_level: "project",
-        title: `工具规范: ${preferred} 代替 ${avoid}`,
-        content: `环境规范：优先使用 \`${preferred}\`，避免使用 \`${avoid}\`。`,
-        tags: "environment,tooling",
-        confidence: 0.85,
-      });
+  const toolPatterns = [
+    // 模式 A: 先否定后肯定（如：不要使用 npm，必须统一使用 pnpm）
+    {
+      re: /(?:不要|禁止|避免|切勿|别)(?:直接)?(?:使用|运行|用|调用)\s*[`'"]?([a-zA-Z0-9_.-]+(?:\s+[a-zA-Z0-9_.-]+)*)[`'"]?[，,]\s*(?:必须|请|统一|改用|需|要|应|建议)*\s*(?:使用|改用|通过|用|采用)\s*[`'"]?([a-zA-Z0-9_.-]+(?:\s+[a-zA-Z0-9_.-]+)*)[`'"]?/gi,
+      dir: "avoid_first",
+    },
+    // 模式 B: 先肯定后否定（如：环境要求必须使用 uv run python 执行，而不是 python3）
+    {
+      re: /(?:环境要求|必须|请|统一|要求|规范)[\s：:]*(?:必须|请|统一|要|需)?\s*(?:使用|通过|用|采用)\s*[`'"]?([a-zA-Z0-9_.-]+(?:\s+[a-zA-Z0-9_.-]+)*)[`'"]?[^\n]{0,14}?(?:代替|替代|而非|而不是|不要用|不用|别用)(?:[\s，,。.]|(?:直接|再|去|手动|单独|只|统统|一律))*\s*[`'"]?([a-zA-Z0-9_.-]+(?:\s+[a-zA-Z0-9_.-]+)*)[`'"]?/gi,
+      dir: "prefer_first",
+    },
+    // 宽松兜底
+    {
+      re: /(?:建议|请|必须|统一|改用|推荐|需要)?(?:使用|采用|运行|执行)\s*[`'"]?([a-zA-Z0-9_.-]+(?:\s+[a-zA-Z0-9_.-]+)*)[`'"]?\s*(?:执行|运行|来跑|再)?\s*(?:而不是|而非|不用|不要用|代替)\s*[`'"]?([a-zA-Z0-9_.-]+(?:\s+[a-zA-Z0-9_.-]+)*)[`'"]?/gi,
+      dir: "prefer_first",
+    },
+  ];
+
+  for (const { re, dir } of toolPatterns) {
+    let tnMatch;
+    while ((tnMatch = re.exec(cleaned)) !== null) {
+      const g1 = tnMatch[1].trim();
+      const g2 = tnMatch[2].trim();
+      const preferred = dir === "avoid_first" ? g2 : g1;
+      const avoid = dir === "avoid_first" ? g1 : g2;
+      if (preferred && avoid && preferred !== avoid && !GENERIC_PRONOUNS.has(preferred.toLowerCase()) && !GENERIC_PRONOUNS.has(avoid.toLowerCase())) {
+        results.push({
+          category: "fact",
+          scope_level: "project",
+          title: `工具规范: ${preferred} 代替 ${avoid}`,
+          content: `环境规范：优先使用 \`${preferred}\`，避免使用 \`${avoid}\`。`,
+          tags: "environment,tooling,toolchain",
+          confidence: 0.85,
+        });
+      }
     }
   }
 
-  // 4. 路径纠错
+  // 4. 路径纠错（严格排除 JS 属性链如 Object.prototype.hasOwnProperty.call）
   const pathRe = /(?:文件|路径)?\s*[`'"]?([~/\w.-]+\.[a-zA-Z0-9]+)[`'"]?\s*(?:不存在|未找到|not found|does not exist).*?(?:正确路径(?:为|是)?|实际路径(?:为|是)?|应为|修正为|改用|迁移到)\s*[`'"]?([~/\w.-]+\.[a-zA-Z0-9]+)[`'"]?/gis;
   let pMatch;
   while ((pMatch = pathRe.exec(cleaned)) !== null) {
     const errP = pMatch[1].trim();
     const okP = pMatch[2].trim();
     if (errP && okP && errP !== okP) {
+      if (!isLikelyFilePath(okP) || !isLikelyFilePathOrName(errP)) {
+        continue;
+      }
       const base = path.basename(okP.replace(/\\/g, "/"));
       results.push({
         category: "fact",
@@ -543,6 +672,17 @@ function turnFingerprint(turn) {
  * @param {object} args 参数（支持 dir, force_rescan）
  * @param {object} context 宿主上下文（包含 client, cfg, saveMemory, pitfallSave, signal 等）
  */
+export function isTestMode() {
+  if (process.env.NODE_ENV === "test" || process.env.MAGPIE_TEST === "1") return true;
+  if (typeof process !== "undefined" && Array.isArray(process.argv)) {
+    const entry = String(process.argv[1] || "");
+    if (entry.includes("/tests/") || entry.includes("\\tests\\") || entry.includes("test_") || entry.endsWith(".test.mjs") || entry.endsWith(".test.js")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function harvestGateway(args, context) {
   const options = args || {};
   const ctx = context || {};
@@ -555,6 +695,9 @@ export async function harvestGateway(args, context) {
   const convDir = resolveGatewayDir(options.dir || cfg.gatewayConvDir);
 
   const targetProject = String(options.project || (cfg && cfg.project) || "global").trim();
+  if (targetProject === "global" && isTestMode()) {
+    throw new Error("[SECURITY_BLOCKED] 测试环境下严禁向 global 命名空间执行提炼写入！必须指定隔离的 project");
+  }
 
   // 1. 检查录制目录是否存在
   let dirExists = false;

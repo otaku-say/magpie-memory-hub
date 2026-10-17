@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert";
-import { downloadModel, computeSha256, MODEL_SPEC, checkLocalModel, modelDir } from "../model_check.js";
+import { downloadModel, downloadSingleFile, computeSha256, MODEL_SPEC, checkLocalModel, modelDir } from "../model_check.js";
 
 console.log("==================================================================");
 console.log("【测试场景 A】断点续传验证（模拟下载中途中断后继续下载）");
@@ -11,30 +11,30 @@ console.log("=================================================================="
   fs.rmSync(resumeDir, { recursive: true, force: true });
   fs.mkdirSync(resumeDir, { recursive: true });
 
-  // 复制已就绪的其它文件，确保测试只聚焦 tokenizer_config.json
+  // 复制已就绪的其它文件，确保测试只聚焦 vocab.txt
   const baseDir = modelDir();
   for (const name of Object.keys(MODEL_SPEC.files)) {
-    if (name !== "tokenizer_config.json" && fs.existsSync(path.join(baseDir, name))) {
+    if (name !== "vocab.txt" && fs.existsSync(path.join(baseDir, name))) {
       fs.copyFileSync(path.join(baseDir, name), path.join(resumeDir, name));
     }
   }
 
-  // 1. 先通过 curl 下载 tokenizer_config.json 的前 500 字节，命名为 tokenizer_config.json.tmp 模拟中途中断
-  const tmpFile = path.join(resumeDir, "tokenizer_config.json.tmp");
-  const targetFile = path.join(resumeDir, "tokenizer_config.json");
-  const partialUrl = `https://hf-mirror.com/${MODEL_SPEC.repo}/resolve/main/tokenizer_config.json`;
+  // 1. 先通过 curl 下载 vocab.txt 的前 500 字节，命名为 vocab.txt.tmp 模拟中途中断
+  const tmpFile = path.join(resumeDir, "vocab.txt.tmp");
+  const targetFile = path.join(resumeDir, "vocab.txt");
+  const partialUrl = `https://hf-mirror.com/${MODEL_SPEC.repo}/resolve/main/vocab.txt`;
   
   console.log("正在拉取前 500 字节模拟被中断的 .tmp 文件…");
   const pRes = await fetch(partialUrl, { headers: { Range: "bytes=0-499" } });
   const pBuf = Buffer.from(await pRes.arrayBuffer());
   fs.writeFileSync(tmpFile, pBuf);
-  console.log(`已创建中断现场: ${tmpFile}，当前大小: ${fs.statSync(tmpFile).size} 字节（期望总大小: ${MODEL_SPEC.files["tokenizer_config.json"].size} 字节）`);
+  console.log(`已创建中断现场: ${tmpFile}，当前大小: ${fs.statSync(tmpFile).size} 字节（期望总大小: ${MODEL_SPEC.files["vocab.txt"].size} 字节）`);
 
   // 2. 触发下载，观察是否从 500 字节开始继续下载
   let resumeStartedAt = -1;
   const progressLogs = [];
   await downloadModel({}, { dir: resumeDir }, (p) => {
-    if (p.file === "tokenizer_config.json") {
+    if (p.file === "vocab.txt") {
       if (resumeStartedAt === -1 && p.done_bytes > 0) {
         resumeStartedAt = p.done_bytes;
       }
@@ -47,12 +47,12 @@ console.log("=================================================================="
   console.log("断点续传进度轨迹 (采样):");
   progressLogs.forEach(l => console.log(l));
 
-  assert.ok(fs.existsSync(targetFile), "正式文件 tokenizer_config.json 必须存在");
-  assert.ok(!fs.existsSync(tmpFile), "临时文件 tokenizer_config.json.tmp 必须已原子替换");
+  assert.ok(fs.existsSync(targetFile), "正式文件 vocab.txt 必须存在");
+  assert.ok(!fs.existsSync(tmpFile), "临时文件 vocab.txt.tmp 必须已原子替换");
   const finalSize = fs.statSync(targetFile).size;
-  assert.strictEqual(finalSize, MODEL_SPEC.files["tokenizer_config.json"].size, "最终文件大小必须严格一致");
+  assert.strictEqual(finalSize, MODEL_SPEC.files["vocab.txt"].size, "最终文件大小必须严格一致");
   const finalSha = await computeSha256(targetFile);
-  assert.strictEqual(finalSha, MODEL_SPEC.files["tokenizer_config.json"].sha256, "最终文件 sha256 必须严格匹配");
+  assert.strictEqual(finalSha, MODEL_SPEC.files["vocab.txt"].sha256, "最终文件 sha256 必须严格匹配");
 
   console.log(`✓ 验证通过：断点续传成功，起始续传字节=${resumeStartedAt}，最终 SHA-256=${finalSha}\n`);
 }
@@ -78,15 +78,23 @@ console.log("=================================================================="
   const oldConfigContent = '{"valid_existing_model": true}';
   fs.writeFileSync(existingConfig, oldConfigContent);
 
-  // 写入一个大小刚好匹配但内容全是垃圾字符的 config.json.tmp
+  // 模拟防投毒场景：传入被投毒/不匹配的预期哈希，验证下载完成后是否能精准拦截并拒绝
+  const poisonedSha = "0000000000000000000000000000000000000000000000000000000000000000";
   const tamperedTmp = path.join(tamperDir, "config.json.tmp");
-  const junkBuf = Buffer.alloc(MODEL_SPEC.files["config.json"].size, 0x41); // 全是 'A'
-  fs.writeFileSync(tamperedTmp, junkBuf);
-  console.log(`已构造被篡改的 .tmp 文件: 大小=${junkBuf.length}字节，但全是伪造数据`);
+  console.log(`模拟防投毒校验：预期哈希=${poisonedSha}（故意注入假哈希模拟镜像源内容被篡改）`);
 
   let errorCaught = null;
   try {
-    await downloadModel({}, { dir: tamperDir });
+    const fileUrl = `https://hf-mirror.com/${MODEL_SPEC.repo}/resolve/main/config.json`;
+    await downloadSingleFile(
+      fileUrl,
+      tamperedTmp,
+      existingConfig,
+      MODEL_SPEC.files["config.json"].size,
+      poisonedSha,
+      () => {},
+      "hf-mirror"
+    );
   } catch (err) {
     errorCaught = err;
   }

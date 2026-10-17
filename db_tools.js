@@ -12,8 +12,8 @@ import {
   detectDrift, buildStatements, buildDropStatements, describePlan,
   versionUpsertSQL, SCHEMA_VERSION, TABLES, META_TABLE, VERSION_KEY, toNcbTables,
 } from "./schema.js";
-import { rememberSecret, lookupSecret, rememberDatabase, knownDatabases } from "./local_state.js";
-import { r2Setup, r2Upload, r2Guide } from "./r2.js";
+import { rememberSecret, lookupSecret, rememberDatabase, knownDatabases, lookupRealDatabase } from "./local_state.js";
+import { r2Setup, r2Upload, r2Guide, resolveRealDatabase } from "./r2.js";
 
 /** 清库需要显式确认串，避免 agent 误触。 */
 export const RESET_CONFIRM = "RESET";
@@ -316,7 +316,10 @@ export async function dbProvision(cfg, args) {
       created = true;
       actual = extractInstance(r, "") || want;
       const sec = extractSecret(r);
-      if (sec) { secretCaptured = rememberSecret(actual, sec); }
+      if (sec) {
+        secretCaptured = rememberSecret(actual, sec);
+        notes.push("已自动保存建库时返回的新 Secret Key（无需手动填写）。");
+      }
       notes.push("名为 " + found + " 的库已存在；按 auto_rename 策略新建了 " + actual +
         "（注意：这会是一个**独立的空库**，与原库数据不相通）。");
     }
@@ -325,7 +328,10 @@ export async function dbProvision(cfg, args) {
     created = true;
     actual = extractInstance(r, "") || full;
     const sec = extractSecret(r);
-    if (sec) { secretCaptured = rememberSecret(actual, sec); }
+    if (sec) {
+      secretCaptured = rememberSecret(actual, sec);
+      notes.push("已自动保存建库时返回的新 Secret Key（无需手动填写）。");
+    }
     if (actual !== full) {
       notes.push("请求的库名是 " + full + "，NCB 实际建成了 " + actual + "（已按实际名字继续）。");
     }
@@ -588,29 +594,55 @@ export async function ncbCheck(cfg, args) {
  * secret_check —— 检测数据库 Secret Key 是否有效（只读验证，不上传文件）
  * ------------------------------------------------------------------ */
 export async function secretCheck(cfg, args) {
-  const db = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
+  const rawDb = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
+  // 关键：必须解析成 NCB 要求的真实库名（带账号数字前缀，如 41694_agent_memory）
+  // 传逻辑名会直接被 NCB 报 403 (Invalid secret_key)
+  const db = await resolveRealDatabase(cfg, rawDb);
   const manual = String((args && args.secret) || (cfg && (cfg.ncb_secret || cfg.secret)) || "").trim();
-  const captured = db ? lookupSecret(db) : (lookupSecret("") || "");
+  const captured = db ? (lookupSecret(db) || lookupSecret(rawDb)) : (lookupSecret("") || "");
   const secretToUse = manual || captured || "";
   const source = manual ? "手动填写" : (captured ? "自动捕获" : "未提供");
 
+  // 分支 1：未填且无可用捕获值
   if (!secretToUse) {
     return {
       ok: false,
       verdict: "EMPTY",
       source: "未提供",
-      database: db,
+      database: db || rawDb,
       title: "未填写 Secret Key",
       lines: [
         "未检测到数据库 Secret Key（设置页未填写，本地也无自动捕获记录）",
-        "作用说明：R2 存储的列举与清理需要 Secret Key；记忆读写不受影响",
-        "获取途径：前往 NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key 填入",
-        "提示：Secret Key 仅在建库时返回一次，插件无法自行从远端取回",
+        "Secret Key 只在建库时返回一次，MCP Key 无法读取它，插件也拿不到 —— 必须手动去 NoCodeBackend 控制台复制",
+        "获取途径：打开 NoCodeBackend 控制台 → 找到该数据库 → 复制 Secret Key 填入",
+        "自救路径：如无法找回旧密钥，可点击「一键创建数据库」并选择新建（auto_rename 策略）来获得一把新密钥",
       ],
     };
   }
 
-  const url = "https://api.nocodebackend.com/files?Instance=" + encodeURIComponent(db || "");
+  // 分支 2：格式明显不对（如含空格、长度过短、或者误填了 mcp_ key）
+  const isMcpKey = secretToUse.startsWith("mcp_") || secretToUse.startsWith("mcp_sec_");
+  const hasWhitespace = /\s/.test(secretToUse);
+  const isTooShort = secretToUse.length < 16;
+  if (isMcpKey || hasWhitespace || isTooShort) {
+    return {
+      ok: false,
+      verdict: "MALFORMED",
+      source,
+      database: db || rawDb,
+      title: "Secret Key 格式明显不对",
+      lines: [
+        `目标数据库：${db || rawDb}（来源：${source}）`,
+        isMcpKey
+          ? "格式错误：当前填入的是 MCP Key（账号级），并非数据库 Secret Key（库级）"
+          : (hasWhitespace ? "格式错误：密钥中包含空格或换行，请检查并清除空白字符" : "格式错误：密钥长度过短，可能复制不完整"),
+        "提示：Secret Key 仅在建库时返回一次，用于 REST 接口鉴权",
+        "解决办法：前往 NoCodeBackend 控制台 → 该数据库 → 重新复制完整的 Secret Key",
+      ],
+    };
+  }
+
+  const url = "https://api.nocodebackend.com/files?Instance=" + encodeURIComponent(db || rawDb);
   const externalSignal = (cfg && cfg.signal) || null;
   const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timer = ctrl ? setTimeout(() => ctrl.abort(), 15000) : null;
@@ -631,18 +663,19 @@ export async function secretCheck(cfg, args) {
         ok: true,
         verdict: "VALID",
         source,
-        database: db,
+        database: db || rawDb,
         title: "Secret Key 有效（" + source + "）",
         lines: [
-          `数据库：${db || "当前库"}`,
+          `数据库：${db || rawDb}`,
           `密钥来源：${source}`,
           "REST 接口鉴权通过：R2 对象列举与清理权限正常",
-          source === "自动捕获" ? "当前正在使用建库时自动捕获的密钥，建议在设置页显式填写一份备用" : "密钥已通过远端验证，与当前数据库完全匹配",
+          source === "自动捕获" ? "当前正在使用建库时自动保存的密钥，建议在设置页显式填写一份备用" : "密钥已通过远端验证，与当前数据库完全匹配",
         ],
       };
     }
 
-    let errorDetail = "Invalid secret_key";
+    // 分支 3：填了但 NCB 返回 401/403（密钥被拒绝）
+    let errorDetail = "Invalid secret_key.";
     try {
       const body = await res.json();
       if (body && (body.error || body.message)) {
@@ -654,13 +687,15 @@ export async function secretCheck(cfg, args) {
       ok: false,
       verdict: "INVALID",
       source,
-      database: db,
-      title: "Secret Key 无效（鉴权失败）",
+      database: db || rawDb,
+      title: "密钥被 NoCodeBackend 拒绝（鉴权失败）",
       lines: [
-        `目标数据库：${db || "当前库"}（来源：${source}）`,
-        `远端接口返回：${errorDetail}`,
-        "高频原因：数据库删除重建后 NCB 会换新密钥，插件手里可能是旧的",
-        "解决办法：前往 NoCodeBackend 控制台 → 该数据库 → 重新复制 Secret Key 填入",
+        `目标数据库：${db || rawDb}（来源：${source}）`,
+        `远端接口返回：${errorDetail}（HTTP ${res.status}）`,
+        "两个最常见原因：",
+        "① 复制的是 MCP Key 而不是 Secret Key（MCP Key 无法访问 REST 接口）",
+        "② 数据库删除重建后 NCB 换了新密钥，当前手里保存的是旧密钥",
+        "自救指引：前往 NoCodeBackend 控制台重新复制该库当前密钥；若无法找回，可点「一键创建数据库」选择新建获得一把新密钥",
       ],
     };
   } catch (err) {
@@ -669,10 +704,10 @@ export async function secretCheck(cfg, args) {
       ok: false,
       verdict: "ERROR",
       source,
-      database: db,
+      database: db || rawDb,
       title: "检测 Secret Key 失败（连接异常）",
       lines: [
-        `目标数据库：${db || "当前库"}`,
+        `目标数据库：${db || rawDb}`,
         `连接失败：${String((err && err.message) || err).slice(0, 100)}`,
         "请检查网络连接后重试",
       ],

@@ -31,6 +31,8 @@ try {
     ncb_instance: env.instance,
     ncb_secret: env.secret,
     mcp_key: env.mcpKey,
+    _client: env.client,
+    client: env.client,
   });
 
   console.log("=================================================================");
