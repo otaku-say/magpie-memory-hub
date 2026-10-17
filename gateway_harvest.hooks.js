@@ -557,10 +557,15 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     pitfallsSaved++;
   }
 
+  _diag("pipeline", "client=" + (client ? "有" : "无") + " memoriesSaved=" + memoriesSaved +
+    " pitfallsSaved=" + pitfallsSaved + " pending=" + pendingSaved +
+    " queue=" + (typeof readHarvestQueue === "function" ? (readHarvestQueue() || []).length : "?"));
+
   // 若传入了 client，由唯一受控的消费器统一执行落库（防并发重入与重复插入）
   if (client) {
     try {
       const drainRes = await triggerBackgroundDrain(client);
+      _diag("drain", JSON.stringify(drainRes).slice(0, 200));
       if (drainRes && typeof drainRes.memoriesSaved === "number") {
         memoriesSaved = drainRes.memoriesSaved;
       }
@@ -581,6 +586,14 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
  * 请求前置钩子：在路由前调用。
  * 绝不改动 body，只读提取元数据并绑定到 ctx.state。
  */
+/* 诊断：把静默吞掉的错误说出来（每类只打一次，不含对话内容） */
+var _diagLogged = {};
+function _diag(tag, msg) {
+  if (_diagLogged[tag]) return;
+  _diagLogged[tag] = 1;
+  try { console.log("[memory-hub][diag] " + tag + ": " + String(msg).slice(0, 300)); } catch (_) {}
+}
+
 /* 一次性探针：证明「钩子到底有没有被调用」。
  * 只在进程内打一次（零刷屏），且**不含任何对话内容**（隐私安全）。
  * 必须放在 auto_harvest 判断【之前】—— 这样即使开关没生效也能打出来，
@@ -684,7 +697,8 @@ export async function onResponse(reply, ctx) {
       taskPromise.catch(() => {});
     }
   } catch (e) {
-    // 极致 fail-open：吞掉一切异常，绝不向上抛出
+    // fail-open 仍是原则：绝不向上抛。但**不再静默** —— 打一行诊断，否则永远查不到
+    _diag("onResponse 异常", (e && e.stack) || (e && e.message) || e);
   }
 }
 
