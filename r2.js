@@ -17,7 +17,9 @@
  *   以真实操作为准给出判定。
  */
 import { NcbMcp } from "./ncb_mcp.js";
-import { lookupSecret, lookupRealDatabase, rememberDatabase } from "./local_state.js";
+import fs from "node:fs";
+import path from "node:path";
+import { lookupSecret, lookupRealDatabase, rememberDatabase, rememberR2Mount, lookupR2Mount } from "./local_state.js";
 
 const REST_BASE = "https://api.nocodebackend.com";
 
@@ -253,14 +255,14 @@ export function explainProbeFailure(err) {
       title: "R2 凭据在 Cloudflare 侧被拒绝（TLS 握手失败）",
       detail:
         "NoCodeBackend 拿它自己保存的 Cloudflare 凭据去连 R2，Cloudflare 拒绝了这次握手 —— " +
-        "通常是因为那把密钥已在 Cloudflare 轮换/删除，或新令牌权限不足。",
+        "通常是因为那把密钥已在 Cloudflare 轮换/删除，或新令牌权限不足。注意：此 TLS 握手发生在 NCB 远端与 Cloudflare 之间，与本地 Docker / 宿主容器 TLS 环境完全无关，切勿在容器内安装 openssl。",
       actions: [
         "① 确认新的 R2 API Token 权限选的是【Admin Read & Write】。" +
           "只选 Object Read & Write 时 NoCodeBackend 无法自动建桶与配 CORS，而且会静默失败（返回 ok:true 但没做事）。",
         "② 到 NoCodeBackend 控制台的 R2 Storage 页面，把该数据库的 Cloudflare 连接【更新】或【删除后重建】，" +
           "填入新的 Account ID / Access Key / Secret。" +
           "插件无法替 NCB 覆盖它在账号层保存的旧连接 —— 这是平台边界。",
-        "③ 改完后回到插件重新点「挂载 R2 存储」，本次会用真实上传验证。",
+        "③ 改完后回到插件重新点「挂载 R2 存储」，本次会用真实上传验证（排查此问题无需在本地容器内装 openssl）。",
       ],
     };
   }
@@ -331,6 +333,77 @@ export function deriveLegalBucketName(raw) {
   return s;
 }
 
+/**
+ * 判断指定数据库实例是否已成功挂载 R2 存储通道。
+ * 判据：
+ *   1. 本地持久化记录（local_state.r2_mounts）：经 r2Setup 真实探针验证通过才写入；
+ *   2. 平滑兼容 _status.json（若升级前曾成功挂载过）；
+ *   3. 若无成功记录，无论凭据是否填写，均判定为尚未挂载（未挂载时调 upload/probe 必然报 TLS 40）。
+ */
+export function isR2Mounted(cfg, database, args) {
+  const rawDb = String(database || (args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
+  const db = lookupRealDatabase(rawDb) || rawDb;
+
+  // 1. 本地状态文件 lookupR2Mount（三级策略：精确匹配、归一化去前缀匹配、单条兜底）
+  const localRecord = lookupR2Mount(db) || (rawDb ? lookupR2Mount(rawDb) : null);
+  if (localRecord && localRecord.mounted === true) {
+    return { mounted: true, record: localRecord, reason: "LOCAL_STATE" };
+  }
+
+  // 2. 检查 _status.json（平滑兼容历史状态）
+  try {
+    const p = path.join(process.cwd(), "_status.json");
+    if (fs.existsSync(p)) {
+      const o = JSON.parse(fs.readFileSync(p, "utf8"));
+      if (o && o.r2 && o.r2.ok === true && (o.r2.op === "storage_setup" || o.r2.op === "r2_check")) {
+        if (db) {
+          rememberR2Mount(db, {
+            bucket: o.r2.bucket_name || "",
+            public_url: o.r2.public_url || "",
+            at: o.r2.at || Date.now(),
+          });
+        }
+        return { mounted: true, record: o.r2, reason: "STATUS_JSON" };
+      }
+    }
+  } catch (_) {}
+
+  return { mounted: false, record: null, reason: "NOT_MOUNTED" };
+}
+
+/**
+ * 统一的「R2 尚未挂载」明确提示结构（不走远端探测，绝不误报 TLS 错误或密钥失效）
+ */
+export function notMountedResponse(database) {
+  const db = String(database || "").trim();
+  return {
+    ok: false,
+    verdict: "NOT_MOUNTED",
+    action: "NOT_MOUNTED",
+    database: db,
+    bucket_name: "",
+    public_url: "",
+    credentials_source: "尚未挂载",
+    probe: { error: "R2 尚未挂载" },
+    title: "R2 尚未挂载",
+    lines: [
+      `目标数据库：${db || "当前库"}`,
+      "R2 尚未挂载 —— 请先在 R2 卡片点击『挂载 R2 存储』，再来检测。",
+      "未挂载时无法检测，因为还没有可验证的存储通道。",
+      "挂载成功后，插件会自动通过真实探针验证并建立存储通道。",
+    ],
+    diagnosis: {
+      kind: "NOT_MOUNTED",
+      title: "R2 尚未挂载",
+      detail: "检测到当前数据库尚未挂载 R2 存储通道。未挂载时无法检测，因为还没有可验证的存储通道。",
+      actions: [
+        "请先在 R2 卡片填写或确认凭据后，点击『挂载 R2 存储』完成挂载，再来检测。",
+      ],
+    },
+    note: "R2 尚未挂载 —— 请先在 R2 卡片点击『挂载 R2 存储』，再来检测。未挂载时无法检测，因为还没有可验证的存储通道。",
+  };
+}
+
 export async function r2Setup(cfg, args) {
   const rawDb = dbOf(cfg, args);
   const db = await resolveRealDatabase(cfg, rawDb);
@@ -364,6 +437,18 @@ export async function r2Setup(cfg, args) {
   // 不采信 setup 的返回值（实测会静默失败却报 ok:true），改做真实探测
   const probe = await r2Probe(cfg, db);
   const explained = probe.ok ? null : explainProbeFailure(probe.error);
+
+  if (probe.ok) {
+    const finalBucket = (out && out.bucket_name) || extra.bucket_name || bucketName || "";
+    const finalPublicUrl = (out && out.public_url) || extra.public_url || "";
+    const accId = creds.account_id || "";
+    rememberR2Mount(db, {
+      bucket: finalBucket,
+      public_url: finalPublicUrl,
+      account_id_tail: accId ? accId.slice(-6) : "",
+      at: Date.now(),
+    });
+  }
 
   return {
     ok: probe.ok,
@@ -422,11 +507,17 @@ export async function r2Check(cfg, args) {
     };
   }
 
+  // 核心拦截：检测 R2 是否已挂载（未挂载时绝不走远端探测，直接给出明确提示）
+  const mountCheck = isR2Mounted(cfg, db, a);
+  if (!mountCheck.mounted) {
+    return notMountedResponse(db);
+  }
+
   const pick = (kArg, kCfg) => (a[kArg] != null && a[kArg] !== "" ? a[kArg] : (cfg && cfg[kCfg]) || "");
   const defaultBucket = deriveLegalBucketName(db);
   const customBucket = pick("bucket_name", "r2BucketName");
-  const bucketName = customBucket ? deriveLegalBucketName(customBucket) : defaultBucket;
-  const publicUrl = pick("public_url", "r2PublicUrl");
+  const bucketName = customBucket ? deriveLegalBucketName(customBucket) : ((mountCheck.record && mountCheck.record.bucket) || defaultBucket);
+  const publicUrl = pick("public_url", "r2PublicUrl") || ((mountCheck.record && mountCheck.record.public_url) || "");
   const hasInputCreds = Boolean(a.account_id || a.access_key_id || a.secret_access_key);
   const hasSavedCreds = Boolean(cfg && (cfg.r2AccountId || cfg.r2AccessKeyId || cfg.r2SecretAccessKey));
   const credentialsSource = hasInputCreds
@@ -449,6 +540,21 @@ export async function r2Check(cfg, args) {
     credentials_source: credentialsSource,
     probe: probe.ok ? { uploaded: true, cleaned: probe.cleaned, clean_note: probe.clean_note || "" } : { error: probe.error },
     diagnosis: explained,
+    title: ok ? "R2 凭据验证通过（可用）" : (explained && explained.title ? explained.title : "R2 凭据验证失败"),
+    lines: ok ? [
+      `数据库：${db}`,
+      `存储桶：${bucketName}`,
+      publicUrl ? `公开域名：${publicUrl}` : "未配置公开域名（使用 S3 私有签名访问）",
+      probe.cleaned === false
+        ? (probe.clean_note ? `探针残留提示：${probe.clean_note}` : "真实上传验证成功；探针文件留在 R2（删除需 Secret Key）")
+        : "真实上传与删除探针测试成功，存储通道就绪",
+    ] : [
+      `数据库：${db}`,
+      explained && explained.detail ? `诊断：${explained.detail}` : `错误：${String(probe.error).slice(0, 100)}`,
+      (explained && Array.isArray(explained.actions) && explained.actions.length > 0)
+        ? `排查指引：${explained.actions[0]}`
+        : "请在 NoCodeBackend 控制台确认 Cloudflare R2 连接与权限",
+    ],
     note: ok
       ? "R2 凭据已通过真实探针验证：上传正常，当前存储可用。"
         + (probe.cleaned
@@ -469,6 +575,13 @@ export async function r2Upload(cfg, args) {
     const err = new Error("缺少 filename");
     err.code = "NO_FILENAME";
     throw err;
+  }
+
+  // 依赖 R2 守卫：未挂载时直接返回明确提示
+  const mountCheck = isR2Mounted(cfg, db, args);
+  if (!mountCheck.mounted) {
+    const res = notMountedResponse(db);
+    return Object.assign({ filename, url: "" }, res);
   }
 
   const hasContent = args && args.content != null;
@@ -523,6 +636,14 @@ export async function r2List(cfg, args) {
   const rawDb = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
   const db = rawDb ? await resolveRealDatabase(cfg, rawDb) : "";
   const clientCfg = db ? Object.assign({}, cfg, { instance: db }) : cfg;
+
+  // 依赖 R2 守卫：未挂载时直接返回明确提示
+  const mountCheck = isR2Mounted(clientCfg, db || rawDb, args);
+  if (!mountCheck.mounted) {
+    const res = notMountedResponse(db || rawDb);
+    return Object.assign({ count: 0, files: [], truncated: false }, res);
+  }
+
   const { status, body } = await rest(clientCfg, "GET", "/files", {});
   if (status >= 400) return { ok: false, error: `HTTP ${status}`, body };
   const files = (body && body.files) || [];
@@ -546,6 +667,14 @@ export async function r2Delete(cfg, args) {
       warning: '删除不可恢复。确认请再次调用并传 confirm="DELETE"。',
     };
   }
+
+  // 依赖 R2 守卫：未挂载时直接返回明确提示
+  const mountCheck = isR2Mounted(clientCfg, db || rawDb, args);
+  if (!mountCheck.mounted) {
+    const res = notMountedResponse(db || rawDb);
+    return Object.assign({ key }, res);
+  }
+
   const { status, body } = await rest(clientCfg, "DELETE", "/files/" + encodeURIComponent(key), {});
   return {
     ok: status < 400 && !(body && body.status === "failed"),
@@ -602,6 +731,14 @@ function utf8ToBase64(s) {
 export async function cleanProbes(cfg, args) {
   const rawDb = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
   const db = await resolveRealDatabase(cfg, rawDb);
+
+  // 依赖 R2 守卫：未挂载时直接返回明确提示（不走远端探测与清理）
+  const mountCheck = isR2Mounted(cfg, db || rawDb, args);
+  if (!mountCheck.mounted) {
+    const res = notMountedResponse(db || rawDb);
+    return Object.assign({ action: "NOT_MOUNTED", deleted_count: 0 }, res);
+  }
+
   const manual = String((args && args.secret) || (cfg && (cfg.ncb_secret || cfg.secret)) || "").trim();
   const captured = db ? (lookupSecret(db) || lookupSecret(rawDb)) : (lookupSecret("") || "");
   const secret = manual || captured || "";

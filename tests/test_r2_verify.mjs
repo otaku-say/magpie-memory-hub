@@ -39,7 +39,7 @@ console.log("\n=== 2. r2Setup：NCB 说成功 ≠ 真的成功 ===");
     if (r.diagnosis) {
       console.log(`    [${r.diagnosis.kind}] ${r.diagnosis.title}`);
       r.diagnosis.actions.forEach((a, i) => console.log(`    ${i + 1}. ${a.slice(0, 120)}`));
-      check(r.diagnosis.kind !== "UNKNOWN", "诊断明确");
+      check(r.diagnosis.kind !== "UNKNOWN" || r.diagnosis.kind === "STALE_CREDENTIALS", "诊断明确");
     } else {
       no("探测失败但没有给出诊断");
     }

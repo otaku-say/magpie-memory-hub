@@ -612,9 +612,26 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
  * 请求前置钩子：在路由前调用。
  * 绝不改动 body，只读提取元数据并绑定到 ctx.state。
  */
+/* 一次性探针：证明「钩子到底有没有被调用」。
+ * 只在进程内打一次（零刷屏），且**不含任何对话内容**（隐私安全）。
+ * 必须放在 auto_harvest 判断【之前】—— 这样即使开关没生效也能打出来，
+ * 从而区分「钩子没被调用」与「被调用了但开关没读到」。 */
+var _hookProbeLogged = 0;
+function _hookProbe(which, opts) {
+  if (_hookProbeLogged) return;
+  _hookProbeLogged = 1;
+  try {
+    var keys = (opts && typeof opts === "object") ? Object.keys(opts) : [];
+    console.log("[memory-hub][hook] " + which + " 已被调用 | auto_harvest=" +
+      String(opts && opts.auto_harvest) + " | options 键数=" + keys.length +
+      " | gatewayTimeoutMs=" + String(opts && opts.gatewayTimeoutMs));
+  } catch (_) { /* 连打印都不许抛 */ }
+}
+
 export async function onRequest(body, ctx) {
   try {
     const opts = (ctx && ctx.options) || {};
+    _hookProbe("onRequest", opts);
     // 默认关闭：未显式开启时立即退出，0 额外开销
     if (opts.auto_harvest !== true) {
       return undefined;
@@ -644,6 +661,7 @@ export async function onRequest(body, ctx) {
 export async function onResponse(reply, ctx) {
   try {
     const opts = (ctx && ctx.options) || {};
+    _hookProbe("onResponse", opts);
     // 默认关闭校验
     if (opts.auto_harvest !== true) {
       return;

@@ -698,9 +698,8 @@ export async function secretCheck(cfg, args) {
           `目标数据库：${db || rawDb}（来源：${source}）`,
           `远端接口返回：${errorDetail}（HTTP ${res.status}）`,
           "【排查关键】Secret Key 本身已通过 NoCodeBackend 验证，并非密钥无效！",
-          "根本原因：NoCodeBackend 拿它保存的 Cloudflare 凭据去连 R2 时，被 Cloudflare 拒绝了 TLS 握手（SSL alert 40）。",
-          "常见原因：① Cloudflare 侧密钥已轮换/删除；② R2 API Token 权限未选【Admin Read & Write】导致握手失败。",
-          "处理步骤：前往 NoCodeBackend 控制台 → 数据库 R2 存储配置，更新为有效凭据；或在设置页重新填写并点「挂载 R2 存储」显式传递新凭据。",
+          "根本原因：此报错来自 NoCodeBackend 远端对 R2 存储通道的连带校验（与你的密钥无关）。NoCodeBackend 拿它保存的 Cloudflare 凭据去连 R2 时，被 Cloudflare 拒绝了 TLS 握手（SSL alert 40）。",
+          "常见原因与指引：① 若尚未挂载 R2，请先前往 R2 卡片点击『挂载 R2 存储』；② 若已挂载，请检查 Cloudflare 侧 R2 API Token 权限（须选【Admin Read & Write】）或在 NCB 控制台更新 R2 连接（注意：此握手发生在远端与 Cloudflare 之间，与本地 Docker / 容器 TLS 环境无关，切勿在容器内安装 openssl）。",
         ],
       };
     }
@@ -757,17 +756,16 @@ export async function secretCheck(cfg, args) {
   } catch (err) {
     if (timer) clearTimeout(timer);
     const errMsg = String((err && err.message) || err);
-    const isClientTls = /handshake failure|SSL alert number 40|EPROTO|sslv3/i.test(errMsg);
     return {
       ok: false,
       verdict: "ERROR",
       source,
       database: db || rawDb,
-      title: isClientTls ? "检测 Secret Key 失败（本机到 NCB TLS 握手异常）" : "检测 Secret Key 失败（连接异常）",
+      title: "检测 Secret Key 失败（连接异常）",
       lines: [
         `目标数据库：${db || rawDb}`,
         `连接失败：${errMsg.slice(0, 150)}`,
-        isClientTls ? "本机与 api.nocodebackend.com 握手被阻断，请检查系统网络代理、抓包工具或证书链配置。" : "请检查网络连接后重试",
+        "无法连接到 api.nocodebackend.com，请检查网络连接后重试",
       ],
     };
   }

@@ -158,8 +158,8 @@ try {
     };
     const checkClientTls = await secretCheck({ instance: "agent_memory" }, { secret: "ncb_sec_sample_invalid_key_999" });
     assert.strictEqual(checkClientTls.verdict, "ERROR");
-    assert.ok(checkClientTls.title.includes("TLS 握手异常"), "本机到 NCB TLS 握手异常必须在标题明确指出");
-    t("分支6: 本机到 NCB TLS 握手异常 (EPROTO)", checkClientTls.verdict, "ERROR");
+    assert.ok(checkClientTls.title.includes("连接异常") || checkClientTls.title.includes("异常"), "连接异常必须在标题明确指出");
+    t("分支6: 连接异常 (EPROTO)", checkClientTls.verdict, "ERROR");
   } finally {
     globalThis.fetch = origFetch;
   }

@@ -33,21 +33,22 @@ export function statePath() {
 /** 读状态。任何异常都退化为空状态，绝不让调用方崩。 */
 export function readState() {
   const p = statePath();
-  if (!p) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, _ok: false };
+  if (!p) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, _ok: false };
   try {
-    if (!fs.existsSync(p)) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, _ok: true, _missing: true };
+    if (!fs.existsSync(p)) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, _ok: true, _missing: true };
     const o = JSON.parse(fs.readFileSync(p, "utf8"));
-    if (!o || typeof o !== "object") return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, _ok: true };
+    if (!o || typeof o !== "object") return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, _ok: true };
     return {
       current: typeof o.current === "string" ? o.current : "",
       secrets: o.secrets && typeof o.secrets === "object" ? o.secrets : {},
       actions: o.actions && typeof o.actions === "object" ? o.actions : {},
       gateway_harvest: o.gateway_harvest && typeof o.gateway_harvest === "object" ? o.gateway_harvest : {},
       pending_patterns: o.pending_patterns && typeof o.pending_patterns === "object" ? o.pending_patterns : {},
+      r2_mounts: o.r2_mounts && typeof o.r2_mounts === "object" ? o.r2_mounts : {},
       _ok: true,
     };
   } catch (e) {
-    return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, _ok: false, _err: String(e && e.message || e) };
+    return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, _ok: false, _err: String(e && e.message || e) };
   }
 }
 
@@ -63,6 +64,7 @@ export function writeState(state) {
       actions: state.actions && typeof state.actions === "object" ? state.actions : {},
       gateway_harvest: state.gateway_harvest && typeof state.gateway_harvest === "object" ? state.gateway_harvest : {},
       pending_patterns: state.pending_patterns && typeof state.pending_patterns === "object" ? state.pending_patterns : {},
+      r2_mounts: state.r2_mounts && typeof state.r2_mounts === "object" ? state.r2_mounts : {},
     });
     delete out._ok;
     delete out._missing;
@@ -215,6 +217,75 @@ export function lookupRealDatabase(database) {
   if (st.current && /^\d+_/.test(st.current)) return st.current;
 
   return want;
+}
+
+/* ------------------------------------------------------------------ *
+ * R2 存储挂载状态持久化（解决未挂载时检测 R2 误报凭据错误的问题）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 记录某个数据库的 R2 存储挂载成功状态。
+ * 只有在真实探针上传探测成功（probe.ok === true）后才调用，绝不记录未经验证的死状态。
+ */
+export function rememberR2Mount(database, mountInfo) {
+  if (!database) return false;
+  const st = readState();
+  if (!st.r2_mounts || typeof st.r2_mounts !== "object") st.r2_mounts = {};
+  const info = mountInfo || {};
+  st.r2_mounts[database] = {
+    mounted: true,
+    bucket: String(info.bucket || ""),
+    public_url: String(info.public_url || ""),
+    account_id_tail: String(info.account_id_tail || ""),
+    at: typeof info.at === "number" ? info.at : Date.now(),
+  };
+  return writeState(st);
+}
+
+/**
+ * 查询某个数据库的 R2 挂载状态。
+ * 同样采用三级策略：①精确匹配 ②归一化匹配（忽略账号前缀与大小写） ③唯一记录兜底
+ */
+export function lookupR2Mount(database) {
+  const st = readState();
+  const mounts = st.r2_mounts && typeof st.r2_mounts === "object" ? st.r2_mounts : {};
+  const names = Object.keys(mounts);
+  if (!names.length) return null;
+
+  const want = String(database || "").trim();
+  // ① 精确匹配
+  if (want && mounts[want]) return mounts[want];
+
+  // ② 归一化匹配（忽略账号数字前缀与大小写）
+  const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
+  if (want) {
+    const target = norm(want);
+    const hit = names.find((k) => norm(k) === target);
+    if (hit) return mounts[hit];
+  }
+
+  // ③ 唯一记录兜底
+  if (names.length === 1) return mounts[names[0]];
+  return null;
+}
+
+/**
+ * 清除某个数据库的 R2 挂载状态（清库或显式解绑时调用）。
+ */
+export function forgetR2Mount(database) {
+  if (!database) return false;
+  const st = readState();
+  if (!st.r2_mounts || typeof st.r2_mounts !== "object") return true;
+  const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
+  const target = norm(database);
+  let changed = false;
+  for (const k of Object.keys(st.r2_mounts)) {
+    if (k === database || norm(k) === target) {
+      delete st.r2_mounts[k];
+      changed = true;
+    }
+  }
+  return changed ? writeState(st) : true;
 }
 
 /* ================================================================== *
