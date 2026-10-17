@@ -235,6 +235,18 @@ export async function r2Probe(cfg, database) {
 /** 把探针失败翻译成人能看懂的原因与下一步。 */
 export function explainProbeFailure(err) {
   const m = String(err || "");
+  if (/bucket name is not valid|InvalidBucketName/i.test(m)) {
+    return {
+      kind: "INVALID_BUCKET_NAME",
+      title: "R2 存储桶名称不合法",
+      detail: "Cloudflare R2 / S3 规范要求桶名只能由小写字母、数字、连字符和点组成，不能包含下划线，长度在 3-63 字符之间。",
+      actions: [
+        "插件已自动将数据库名中的下划线转换为连字符（例如 41694_agent_memory → 41694-agent-memory）。",
+        "若手动指定了 Bucket 名称，请检查是否包含下划线、大写字母或非法符号，修改后重试。",
+        "如在 NoCodeBackend 控制台已绑定旧桶，请在控制台重新挂载合法桶名。",
+      ],
+    };
+  }
   if (/handshake failure|SSL alert number 40|EPROTO|sslv3/i.test(m)) {
     return {
       kind: "STALE_CREDENTIALS",
@@ -286,6 +298,39 @@ export function explainProbeFailure(err) {
  * 配置 R2（挂载）
  * ------------------------------------------------------------------ */
 
+/**
+ * 从数据库名或用户输入派生符合 S3/R2 命名规范的合法桶名。
+ * S3 / Cloudflare R2 规范要求：
+ *   - 只能包含小写字母 (a-z)、数字 (0-9)、连字符 (-) 和点 (.)
+ *   - 绝不允许下划线 (_) 或大写字母
+ *   - 必须以字母或数字开头与结尾（不可为 - 或 .）
+ *   - 不得包含连续的点 (..) 或连续连字符
+ *   - 长度必须在 3 到 63 个字符之间
+ *
+ * 这是纯函数，创建与列举/删除/探测等所有场景必须由同一个函数产出。
+ */
+export function deriveLegalBucketName(raw) {
+  if (!raw || typeof raw !== "string") return "";
+  let s = raw.toLowerCase().trim();
+  // 下划线、点及其他非法字符转为连字符 '-'（Cloudflare R2 规范要求仅允许小写字母、数字与连字符）
+  s = s.replace(/[^a-z0-9-]/g, "-");
+  // 合并连续连字符
+  s = s.replace(/-{2,}/g, "-");
+  // 去除首尾的连字符
+  s = s.replace(/^-+|-+$/g, "");
+  // 截断到最大 63 字符，且截断后不得以连字符结尾
+  if (s.length > 63) {
+    s = s.slice(0, 63).replace(/-+$/g, "");
+  }
+  // 补齐最小 3 字符（若有效字符完全为空则回退为默认合规桶名，若 1-2 字符则追加 '-bkt'）
+  if (s.length === 0) {
+    s = "memhub-r2-bkt";
+  } else if (s.length < 3) {
+    s = (s + "-bkt").slice(0, 63);
+  }
+  return s;
+}
+
 export async function r2Setup(cfg, args) {
   const rawDb = dbOf(cfg, args);
   const db = await resolveRealDatabase(cfg, rawDb);
@@ -300,9 +345,10 @@ export async function r2Setup(cfg, args) {
     if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
     return String((cfg && cfg[k2]) || "").trim();
   };
-  // 用户明确要求：存储桶名称与数据库名称相同（不加 -storage 后缀，与 REST 调用同一源头）
-  const defaultBucket = db;
-  const bucketName = pick("bucket_name", "r2BucketName") || defaultBucket;
+  // 桶名从数据库名派生合法合规名称（S3/R2 命名规范：下划线转连字符，纯函数派生）
+  const defaultBucket = deriveLegalBucketName(db);
+  const customBucket = pick("bucket_name", "r2BucketName");
+  const bucketName = customBucket ? deriveLegalBucketName(customBucket) : defaultBucket;
   const creds = {
     account_id: pick("account_id", "r2AccountId"),
     access_key_id: pick("access_key_id", "r2AccessKeyId"),
@@ -377,7 +423,9 @@ export async function r2Check(cfg, args) {
   }
 
   const pick = (kArg, kCfg) => (a[kArg] != null && a[kArg] !== "" ? a[kArg] : (cfg && cfg[kCfg]) || "");
-  const bucketName = pick("bucket_name", "r2BucketName") || db;
+  const defaultBucket = deriveLegalBucketName(db);
+  const customBucket = pick("bucket_name", "r2BucketName");
+  const bucketName = customBucket ? deriveLegalBucketName(customBucket) : defaultBucket;
   const publicUrl = pick("public_url", "r2PublicUrl");
   const hasInputCreds = Boolean(a.account_id || a.access_key_id || a.secret_access_key);
   const hasSavedCreds = Boolean(cfg && (cfg.r2AccountId || cfg.r2AccessKeyId || cfg.r2SecretAccessKey));

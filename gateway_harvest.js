@@ -148,9 +148,24 @@ export function isExplicitUserMemory(text) {
   }
   if (!target) return false;
 
-  // 必须是显式前缀指令（行首或句首标点引出的记忆/避坑意图）
-  return /(?:^|\n|[。！？；：!?;:\n]\s*)(?:记下来|记住|避坑|备忘|必须记住|一定要记|务必遵守|mark|remember)[:：]/i.test(target) ||
-         /(?:^|\n|[。！？；：!?;:\n]\s*)(?:注意|规则|规范要求)[:：]/i.test(target);
+  // 必须是显式记忆/避坑指令（严禁把通用的「注意：」「规则：」当作显式意图）
+  return /(?:^|\n|[。！？；：!?;:\n]\s*)(?:记下来|记住|存入记忆|记入记忆|记入避坑|记录避坑|避坑|备忘|必须记住|一定要记|务必遵守|务必记住|mark|remember)[:：\s]/i.test(target) ||
+         /(?:^|\n|[。！？；：!?;:\n]\s*)(?:避坑指南|踩坑记录|避坑备忘)[:：]/i.test(target);
+}
+
+/** 判定是否为文档/任务书/规范说明行（绝非真实执行报错或处置解法） */
+export function isDocumentationOrScaffolding(line) {
+  const s = String(line || "").trim();
+  if (!s) return true;
+  // Markdown 列表或标题中的规范陈述，如 "- 不确定/风险高的修复：**不要改代码**"
+  if (/^[-*+]\s+.*(?:不要改代码|由主控裁决|复现步骤|验收标准|任务书|报告里|需求|约束|原则|回归测试|实测输出)/.test(s)) return true;
+  // 包含 Markdown 粗体否定/约束指令，如 "**不要改代码**"
+  if (/\*\*(?:不要|严禁|必须|禁止|注意)[^*]+\*\*/.test(s)) return true;
+  // 包含任务书/要求引导词
+  if (/^(?:要求|约束|注意|规范|原则|提示|目标|修法|根因|说明)[：:]/.test(s)) return true;
+  // 包含引号包裹的测试断言短语，如「FAIL / 修复后 PASS」
+  if (/^[「“"'].*FAIL.*[」”"']/.test(s)) return true;
+  return false;
 }
 
 /** Levenshtein 动态规划编辑距离计算 */
@@ -248,6 +263,9 @@ export function isCommandRetryCompatible(failedCmd, solutionCmd, errorType = "ge
 
   // 2. 同二进制情况
   if (binA === binB) {
+    if (errorType === "missing_dependency" && /(?:install|add|get)\b/i.test(solutionCmd)) {
+      return true;
+    }
     const s1 = String(failedCmd).trim();
     const s2 = String(solutionCmd).trim();
     const maxLen = Math.max(s1.length, s2.length);
@@ -337,7 +355,7 @@ function isCodeOrSyntaxNoise(line) {
 const ACTION_CMD_RE = /(?:^|[;&|`\s])(?:sudo\s+)?(?:apt|apt-get|npm|npx|pnpm|yarn|pip|pip3|python3?|uv|cargo|gem|brew|git|export|source|\.|mv|cp|rm|mkdir|chmod|chown|systemctl|service|curl|wget|docker|kill|killall)\s+[^\n]{2,120}/i;
 
 // 明确自然语言修复/处置动作语义
-const FIX_DESC_RE = /(?:(?:建议|请|必须|统一|改用|已)?(?:通过|采用|使用|执行|运行|改用|安装|配置|调整|更新|升级|修复|修改|重新)\s*[^\n]{2,80}?(?:解决|修复|搞定|奏效|恢复|生效|成功|pass)|(?:解决(?:方法|方案|办法)?|修复(?:方法|方案|办法)?|处置(?:方法|方案)?|应对措施|workaround)[：:\s]+[^\n]{3,120}|(?:已|后续)?(?:通过|改用|切换到|重新安装|修复为|添加|配置)\s*[^\n]{3,120}|(?:fix(?:ed)?|solution|resolved?)\s*(?:by|via|with|using|to)?[：:\s]+[^\n]{3,120})/i;
+const FIX_DESC_RE = /(?:(?:建议|请|必须|统一|改用|已)?(?:通过|采用|使用|执行|运行|改用|安装|配置|调整|更新|升级|修复|修改|重新)\s*[^\n]{2,80}?(?:解决|修复|搞定|奏效|恢复|生效|成功|pass)|(?:解决(?:方法|方案|办法)?|修复(?:方法|方案|办法)?|处置(?:方法|方案)?|应对措施|workaround)[：:\s]+[^\n]{3,120}|(?:已|后续)?(?:通过|改用|切换到|重新安装|修复为|添加|配置)\s*[^\n]{3,120}|(?:fix(?:ed)?|solution|resolved)\s*(?:[：:]|(?:by|via|with|using|to)\s+)[^\n]{3,120})/i;
 
 function isPureStatusOrNoise(line) {
   const s = String(line || "").trim();
@@ -379,8 +397,12 @@ export function mineFailures(text) {
     const line = rawLines[i].trim();
     if (!line || line.length < 5) continue;
     if (isCodeOrSyntaxNoise(line)) continue;
+    if (isDocumentationOrScaffolding(line)) continue;
     // 排除通用排查命令调用（cat/grep/rg 等绝不是故障本身）
     if (isGenericToolInvocation(line)) continue;
+    // 列表条目与引用包裹中的 FAIL 绝非真实执行报错
+    if (/^[#*+-]\s/.test(line)) continue;
+    if (/[「“"'][^」”"']*\bFAIL\b[^」”"']*[」”"']/.test(line)) continue;
 
     // 剔除行内 code 后若不再匹配，说明关键字完全在行内代码中（例如 `fail(error.AccessDenied)`）
     const lineWithoutInline = stripInlineCode(line).trim();
@@ -426,6 +448,7 @@ export function mineFailures(text) {
     for (const l of window) {
       const trimmed = l.trim();
       if (!trimmed || isPureStatusOrNoise(trimmed)) continue;
+      if (isDocumentationOrScaffolding(trimmed)) continue;
       // 排除通用排查工具（cat/grep/rg 等只读/分析指令绝不是解法）
       if (isGenericToolInvocation(trimmed)) continue;
 
@@ -448,6 +471,14 @@ export function mineFailures(text) {
             prelimEtype = "network";
           }
           if (!isCommandRetryCompatible(failedCmd, trimmed, prelimEtype)) {
+            continue;
+          }
+        } else if (!failedCmd && !ACTION_CMD_RE.test(trimmed) && !/^[$#>]\s*/.test(trimmed)) {
+          // 纯自然语言描述且无前置报错命令：必须存在关键词重合，严禁任意配对
+          const tokensA = f.raw.toLowerCase().split(/[^\w\u4e00-\u9fa5]+/).filter((t) => t.length >= 3);
+          const lowTrimmed = trimmed.toLowerCase();
+          const hasOverlap = tokensA.some((t) => lowTrimmed.includes(t));
+          if (!hasOverlap) {
             continue;
           }
         }
@@ -692,6 +723,40 @@ export function mineEnvironmentFacts(text) {
     }
   }
 
+  // 6. 环境工具与包管理直接陈述规范（如：这个项目统一用 pnpm 管理依赖）
+  const directToolRe = /(?:这个项目|本项目|项目|开发环境|本仓库|仓库)?(?:统一|约定|必须|默认|优先)?(?:使用|采用|通过|用)\s*[`'"]?([a-zA-Z0-9_.-]+)[`'"]?\s*(?:管理依赖|作为包管理(?:器)?|运行测试|构建|打包|作为构建工具|执行脚本)/gi;
+  let dtMatch;
+  while ((dtMatch = directToolRe.exec(cleaned)) !== null) {
+    const tool = dtMatch[1].trim();
+    if (tool && !GENERIC_PRONOUNS.has(tool.toLowerCase())) {
+      results.push({
+        category: "fact",
+        scope_level: "project",
+        title: `工具规范: 采用 ${tool}`,
+        content: `项目环境规范：统一使用 \`${tool}\` 管理依赖与构建。`,
+        tags: "environment,tooling,convention",
+        confidence: 0.85,
+      });
+    }
+  }
+
+  // 7. 开发机/主机系统硬件与平台环境画像（如：我的开发机是 Mac mini M4，16G 内存）
+  const envProfileRe = /(?:开发机|开发环境|运行环境|服务器|本机|主机)(?:配置|环境|架构|系统)?(?:是|为|采用)[：:\s]*([^\n，,。；;]{4,80})/gi;
+  let epMatch;
+  while ((epMatch = envProfileRe.exec(cleaned)) !== null) {
+    const profile = epMatch[1].trim();
+    if (profile && !GENERIC_PRONOUNS.has(profile.toLowerCase())) {
+      results.push({
+        category: "fact",
+        scope_level: "project",
+        title: "开发环境配置",
+        content: `开发环境配置：${profile}`,
+        tags: "environment,hardware,profile",
+        confidence: 0.80,
+      });
+    }
+  }
+
   const out = [];
   const seen = new Set();
   for (const c of results) {
@@ -760,6 +825,23 @@ export function mineArchitecturalDecisions(text) {
         title: `架构规范: 遵循 ${standard}`,
         content: `系统架构规范约定：统一采用并遵循 ${standard}。`,
         tags: "architecture,pattern,convention",
+        confidence: 0.85,
+      });
+    }
+  }
+
+  // 4. 系统组件与技术栈架构决策（如：系统后端架构统一采用 FastAPI 与 PostgreSQL 16）
+  const directArchRe = /(?:后端|前端|数据库|中间件|服务|架构)(?:架构|技术栈|选型)?(?:统一|决定)?(?:采用|使用|选用|基于)\s*([a-zA-Z0-9_\u4e00-\u9fa5\s/+-]{3,50})/gi;
+  let daMatch;
+  while ((daMatch = directArchRe.exec(cleaned)) !== null) {
+    const tech = daMatch[1].trim();
+    if (tech && !GENERIC_PRONOUNS.has(tech.toLowerCase())) {
+      results.push({
+        category: "decision",
+        scope_level: "project",
+        title: `架构选型: 采用 ${tech}`,
+        content: `架构决策：系统组件与技术栈统一采用 ${tech}。`,
+        tags: "architecture,stack,decision",
         confidence: 0.85,
       });
     }
@@ -1045,12 +1127,23 @@ export async function harvestGateway(args, context) {
     turnsScanned += turns.length;
 
     let processedInThisFile = 0;
+    let turnIndex = 0;
 
     for (const turn of turns) {
       if (signal && signal.aborted) {
         aborted = true;
         break;
       }
+
+      turnIndex++;
+      const sessId = String(turn.session || turn.Session || turn.session_id || "").trim();
+      /* 来源可追溯性（空值语义说明）：
+       * 录制文件通常 100% 具备 session（Magpie 无会话头默认不录制）。
+       * 但若解析异常或外部构造数据无 session，则 source_session 置为 null（严禁伪造）。
+       * source_turn 对应录制文件行号/轮次序号（从 1 起始）。
+       */
+      const sourceSession = sessId ? sessId.slice(0, 128) : null;
+      const sourceTurn = (typeof turn.turn === "number" && turn.turn >= 1) ? Math.floor(turn.turn) : turnIndex;
 
       const fp = turnFingerprint(turn);
       if (!options.force_rescan && processedFpSet.has(fp)) {
@@ -1066,9 +1159,18 @@ export async function harvestGateway(args, context) {
 
       // 双轨制：用户显式知识沉淀指令穿透门禁直接入库
       const isExplicit = isExplicitUserMemory(dialogueText);
-      const minEvidence = options.min_evidence !== undefined
-        ? Number(options.min_evidence)
-        : (cfg.min_evidence !== undefined ? Number(cfg.min_evidence) : DEFAULT_MIN_EVIDENCE);
+      // 门槛按内容的重复特性区分（对齐 Headroom traffic_learner 设计哲学）：
+      // - 踩坑 / 命令重试：属于重复出现的报错模式，保留门禁（默认 3 次才落盘）
+      // - 事实 / 偏好 / 决策 / 环境画像：低频高价值知识（通常只陈述一次），门槛默认为 1（不设门禁直接入库）
+      const minEvidencePitfall = options.min_evidence_pitfall !== undefined
+        ? Number(options.min_evidence_pitfall)
+        : (options.min_evidence !== undefined
+          ? Number(options.min_evidence)
+          : (cfg.min_evidence !== undefined ? Number(cfg.min_evidence) : DEFAULT_MIN_EVIDENCE));
+
+      const minEvidenceMemory = options.min_evidence_memory !== undefined
+        ? Number(options.min_evidence_memory)
+        : 1;
 
       // 规则提取
       const failures = mineFailures(dialogueText);
@@ -1076,23 +1178,24 @@ export async function harvestGateway(args, context) {
       const decisions = mineArchitecturalDecisions(dialogueText);
 
       // 写入 memories（事实 + 架构决策）
+      // 关键：事实与架构决策是低频高价值知识（通常只陈述一次），门槛默认为 1（直接入库）
       if (typeof saveMemory === "function") {
         for (const item of facts.concat(decisions)) {
           if (signal && signal.aborted) { aborted = true; break; }
 
-          // P0 证据累计门禁（显式指令直接穿透）
-          if (!isExplicit && minEvidence > 1) {
-            const itemFp = crypto.createHash("sha256").update(`${targetProject}:${item.category}:${item.title}`).digest("hex").slice(0, 32);
-            const pendingRes = recordPendingEvidence("m:" + itemFp, {
+          const mFp = crypto.createHash("sha256").update(`${targetProject}:${item.category}:${item.title}:${item.content}`).digest("hex").slice(0, 32);
+          if (!isExplicit && minEvidenceMemory > 1) {
+            const pendingRes = recordPendingEvidence(`m:${targetProject}:${mFp}`, {
               ...item,
               project: targetProject,
               client: agent,
             }, {
               kind: "memory",
-              minEvidence,
+              minEvidence: minEvidenceMemory,
+              turnKey: fp,
             });
             if (!pendingRes.shouldGraduate) {
-              continue; // 未达到门禁累计次数，仅在 pending 计数，不落盘
+              continue;
             }
           }
 
@@ -1107,7 +1210,9 @@ export async function harvestGateway(args, context) {
               content: item.content,
               tags: item.tags,
               confidence: item.confidence,
-            }, { agent, _ctx: { agent } });
+              source_session: sourceSession,
+              source_turn: sourceTurn,
+            }, { agent, session: sourceSession, turn: sourceTurn, _ctx: { agent, session: sourceSession, turn: sourceTurn } });
             if (res && res.action !== "NOOP") {
               memoriesSaved++;
             }
@@ -1125,15 +1230,16 @@ export async function harvestGateway(args, context) {
           const pFp = p.content_fingerprint || crypto.createHash("sha256").update(`${targetProject}:${p.component}:${sig(p.symptom)}`).digest("hex").slice(0, 32);
           let recurrence = 1;
 
-          // P0 证据累计门禁（显式指令直接穿透）
-          if (!isExplicit && minEvidence > 1) {
+          // P0 证据累计门禁（显式指令直接穿透；同一轮次通过 turnKey 去重）
+          if (!isExplicit && minEvidencePitfall > 1) {
             const pendingRes = recordPendingEvidence(`p:${targetProject}:${pFp}`, {
               ...p,
               project: targetProject,
               client: agent,
             }, {
               kind: "pitfall",
-              minEvidence,
+              minEvidence: minEvidencePitfall,
+              turnKey: fp,
             });
             if (!pendingRes.shouldGraduate) {
               continue; // 未达到门禁累计次数，仅在 pending 计数，不落盘
@@ -1154,7 +1260,9 @@ export async function harvestGateway(args, context) {
               tags: p.tags,
               content_fingerprint: pFp,
               recurrence,
-            }, { agent, _ctx: { agent } });
+              source_session: sourceSession,
+              source_turn: sourceTurn,
+            }, { agent, session: sourceSession, turn: sourceTurn, _ctx: { agent, session: sourceSession, turn: sourceTurn } });
             let res = resRaw;
             if (typeof resRaw === "string") {
               try { res = JSON.parse(resRaw); } catch (_) {}

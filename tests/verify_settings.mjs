@@ -186,6 +186,18 @@ for (const [btnId, op] of [
   } else {
     no(`${btnId} 没有提交信标`);
   }
+  if (op === "model_check") {
+    const dbHtml = els.db_action_status ? els.db_action_status.innerHTML : "";
+    const mHtml = els.model_action_status ? els.model_action_status.innerHTML : "";
+    check(
+      !dbHtml.includes("model_check") && !dbHtml.includes("检测本地小模型"),
+      "卡片隔离：#db_action_status 不含小模型任务提示（防串台）"
+    );
+    check(
+      mHtml.includes("model_check") || mHtml.includes("检测本地小模型"),
+      "卡片隔离：#model_action_status 正确展示小模型任务提示"
+    );
+  }
 }
 
 console.log("\n=== 5. 独立「保存本卡片」按钮（R2 卡片不触发挂载）===");

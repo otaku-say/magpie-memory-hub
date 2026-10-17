@@ -674,7 +674,7 @@ export async function secretCheck(cfg, args) {
       };
     }
 
-    // 分支 3：填了但 NCB 返回 401/403（密钥被拒绝）
+    // 远端返回错误：细分原因（区分「密钥无效」与「NCB 远端连 R2 发生异常」）
     let errorDetail = "Invalid secret_key.";
     try {
       const body = await res.json();
@@ -683,6 +683,62 @@ export async function secretCheck(cfg, args) {
       }
     } catch (_) {}
 
+    const errStr = String(errorDetail || "");
+    const isTlsHandshake = /handshake failure|SSL alert number 40|EPROTO|sslv3/i.test(errStr);
+    const isInvalidBucket = /bucket name is not valid|InvalidBucketName/i.test(errStr);
+
+    if (res.status >= 500 && isTlsHandshake) {
+      return {
+        ok: false,
+        verdict: "R2_TLS_ERROR",
+        source,
+        database: db || rawDb,
+        title: "Secret Key 已通过鉴权，但远端连 Cloudflare R2 发生 TLS 握手失败",
+        lines: [
+          `目标数据库：${db || rawDb}（来源：${source}）`,
+          `远端接口返回：${errorDetail}（HTTP ${res.status}）`,
+          "【排查关键】Secret Key 本身已通过 NoCodeBackend 验证，并非密钥无效！",
+          "根本原因：NoCodeBackend 拿它保存的 Cloudflare 凭据去连 R2 时，被 Cloudflare 拒绝了 TLS 握手（SSL alert 40）。",
+          "常见原因：① Cloudflare 侧密钥已轮换/删除；② R2 API Token 权限未选【Admin Read & Write】导致握手失败。",
+          "处理步骤：前往 NoCodeBackend 控制台 → 数据库 R2 存储配置，更新为有效凭据；或在设置页重新填写并点「挂载 R2 存储」显式传递新凭据。",
+        ],
+      };
+    }
+
+    if (res.status >= 500 && isInvalidBucket) {
+      return {
+        ok: false,
+        verdict: "R2_BUCKET_INVALID",
+        source,
+        database: db || rawDb,
+        title: "Secret Key 已通过鉴权，但关联的 R2 存储桶名非法",
+        lines: [
+          `目标数据库：${db || rawDb}（来源：${source}）`,
+          `远端接口返回：${errorDetail}（HTTP ${res.status}）`,
+          "【排查关键】Secret Key 本身已通过 NoCodeBackend 验证，并非密钥无效！",
+          "根本原因：当前关联的 Cloudflare R2 存储桶名不符合 S3/R2 命名规范（例如包含了下划线 _）。",
+          "处理步骤：请点本插件的「挂载 R2 存储」，插件会自动将下划线转为连字符重新挂载合法桶名（如 41694-agent-memory）。",
+        ],
+      };
+    }
+
+    if (res.status >= 500) {
+      return {
+        ok: false,
+        verdict: "UPSTREAM_ERROR",
+        source,
+        database: db || rawDb,
+        title: "Secret Key 已通过鉴权，但远端处理发生异常",
+        lines: [
+          `目标数据库：${db || rawDb}（来源：${source}）`,
+          `远端接口返回：${errorDetail}（HTTP ${res.status}）`,
+          "【排查关键】NoCodeBackend 鉴权已通过，但远端服务在处理存储操作时报错。",
+          "处理步骤：请根据远端返回的具体错误信息进行排查，或检查 NoCodeBackend 控制台配置。",
+        ],
+      };
+    }
+
+    // 分支 3：真实密钥被拒绝（401/403 或显式 Invalid secret_key）
     return {
       ok: false,
       verdict: "INVALID",
@@ -700,16 +756,18 @@ export async function secretCheck(cfg, args) {
     };
   } catch (err) {
     if (timer) clearTimeout(timer);
+    const errMsg = String((err && err.message) || err);
+    const isClientTls = /handshake failure|SSL alert number 40|EPROTO|sslv3/i.test(errMsg);
     return {
       ok: false,
       verdict: "ERROR",
       source,
       database: db || rawDb,
-      title: "检测 Secret Key 失败（连接异常）",
+      title: isClientTls ? "检测 Secret Key 失败（本机到 NCB TLS 握手异常）" : "检测 Secret Key 失败（连接异常）",
       lines: [
         `目标数据库：${db || rawDb}`,
-        `连接失败：${String((err && err.message) || err).slice(0, 100)}`,
-        "请检查网络连接后重试",
+        `连接失败：${errMsg.slice(0, 150)}`,
+        isClientTls ? "本机与 api.nocodebackend.com 握手被阻断，请检查系统网络代理、抓包工具或证书链配置。" : "请检查网络连接后重试",
       ],
     };
   }

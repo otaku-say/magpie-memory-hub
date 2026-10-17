@@ -321,6 +321,73 @@ export function buildDialogueText(body, reply) {
   return parts.join("\n\n");
 }
 
+/**
+ * 从不同协议请求体推导用户轮次序号（从 1 开始的正整数）。
+ *
+ * 跨协议推导规则：
+ * - OpenAI / Anthropic: 数 body.messages 中 role === "user" 的条数
+ * - Gemini: 数 body.contents 中 role !== "model" 的条数
+ * - Responses API: 数 body.input 中 role === "user"（或非 function_call_output）的条数
+ * - 单次 Prompt: 1 轮
+ *
+ * 空值语义说明：
+ * 请求体为空、没有 user 角色消息或无法推导时返回 null。
+ * 严禁无轮次信息时伪造假数据（如硬编码 1 或 0）。
+ */
+export function countTurnsFromMessages(body) {
+  if (!body || typeof body !== "object") return null;
+
+  // 1. OpenAI / Anthropic messages
+  if (Array.isArray(body.messages)) {
+    const userTurns = body.messages.filter((m) => {
+      if (!m || typeof m !== "object" || m.role !== "user") return false;
+      if (typeof m.content === "string") return m.content.trim().length > 0;
+      if (Array.isArray(m.content)) return m.content.length > 0;
+      return true;
+    }).length;
+    return userTurns > 0 ? userTurns : null;
+  }
+
+  // 2. Gemini contents（仅计入包含有效正文 parts 的用户轮次，排除模型与系统指令）
+  if (Array.isArray(body.contents)) {
+    const userTurns = body.contents.filter((c) => {
+      if (!c || typeof c !== "object" || !Array.isArray(c.parts)) return false;
+      const role = c.role || "user";
+      if (role === "model" || role === "system") return false;
+      return c.parts.some((p) => {
+        if (!p || p.thought) return false;
+        if (typeof p === "string") return p.trim().length > 0;
+        return typeof p.text === "string" && p.text.trim().length > 0;
+      });
+    }).length;
+    return userTurns > 0 ? userTurns : null;
+  }
+
+  // 3. Responses API input
+  if (Array.isArray(body.input)) {
+    const userTurns = body.input.filter((i) => {
+      if (!i || typeof i !== "object") return false;
+      const role = i.role || (i.type === "function_call_output" ? "tool" : "");
+      if (role === "assistant" || role === "system" || role === "tool") return false;
+      if (role === "user") return true;
+      if (typeof i.content === "string") return i.content.trim().length > 0;
+      if (Array.isArray(i.content)) return i.content.length > 0;
+      return false;
+    }).length;
+    return userTurns > 0 ? userTurns : null;
+  }
+  if (typeof body.input === "string" && body.input.trim()) {
+    return 1;
+  }
+
+  // 4. Legacy single prompt
+  if (typeof body.prompt === "string" && body.prompt.trim()) {
+    return 1;
+  }
+
+  return null;
+}
+
 /* ================================================================== *
  * 3. 提炼并安全入库
  * ================================================================== */
@@ -333,6 +400,19 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
   const project = String(meta.project || "global").trim();
   const agent = String(meta.agent || "gateway").trim();
 
+  /* 来源可追溯性（空值语义说明）：
+   * source_session 与 source_turn 为 NULL 是完全合法且符合设计的正常行为：
+   * 1. 客户端未携带会话标识头（如 curl 或单次脚本调用）；
+   * 2. 请求体缺少 user 消息或单次非对话式调用；
+   * 3. 离线/测试直接调用 processDialogueAndHarvest。
+   * 严禁无会话信息时伪造虚假数据，拿不到时必须为 NULL。
+   * 严格截断至至多 128 字符（契合 VARCHAR 128 限制）。
+   */
+  const rawSession = (meta && meta.session && String(meta.session).trim()) || "";
+  const sourceSession = rawSession ? rawSession.slice(0, 128) : null;
+  const parsedTurn = meta && (typeof meta.turn === "number" ? meta.turn : (meta.turn ? Number(meta.turn) : null));
+  const sourceTurn = (typeof parsedTurn === "number" && !isNaN(parsedTurn) && parsedTurn >= 1) ? Math.floor(parsedTurn) : null;
+
   // 严禁在测试环境中向 global 真实写入
   if (project === "global" && isTestMode()) {
     return { memoriesSaved: 0, pitfallsSaved: 0, pendingSaved: 0, skipped: true, reason: "test environment blocked global write" };
@@ -340,9 +420,19 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
 
   // 双轨制：显式记忆沉淀指令直接穿透门禁
   const isExplicit = isExplicitUserMemory(dialogueText) || options.bypass_gate === true;
-  const minEvidence = typeof options.min_evidence === "number"
-    ? options.min_evidence
-    : (typeof meta.min_evidence === "number" ? meta.min_evidence : DEFAULT_MIN_EVIDENCE);
+
+  // 门槛按内容的重复特性区分（对齐 Headroom traffic_learner 设计哲学）：
+  // - 踩坑 / 命令重试：属于重复出现的报错模式，保留门禁（默认 3 次才落盘）
+  // - 事实 / 偏好 / 决策 / 环境画像：低频高价值知识（通常只陈述一次），门槛默认为 1（不设门禁直接入库）
+  const minEvidencePitfall = typeof options.min_evidence_pitfall === "number"
+    ? options.min_evidence_pitfall
+    : (typeof options.min_evidence === "number"
+      ? options.min_evidence
+      : (typeof meta.min_evidence === "number" ? meta.min_evidence : DEFAULT_MIN_EVIDENCE));
+
+  const minEvidenceMemory = typeof options.min_evidence_memory === "number"
+    ? options.min_evidence_memory
+    : 1;
 
   // 规则启发式提炼
   const facts = mineEnvironmentFacts(dialogueText);
@@ -354,6 +444,8 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
   let pendingSaved = 0;
 
   // 1. 入库 memories（环境事实与架构决策）
+  // 关键：事实与架构决策是低频高价值知识（通常只陈述一次），门槛默认为 1（直接入库，不设门禁）
+  // 若显式传入 minEvidenceMemory > 1 且非显式表达，则受控进入 pending 证据门禁
   const memoryCandidates = facts.concat(decisions);
   for (const item of memoryCandidates) {
     const title = String(item.title || "").trim();
@@ -363,11 +455,11 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     const fp = fingerprint(`${project}:${item.category}:${title}:${content}`);
     if (isRecent("m:" + fp)) continue;
 
-    // P0 证据门禁：非显式表达必须在 pending 累计达到 minEvidence
-    if (!isExplicit && minEvidence > 1) {
+    // 门禁按类型区分：非显式表达且显式指定了 minEvidenceMemory > 1 时进入 pending 门禁
+    if (!isExplicit && minEvidenceMemory > 1) {
       const pendingRes = recordPendingEvidence("m:" + fp, { ...item, project, agent }, {
         kind: "memory",
-        minEvidence,
+        minEvidence: minEvidenceMemory,
       });
       if (!pendingRes.shouldGraduate) {
         pendingSaved++;
@@ -413,6 +505,8 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
           invalid_reason: "",
           expires_at: null,
           last_used_at: null,
+          source_session: sourceSession,
+          source_turn: sourceTurn,
         });
         markRecent("m:" + fp);
         memoriesSaved++;
@@ -426,6 +520,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
   }
 
   // 2. 入库 pitfalls（踩坑与失败规避）
+  const turnKey = fingerprint(dialogueText.slice(0, 300));
   for (const item of failures) {
     const component = String(item.component || "general").trim();
     const symptom = String(item.symptom || "").trim();
@@ -436,11 +531,12 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     if (isRecent(pitKey)) continue;
 
     let recurrence = 1;
-    // P0 证据门禁：非显式表达必须在 pending 累计达到 minEvidence
-    if (!isExplicit && minEvidence > 1) {
+    // P0 证据门禁：非显式表达必须在 pending 累计达到 minEvidencePitfall（同一轮次 turnKey 去重）
+    if (!isExplicit && minEvidencePitfall > 1) {
       const pendingRes = recordPendingEvidence(pitKey, { ...item, project, agent }, {
         kind: "pitfall",
-        minEvidence,
+        minEvidence: minEvidencePitfall,
+        turnKey,
       });
       if (!pendingRes.shouldGraduate) {
         pendingSaved++;
@@ -491,6 +587,8 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
           invalid_at: null,
           invalid_reason: "",
           last_occurred_at: now,
+          source_session: sourceSession,
+          source_turn: sourceTurn,
         });
         markRecent(pitKey);
         pitfallsSaved++;
@@ -571,6 +669,7 @@ export async function onResponse(reply, ctx) {
       project: opts.project || "global",
       agent: (ctx && ctx.agent) || (ctx && ctx.state && ctx.state.agent) || "gateway",
       session: (ctx && ctx.session) || (ctx && ctx.state && ctx.state.session) || "",
+      turn: countTurnsFromMessages(requestBody),
     };
 
     // 构造 NCB client（如果配置了 mcp_key）

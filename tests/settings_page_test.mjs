@@ -429,6 +429,33 @@ async function runTests() {
   assert.strictEqual(modelCheckPayload._action.op, "model_check", "op 必须为 model_check");
   console.log("PASS: 点击「检测本地小模型」提交信标 op='model_check'");
 
+  // 卡片串台隔离验证（Task C 验收）：
+  // 触发 model_check 后，#db_action_status 绝对不应包含小模型检测字样，#model_action_status 应包含！
+  const dbStatusHtml = env.elements.db_action_status.innerHTML;
+  const modelStatusHtml = env.elements.model_action_status.innerHTML;
+  assert.ok(
+    modelStatusHtml.includes("检测本地小模型") || modelStatusHtml.includes("model_check"),
+    "#model_action_status 必须包含检测本地小模型任务提示信息"
+  );
+  assert.ok(
+    !dbStatusHtml.includes("检测本地小模型") && !dbStatusHtml.includes("model_check"),
+    "隔离断言：#db_action_status 绝对不应包含小模型检测字样（严禁卡片串台！）"
+  );
+
+  // 反证测试：若故意将 model_check 写入 db_action_status，断言必失败拦截
+  const fakeLeakedDbHtml = "<div class='db-status-detail'>当前任务：<strong>检测本地小模型</strong>（op: <code>model_check</code>）</div>";
+  let counterAssertionCaught = false;
+  try {
+    assert.ok(
+      !fakeLeakedDbHtml.includes("检测本地小模型") && !fakeLeakedDbHtml.includes("model_check"),
+      "反证故意失败"
+    );
+  } catch (err) {
+    counterAssertionCaught = true;
+  }
+  assert.ok(counterAssertionCaught, "反证通过：若状态串台写到错误容器，隔离断言必失败报错！");
+  console.log("PASS: 卡片日志提示框隔离断言与反证测试全部通过（#model_action_status 精准写入，#db_action_status 零串台）");
+
   await new Promise((r) => setTimeout(r, 1100));
   env.elements.btn_check_secret.click();
   await new Promise((r) => setTimeout(r, 50));

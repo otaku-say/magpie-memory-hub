@@ -7,9 +7,11 @@
  * 新库上才会暴露的致命缺陷。这个脚本把「声明漏列」变成一次可自动发现的失败。
  */
 import { readFileSync } from "node:fs";
+import assert from "node:assert/strict";
 import { TABLES } from "../schema.js";
 
-const SRC = readFileSync(new URL("../tools.js", import.meta.url), "utf8");
+const TOOLS_SRC = readFileSync(new URL("../tools.js", import.meta.url), "utf8");
+const HOOKS_SRC = readFileSync(new URL("../gateway_harvest.hooks.js", import.meta.url), "utf8");
 
 /** 从 src 的 pos 处（指向 `{`）解析出对象字面量的顶层键 */
 function keysOfLiteral(text) {
@@ -48,21 +50,27 @@ function splitTopLevel(line) {
   return out;
 }
 
-/** 取出 client.create("<table>", X) 里 X 指向的对象字面量文本 */
-function createdKeys(table) {
+/** 取出 src 里 client.create("<table>", X) 里 X 指向的对象字面量文本 */
+function createdKeysInSrc(src, table) {
   const call = `client.create("${table}",`;
-  const i = SRC.indexOf(call);
-  if (i < 0) throw new Error(`找不到 client.create("${table}")`);
+  const i = src.indexOf(call);
+  if (i < 0) return new Set();
   let j = i + call.length;
-  while (SRC[j] === " ") j++;
-  if (SRC[j] === "{") {
-    return keysOfLiteral(SRC.slice(j));
+  while (src[j] === " ") j++;
+  if (src[j] === "{") {
+    return keysOfLiteral(src.slice(j));
   }
   // 是变量名 → 回溯它的定义
-  const name = SRC.slice(j, SRC.indexOf(")", j)).trim();
-  const def = SRC.lastIndexOf(`const ${name} = {`);
-  if (def < 0) throw new Error(`找不到 ${name} 的定义`);
-  return keysOfLiteral(SRC.slice(SRC.indexOf("{", def)));
+  const name = src.slice(j, src.indexOf(")", j)).trim();
+  const def = src.lastIndexOf(`const ${name} = {`);
+  if (def < 0) return new Set();
+  return keysOfLiteral(src.slice(src.indexOf("{", def)));
+}
+
+function createdKeys(table) {
+  const k1 = createdKeysInSrc(TOOLS_SRC, table);
+  const k2 = createdKeysInSrc(HOOKS_SRC, table);
+  return new Set([...k1, ...k2]);
 }
 
 const DB_MANAGED = new Set(["id", "created_at", "updated_at"]);
@@ -80,6 +88,7 @@ for (const table of ["memories", "pitfalls"]) {
   } else {
     console.log(`  ✓ 全部已声明`);
   }
+  assert.strictEqual(missing.length, 0, `${table} 表代码写入的列必须在 schema.js 中全部声明`);
   const extra = [...declared].filter((k) => !wrote.has(k) && !DB_MANAGED.has(k));
   if (extra.length) console.log(`  ℹ 声明但代码不直接写（DB 维护或兼容旧库）: ${extra.join(", ")}`);
   const need = [...wrote].filter((k) => !DB_MANAGED.has(k));
@@ -117,7 +126,7 @@ const LEGIT_CTX = [
   /git status|status\s*[:=]\s*["'](?:ok|failed)["']/,          // 非 DB 的普通状态字段
   /\bversion\s*[:=]\s*(?:["']|SCHEMA_|String\()/,              // 版本号常量
 ];
-const CODE_FILES = ["tools.js", "db_tools.js", "gateway_harvest.js", "page_actions.js",
+const CODE_FILES = ["tools.js", "db_tools.js", "gateway_harvest.js", "gateway_harvest.hooks.js", "page_actions.js",
                     "memory.middleware.js", "harvest.py", "schema.js"];
 /* 反证：确认「豁免机制」不会把真 bug 一起放行（见文件末尾断言） */
 console.log("\n【旧列名残留校验（查询侧）】");
@@ -154,6 +163,7 @@ if (staleHits.length) {
 } else {
   console.log("  ✓ 查询侧没有旧列名残留");
 }
+assert.strictEqual(staleHits.length, 0, "查询侧不得存在任何改名前旧列名残留");
 
 /* ------------------------------------------------------------------ *
  * 版本号同步校验：package.json version vs settings.html

@@ -81,6 +81,8 @@ CREATE TABLE memories (
   invalid_reason VARCHAR(64) DEFAULT '',
   expires_at DATETIME NULL,
   last_used_at DATETIME NULL,
+  source_session VARCHAR(128) NULL,
+  source_turn INT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
@@ -101,6 +103,8 @@ CREATE TABLE pitfalls (
   invalid_at DATETIME NULL,
   invalid_reason VARCHAR(64) DEFAULT '',
   last_occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  source_session VARCHAR(128) NULL,
+  source_turn INT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );

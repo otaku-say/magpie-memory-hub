@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.12.0</span>
+    <span class="version-tag">v6.13.0</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、上下文压缩、R2 存储。</p>
 
@@ -216,7 +216,7 @@
         </div>
         <div class="hint">
           <div class="hint-desc">用于存放多媒体附件与记忆备份的 Cloudflare R2 存储桶名。</div>
-          <div class="hint-diff"><strong>留空</strong>：挂载时默认与数据库名相同（同源同名）；<strong>填写</strong>：绑定并挂载到指定的已有存储桶。</div>
+          <div class="hint-diff"><strong>留空</strong>：挂载时自动由数据库名派生合规桶名（如将下划线转为连字符，符合 S3/R2 命名规范）；<strong>填写</strong>：绑定并挂载到指定的已有存储桶（须符合 S3 命名规范）。</div>
         </div>
         <div class="control">
           <input class="mono" type="text" id="r2_bucket_name" placeholder="留空自动生成" spellcheck="false">

@@ -291,6 +291,42 @@
     gateway: "harvest_action_status"
   };
 
+  /**
+   * 通过 op 或 cardKey 推导归属卡片 key（统一纯函数派生）：
+   * - ncb: provision, ncb_check, secret_check, init, reset, status
+   * - r2: storage_setup, r2_check, clean_probe
+   * - model: model_check, model_download
+   * - gateway: harvest_gateway
+   */
+  function cardOfOp(op) {
+    if (!op || typeof op !== "string") return "ncb";
+    var s = String(op).toLowerCase().trim();
+    if (s === "r2" || s === "storage_setup" || s === "r2_check" || s === "clean_probe") {
+      return "r2";
+    }
+    if (s === "model" || s === "model_check" || s === "model_download") {
+      return "model";
+    }
+    if (s === "gateway" || s === "harvest" || s === "harvest_gateway") {
+      return "gateway";
+    }
+    return "ncb";
+  }
+
+  /**
+   * 通过 op 或 cardKey 推导目标卡片状态容器 DOM ID。
+   * 全局唯一卡片状态路由函数，所有写状态、等待、倒计时每一帧、超时、重试、轮询渲染、页面初始化均必须走它，严禁各处手写默认容器。
+   */
+  function containerOfOp(op) {
+    var cardKey = cardOfOp(op);
+    return containerMap[cardKey] || "db_action_status";
+  }
+
+  if (typeof window !== "undefined") {
+    window.__cardOfOp = cardOfOp;
+    window.__containerOfOp = containerOfOp;
+  }
+
   /* ---------------- 状态展示与结果回传渲染 ---------------- */
   function updateModelButtonState(statusObj) {
     var btn = $("btn_download_model");
@@ -450,14 +486,10 @@
     if (statusData.db) {
       renderDbPrefix(statusData.db);
     }
-    var map = [
-      ["ncb", "db_action_status"],
-      ["r2", "r2_action_status"],
-      ["model", "model_action_status"],
-      ["gateway", "harvest_action_status"],
-    ];
-    for (var i = 0; i < map.length; i++) {
-      var key = map[i][0], cid = map[i][1];
+    var cardKeys = ["ncb", "r2", "model", "gateway"];
+    for (var i = 0; i < cardKeys.length; i++) {
+      var key = cardKeys[i];
+      var cid = containerOfOp(key);
       var card = statusData[key];
       if (!card) continue;
       // 该卡片正在等待更新的结果 → 不用旧结果覆盖等待态
@@ -517,21 +549,27 @@
    */
   var WAIT_SECONDS = 60;
 
-  function waitingHtml(cardKey, left, totalWait) {
+  function waitingHtml(cardKey, left, totalWait, opHint) {
     var total = totalWait || WAIT_SECONDS;
     var pct = Math.max(0, Math.min(100, Math.round((total - left) / total * 100)));
-    var isDownload = cardKey === "model" && total > WAIT_SECONDS;
+    var isDownload = opHint === "model_download" || (cardKey === "model" && total >= 300);
+    var isModelCheck = opHint === "model_check";
+    var title = isDownload ? "正在进行后台下载与校验…" : (isModelCheck ? "正在检测本地小模型…" : "正在等待宿主执行…");
+    var badge = isDownload ? "⏳ 下载中" : (isModelCheck ? "⏳ 检测中" : "⏳ 等待中");
+    var lines = isDownload
+      ? '<li>模型约 174MB，支持断点续传与 SHA-256 校验。</li><li>请耐心等待进度回传，完成后将自动刷新。</li>'
+      : (isModelCheck
+        ? '<li>已提交检测本地小模型任务，正在检查环境与模型状态。</li><li>拿到结果会自动显示在此卡片，无需手动刷新。</li>'
+        : '<li>页面只能提交任务，真正执行发生在宿主的下一次调用。</li><li>拿到结果会自动显示，无需手动刷新。</li>');
     return '' +
       '<div class="action-status-header">' +
-        '<span class="action-status-badge wait">⏳ ' + (isDownload ? "下载中" : "等待中") + '</span>' +
-        '<strong class="action-status-title">' + (isDownload ? "正在进行后台下载与校验…" : "正在等待宿主执行…") + '</strong>' +
+        '<span class="action-status-badge wait">' + badge + '</span>' +
+        '<strong class="action-status-title">' + title + '</strong>' +
         '<span class="action-status-time">剩余 ' + left + ' 秒</span>' +
       '</div>' +
       '<div class="wait-bar"><i style="width:' + pct + '%"></i></div>' +
       '<ul class="action-status-lines">' +
-        (isDownload
-          ? '<li>模型约 174MB，支持断点续传与 SHA-256 校验。</li><li>请耐心等待进度回传，完成后将自动刷新。</li>'
-          : '<li>页面只能提交任务，真正执行发生在宿主的下一次调用。</li><li>拿到结果会自动显示，无需手动刷新。</li>') +
+        lines +
       '</ul>';
   }
 
@@ -555,10 +593,12 @@
     if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; }
     if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
 
+    var resolvedCard = cardOfOp(opHint || targetCard);
+    var containerId = containerOfOp(opHint || targetCard);
+
     // 等待期间只接受「比提交时间更新」的结果，避免旧结果把等待态刷掉（会来回闪）
-    pendingSince[targetCard] = submitTime;
-    var waitSec = (opHint === "model_download" || targetCard === "model") ? 600 : WAIT_SECONDS;
-    var containerId = containerMap[targetCard] || "db_action_status";
+    pendingSince[resolvedCard] = submitTime;
+    var waitSec = opHint === "model_download" ? 600 : WAIT_SECONDS;
     var el = $(containerId);
     var deadline = Date.now() + waitSec * 1000;
 
@@ -570,7 +610,7 @@
       if (left <= 0) return;
       box.style.display = "block";
       box.className = "action-status-box waiting";
-      box.innerHTML = waitingHtml(targetCard, left, waitSec);
+      box.innerHTML = waitingHtml(resolvedCard, left, waitSec, opHint);
     }
     if (el) { el.style.display = "block"; el.className = "action-status-box waiting"; }
     tick();
@@ -579,7 +619,7 @@
     pollingTimer = setInterval(function () {
       loadStatus(function (err, statusData) {
         statusData = statusData || window.__memhubStatus;
-        var card = statusData && statusData[targetCard];
+        var card = statusData && statusData[resolvedCard];
         if (card && card.at >= submitTime) {
           renderStatusBlock(containerId, card);
           var prog = card.progress;
@@ -596,13 +636,13 @@
         if (Date.now() >= deadline) {
           clearInterval(pollingTimer); pollingTimer = null;
           if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
-          delete pendingSince[targetCard];       // 超时：允许显示现有结果
+          delete pendingSince[resolvedCard];       // 超时：允许显示现有结果
           var box = $(containerId);
           if (box) {
             box.style.display = "block";
             box.className = "action-status-box warn";
-            box.innerHTML = timeoutHtml(targetCard, waitSec);
-            bindRetry(box, targetCard);
+            box.innerHTML = timeoutHtml(resolvedCard, waitSec);
+            bindRetry(box, resolvedCard);
           }
         }
       });
@@ -614,18 +654,19 @@
     var btns = box.querySelectorAll ? box.querySelectorAll("[data-retry]") : [];
     for (var i = 0; i < btns.length; i++) {
       btns[i].addEventListener("click", function () {
-        var containerId = containerMap[cardKey] || "db_action_status";
+        var resolvedCard = cardOfOp(cardKey);
+        var containerId = containerOfOp(cardKey);
         var b = $(containerId);
         if (b) { b.className = "action-status-box waiting"; b.textContent = "正在重新查询…"; }
         loadStatus(function (e, data) {
           data = data || window.__memhubStatus;
-          var card = data && data[cardKey];
+          var card = data && data[resolvedCard];
           var b2 = $(containerId);
           if (card && b2) { renderStatusBlock(containerId, card); }
           else if (b2) {
             b2.className = "action-status-box warn";
-            b2.innerHTML = timeoutHtml(cardKey);
-            bindRetry(b2, cardKey);
+            b2.innerHTML = timeoutHtml(resolvedCard);
+            bindRetry(b2, resolvedCard);
           }
         });
       });
@@ -633,14 +674,15 @@
   }
 
   /* ---------------- 数据库管理即时状态区 ---------------- */
-  /* 把即时反馈画到「该操作所属的那张卡片」。
-   * 早先这里硬编码 db_action_status，于是点「检测 R2 密钥」「检测本地小模型」
-   * 的提示都画到了 NoCodeBackend 卡片里 —— 用户在自己点的那张卡片上什么都看不到。
-   * containerId 省略时保持原行为（写 NoCodeBackend 卡片）。 */
-  function paintDbStatus(action, feedbackMsg, feedbackKind, containerId) {
-    var el = $(containerId || "db_action_status");
-    if (!el) return;
+  /* 把即时反馈精准画到「该操作所属的那张卡片」。
+   * 所有写入提示框的状态都精准归属于对应卡片容器，禁止串台写到顶部 NCB 容器；
+   * 由 containerOfOp 统管容器推导，严禁手写 fallback 到 db_action_status。 */
+  function paintDbStatus(action, feedbackMsg, feedbackKind, targetOrContainer) {
     var act = action || (current && current._action);
+    var target = (act && act.op) || targetOrContainer;
+    var containerId = containerOfOp(target);
+    var el = $(containerId);
+    if (!el) return;
     if (!feedbackMsg && (!act || !act.op)) {
       if (!el.innerHTML) {
         el.style.display = "none";
@@ -695,19 +737,12 @@
 
   /* ---------------- 提交信标 ---------------- */
   function submitAction(op, extra) {
-    var targetCard = "ncb";
-    if (op === "storage_setup" || op === "r2_check" || op === "clean_probe") {
-      targetCard = "r2";
-    } else if (op === "model_check" || op === "model_download") {
-      targetCard = "model";
-    } else if (op === "harvest_gateway") {
-      targetCard = "gateway";
-    }
-    var currentContainerId = containerMap[targetCard] || "db_action_status";
+    var targetCard = cardOfOp(op);
+    var currentContainerId = containerOfOp(op);
 
     if (!window.magpie || !window.magpie.options) {
       say("桥接未就绪", "bad");
-      paintDbStatus(null, "桥接脚本未加载，无法提交任务", "bad", currentContainerId);
+      paintDbStatus(null, "桥接脚本未加载，无法提交任务", "bad", op);
       return;
     }
 
@@ -715,14 +750,14 @@
     if (now - lastSubmitTime < 1000) {
       var freqMsg = "操作过于频繁，请稍后再试（频控限制 1 秒/次）";
       say(freqMsg, "warn");
-      paintDbStatus(null, freqMsg, "warn", currentContainerId);
+      paintDbStatus(null, freqMsg, "warn", op);
       return;
     }
 
     lastSubmitTime = now;
     setActionButtonsDisabled(true);
     // 立即向当前点击卡片的状态容器渲染即时等待反馈，消除「点不动/没反应」现象
-    paintDbStatus(null, "正在提交信标任务…", "", currentContainerId);
+    paintDbStatus(null, "正在提交信标任务…", "", op);
     say("正在提交…");
 
     // 全量替换防丢：必须先 get() 获取远端全部 options，再合并写入
@@ -797,7 +832,7 @@
           } else if (op === "harvest_gateway") {
             msg = "已提交扫描对话录制任务（ID: " + action.id + "）。正在等待宿主执行…";
           }
-          paintDbStatus(action, msg, "ok", containerMap[targetCard]);
+          paintDbStatus(action, msg, "ok", op);
           say("信标已提交", "ok");
           startPollingStatus(targetCard, action.at, op);
         },
@@ -808,7 +843,7 @@
           var msg = is429
             ? "操作过于频繁，请稍后再试（频控限制 1 秒/次）"
             : ("提交失败：" + errStr);
-          paintDbStatus(action, msg, is429 ? "warn" : "bad", containerMap[targetCard]);
+          paintDbStatus(action, msg, is429 ? "warn" : "bad", op);
           say(msg, is429 ? "warn" : "bad");
         }
       );
@@ -819,7 +854,7 @@
       var msg = is429
         ? "操作过于频繁，请稍后再试（频控限制 1 秒/次）"
         : ("获取配置失败：" + errStr);
-      paintDbStatus(null, msg, is429 ? "warn" : "bad", currentContainerId);
+      paintDbStatus(null, msg, is429 ? "warn" : "bad", op);
       say(msg, is429 ? "warn" : "bad");
     });
   }

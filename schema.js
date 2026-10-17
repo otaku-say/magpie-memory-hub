@@ -11,13 +11,14 @@
  */
 
 /** 结构版本号。每次改动 TABLES 都要 +1，并在 MIGRATIONS 里补一条说明。 */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** 各版本做了什么（给人看，也用于生成变更说明）。 */
 export const MIGRATIONS = {
   1: "初始结构：memories / pitfalls / memhub_meta 三表 + 两个唯一索引",
   2: "新增 client 来源字段（memories / pitfalls）与 full_content 全文存储（memories）",
   3: "数据库表与字段语义重构：删除 dead fields (entities/hits/source)，重命名为语义明确字段 (scope_level, content_fingerprint, retrieval_count, related_entities, full_text, superseded_by_id, lifecycle_status, revision, last_used_at)，新增 origin 产生方式，改默认值 client='unknown'，重命名元数据表为 schema_meta",
+  4: "新增来源可追溯性字段：memories 与 pitfalls 表增加 source_session (VARCHAR 128) 与 source_turn (INT)",
 };
 
 /**
@@ -59,6 +60,13 @@ export const TABLES = {
       { name: "expires_at", type: "DATETIME", nullable: true },
       // 最后被检索命中或被读取展开的时间；写库时不设置，默认为 NULL；仅在被取用时更新
       { name: "last_used_at", type: "DATETIME", nullable: true },
+      // 来源会话标识与轮次序号（来源可追溯性）
+      // 空值语义说明：为 NULL 是完全合法且符合设计的正常行为。
+      // 1. 无会话头的一次性请求（如 curl 或单次脚本直接调用 Magpie）；
+      // 2. 直接调用 MCP 工具未传 session/turn 上下文；
+      // 3. 离线合成、测试用例或非会话场景数据。严禁伪造虚假会话 ID。
+      { name: "source_session", type: "VARCHAR", length: 128, default: "NULL" },
+      { name: "source_turn", type: "INT", default: "NULL" },
       { name: "created_at", type: "DATETIME", default: "CURRENT_TIMESTAMP" },
       { name: "updated_at", type: "DATETIME", default: "CURRENT_TIMESTAMP", onUpdate: "CURRENT_TIMESTAMP" },
     ],
@@ -89,6 +97,9 @@ export const TABLES = {
       { name: "invalid_at", type: "DATETIME", nullable: true },
       { name: "invalid_reason", type: "VARCHAR", length: 64, default: "''" },
       { name: "last_occurred_at", type: "DATETIME", default: "CURRENT_TIMESTAMP" },
+      // 来源会话标识与轮次序号（来源可追溯性，空值语义同 memories）
+      { name: "source_session", type: "VARCHAR", length: 128, default: "NULL" },
+      { name: "source_turn", type: "INT", default: "NULL" },
       { name: "created_at", type: "DATETIME", default: "CURRENT_TIMESTAMP" },
       { name: "updated_at", type: "DATETIME", default: "CURRENT_TIMESTAMP", onUpdate: "CURRENT_TIMESTAMP" },
     ],

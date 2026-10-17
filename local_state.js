@@ -278,11 +278,27 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
     }
   }
 
+  const turnKey = options.turnKey ? String(options.turnKey).trim() : "";
+
   // 2. 更新或新建条目
   let entry = pending[fingerprint];
   if (entry) {
+    // 同轮去重：如果传入了 turnKey 且本轮次已经记录过该指纹，则本轮不重复 +1
+    if (turnKey && entry.last_turn === turnKey) {
+      entry.last_seen = now;
+      if (payload) entry.payload = payload;
+      st.pending_patterns = pending;
+      writeState(st);
+      return {
+        shouldGraduate: entry.count >= minEvidence,
+        entry: { ...entry },
+        count: entry.count,
+        needed: minEvidence,
+      };
+    }
     entry.count = (entry.count || 0) + 1;
     entry.last_seen = now;
+    if (turnKey) entry.last_turn = turnKey;
     if (payload) {
       entry.payload = payload;
     }
@@ -308,6 +324,7 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
       count: 1,
       first_seen: now,
       last_seen: now,
+      last_turn: turnKey || undefined,
       payload: payload || {},
     };
     pending[fingerprint] = entry;

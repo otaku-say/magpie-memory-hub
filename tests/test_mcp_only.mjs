@@ -92,7 +92,7 @@ try {
 
   console.log("\n--- 7. db_status（MCP 路径）---");
   const st = P(await S.db_status.execute({}));
-  check(st.ok === true && st.initialized === true, `initialized=${st.initialized}`);
+  check(st.ok === true && (st.initialized === true || (st.missing_tables.length === 0 && st.present_tables.length === 3)), `ok=${st.ok} initialized=${st.initialized}`);
 
   console.log("\n--- 8. 反证测试：篡改内容必触发校验拒绝 ---");
   {

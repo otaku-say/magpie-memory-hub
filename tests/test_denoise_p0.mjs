@@ -348,6 +348,87 @@ IndexError: list index out of range in job_${unverifiedNonce}
   assert.strictEqual(getPendingEvidence(zombieFp), null, "时间戳为 0 或缺失的损坏脏数据必须被自动清理");
   console.log("  ✓ 脏数据自愈清理验证通过：无时间戳条目绝无可能成为永生僵尸！\n");
 
+  console.log("=================================================================");
+  console.log("【测试 11】min_evidence 按内容类型区分全链路验证（高优先级验收）");
+  console.log("=================================================================");
+
+  // 11.1 验收 ①：只出现一次的真实事实（如「我的开发机是 Mac mini M4 16G」），立即入库
+  const factTurn = `
+[user]: 请帮我配置开发环境。
+[user]: 我的开发机是 Mac mini M4 16G。
+[assistant]: 已确认，已记录你的开发机配置为 Mac mini M4 16G。
+`.trim();
+  const factRes = await processDialogueAndHarvest(
+    factTurn,
+    { project: env.project, agent: "type-fact-tester" },
+    env.client,
+    { min_evidence: 3 } // 即使全局/踩坑 min_evidence 为 3，事实侧门槛仍为 1
+  );
+  assert.strictEqual(factRes.memoriesSaved, 1, "验收 ① 通过：只出现一次的真实环境事实必须直接立即入库（不设 3 次门禁）");
+  assert.strictEqual(factRes.pitfallsSaved, 0, "事实不会产生 pitfalls");
+  const memRows = (await env.client.list("memories", { project: env.project, category: "fact" })).data;
+  assert.ok(memRows && memRows.length > 0, "真实事实必须已在 DB 中");
+  assert.ok(memRows.some((r) => r.content.includes("Mac mini M4 16G")), "入库内容必须包含 Mac mini M4 16G");
+  console.log("  ✓ 验收 ① 通过：只出现一次的真实环境事实立即入库！");
+
+  // 11.2 验收 ②：只出现一次的伪踩坑噪音，仍被拦在 pending 队列，DB 0 写入
+  const pitNoiseNonce = Date.now().toString(36) + "_noise_once";
+  const pitTurn1 = `
+[turn 1] 用户运行遇到偶发错误：
+IndexError: list index out of range in task_${pitNoiseNonce}
+[assistant]: 执行 python fix_task_${pitNoiseNonce}.py 解决，PASS (exit code 0)。
+`.trim();
+  const pitRes1 = await processDialogueAndHarvest(
+    pitTurn1,
+    { project: env.project, agent: "type-pit-tester" },
+    env.client,
+    { min_evidence: 3 }
+  );
+  assert.strictEqual(pitRes1.pitfallsSaved, 0, "验收 ② 通过：只出现一次的踩坑模式必须被拦住，绝不直接入库 (pitfallsSaved=0)");
+  console.log("  ✓ 验收 ② 通过：只出现一次的伪踩坑噪音仍被拦住（踩坑门禁未削弱）！");
+
+  // 11.3 验收 ③：不同轮次重复 3 次的踩坑按原逻辑毕业落盘
+  const pitTurn2 = `
+[turn 2] 再次运行另一任务时偶发相同错误：
+IndexError: list index out of range in task_${pitNoiseNonce}
+[assistant]: 执行 python fix_task_${pitNoiseNonce}.py 解决，PASS (exit code 0)。
+`.trim();
+  const pitRes2 = await processDialogueAndHarvest(
+    pitTurn2,
+    { project: env.project, agent: "type-pit-tester" },
+    env.client,
+    { min_evidence: 3 }
+  );
+  assert.strictEqual(pitRes2.pitfallsSaved, 0, "第 2 次出现踩坑模式仍未达标，不落盘");
+
+  const pitTurn3 = `
+[turn 3] 部署验证阶段再次发生相同错误：
+IndexError: list index out of range in task_${pitNoiseNonce}
+[assistant]: 执行 python fix_task_${pitNoiseNonce}.py 解决，PASS (exit code 0)。
+`.trim();
+  const pitRes3 = await processDialogueAndHarvest(
+    pitTurn3,
+    { project: env.project, agent: "type-pit-tester" },
+    env.client,
+    { min_evidence: 3 }
+  );
+  assert.strictEqual(pitRes3.pitfallsSaved, 1, "验收 ③ 通过：重复 3 次的踩坑模式达到门槛（count>=3），正式毕业入库！");
+  console.log("  ✓ 验收 ③ 通过：重复 3 次的踩坑仍按原逻辑正常毕业入库！");
+
+  // 11.4 反证测试：若显式对记忆传入 min_evidence_memory=3，单次事实亦必须受控拦下
+  const blockedTurn = `
+[user]: 统一采用 fastify 替代 express 作为服务端框架。
+[assistant]: 好的，系统框架决策遵循 fastify。
+`.trim();
+  const blockedRes = await processDialogueAndHarvest(
+    blockedTurn,
+    { project: env.project, agent: "type-blocked-tester" },
+    env.client,
+    { min_evidence_memory: 3 }
+  );
+  assert.strictEqual(blockedRes.memoriesSaved, 0, "反证通过：显式配置 min_evidence_memory>1 时未达标决策被成功拦截");
+  console.log("  ✓ 反证测试通过：min_evidence_memory 参数独立受控且精准生效！\n");
+
 } finally {
   console.log("=================================================================");
   console.log("【清理与全局残余断言】彻底清理隔离测试数据库行");

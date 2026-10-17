@@ -320,6 +320,24 @@ async function saveMemory(client, cfg, m, ctx) {
   if (!confidence || confidence <= 1) confidence = Math.round((confidence || 1) * 100);
   confidence = Math.max(0, Math.min(100, Math.round(confidence || 100)));
 
+  /* 来源可追溯性（空值语义说明）：
+   * source_session 与 source_turn 为 NULL 是完全合法且符合设计的正常行为：
+   * 1. 外部或 Agent 直接调用 MCP 工具未传 session/turn 上下文；
+   * 2. 客户端调用 Magpie 时未携带会话标识头（如 curl 或单次脚本）；
+   * 3. 离线合成、测试用例或跨会话独立归档。
+   * 严禁无会话信息时伪造随机 UUID 或虚假轮次，拿不到时必须为 NULL。
+   */
+  const callerSession = (ctx && (ctx.session || (ctx._ctx && ctx._ctx.session))) || "";
+  const callerTurn = (ctx && (typeof ctx.turn === "number" ? ctx.turn : (ctx._ctx && typeof ctx._ctx.turn === "number" ? ctx._ctx.turn : null)));
+  const rawSession = (m.source_session && String(m.source_session).trim())
+    || (callerSession && String(callerSession).trim())
+    || "";
+  const sourceSession = rawSession ? rawSession.slice(0, 128) : null;
+  const parsedTurn = typeof m.source_turn === "number" ? m.source_turn : (m.source_turn ? Number(m.source_turn) : null);
+  const sourceTurn = (typeof parsedTurn === "number" && !isNaN(parsedTurn) && parsedTurn >= 1)
+    ? Math.floor(parsedTurn)
+    : (callerTurn && callerTurn >= 1 ? Math.floor(callerTurn) : null);
+
   if (!title) throw new Error("title 不能为空");
   if (!content) throw new Error("content 不能为空");
 
@@ -379,6 +397,8 @@ async function saveMemory(client, cfg, m, ctx) {
      * 省略这两列会落库为 NULL —— 而 freshness() 依赖它们，会永远返回 0。 */
     created_at: nowSql(),
     updated_at: nowSql(),
+    source_session: sourceSession,
+    source_turn: sourceTurn,
   };
 
   /* 数据库上有 (project, content_fingerprint) 唯一索引：它才是去重的最终保证，
@@ -550,6 +570,19 @@ async function pitfallSave(client, cfg, args, ctx) {
   const errorType = String(args.error_type || "").trim();
   const tags = String(args.tags || "").trim().toLowerCase();
 
+  /* 来源可追溯性（空值语义同 saveMemory）：
+   * 无会话上下文或直接调用时为 NULL，严禁伪造假数据。 */
+  const callerSession = (ctx && (ctx.session || (ctx._ctx && ctx._ctx.session))) || "";
+  const callerTurn = (ctx && (typeof ctx.turn === "number" ? ctx.turn : (ctx._ctx && typeof ctx._ctx.turn === "number" ? ctx._ctx.turn : null)));
+  const rawSession = (args.source_session && String(args.source_session).trim())
+    || (callerSession && String(callerSession).trim())
+    || "";
+  const sourceSession = rawSession ? rawSession.slice(0, 128) : null;
+  const parsedTurn = typeof args.source_turn === "number" ? args.source_turn : (args.source_turn ? Number(args.source_turn) : null);
+  const sourceTurn = (typeof parsedTurn === "number" && !isNaN(parsedTurn) && parsedTurn >= 1)
+    ? Math.floor(parsedTurn)
+    : (callerTurn && callerTurn >= 1 ? Math.floor(callerTurn) : null);
+
   if (!component) throw new Error("component 不能为空");
   if (!symptom) throw new Error("symptom 不能为空");
   if (!rootCause) throw new Error("root_cause 不能为空");
@@ -584,6 +617,8 @@ async function pitfallSave(client, cfg, args, ctx) {
       project, client: clientVal, component, symptom, root_cause: rootCause, solution,
       severity, error_type: errorType, tags, content_fingerprint: fp,
       recurrence: initialRecurrence, last_occurred_at: now,
+      source_session: sourceSession,
+      source_turn: sourceTurn,
       created_at: now, updated_at: now,
     });
   } catch (e) {
@@ -729,6 +764,8 @@ const TOOLS = {
         tags: { type: "string", description: "逗号分隔的检索关键词" },
         related_entities: { type: "string", description: "相关实体/技术栈" },
         confidence: { type: "number", description: "置信度 0~1，默认 1" },
+        source_session: { type: "string", description: "来源会话标识（如客户端会话 ID，可选）" },
+        source_turn: { type: "integer", description: "来源会话轮次序号（从 1 起始，可选）" },
       },
       required: ["title", "content"],
     },
@@ -818,6 +855,8 @@ const TOOLS = {
         severity: { type: "string", enum: SEVERITIES },
         error_type: { type: "string", description: "错误类型标签，便于聚类" },
         tags: { type: "string", description: "检索关键词" },
+        source_session: { type: "string", description: "来源会话标识（如客户端会话 ID，可选）" },
+        source_turn: { type: "integer", description: "来源会话轮次序号（从 1 起始，可选）" },
       },
       required: ["component", "symptom", "root_cause", "solution"],
     },
@@ -873,7 +912,7 @@ const TOOLS = {
         database: { type: "string", description: "要创建的数据库名（逻辑名即可，NCB 会自动加账号前缀）。默认取设置页的 ncb_instance" },
         on_exist: { type: "string", enum: ["reuse", "auto_rename", "fail"], description: "同名已存在时的策略，默认 reuse" },
         with_r2: { type: "boolean", description: "是否同时挂载 R2 存储，默认 false，需要时才挂" },
-        bucket_name: { type: "string", description: "R2 bucket 名，默认与数据库名相同" },
+        bucket_name: { type: "string", description: "R2 bucket 名，默认由数据库名派生合规名称（如将下划线替换为连字符）" },
         public_url: { type: "string", description: "R2 公开域名，如 https://cdn.example.com" },
         account_id: { type: "string", description: "Cloudflare 账号 ID（账号已连接过可留空，会自动复用）" },
         access_key_id: { type: "string", description: "Cloudflare R2 Access Key ID（同上可留空）" },
@@ -982,7 +1021,7 @@ const TOOLS = {
       type: "object",
       properties: {
         database: { type: "string", description: "数据库实例名，默认取插件配置" },
-        bucket_name: { type: "string", description: "自定义 bucket 名，默认与数据库名相同" },
+        bucket_name: { type: "string", description: "自定义 bucket 名，默认由数据库名派生合规名称（如将下划线替换为连字符）" },
         public_url: { type: "string", description: "自定义域名或 r2.dev 公开地址" },
       },
     },

@@ -17,7 +17,7 @@ import path from "node:path";
 import assert from "node:assert/strict";
 
 const { lookupSecret, lookupRealDatabase } = await import(new URL("../local_state.js", import.meta.url).href);
-const { resolveRealDatabase } = await import(new URL("../r2.js", import.meta.url).href);
+const { resolveRealDatabase, deriveLegalBucketName } = await import(new URL("../r2.js", import.meta.url).href);
 const { secretCheck } = await import(new URL("../db_tools.js", import.meta.url).href);
 
 // 找到实际使用的 state 文件路径（local_state.js 自己算的）
@@ -71,13 +71,29 @@ try {
   const resolved = await resolveRealDatabase({ instance: "agent_memory" }, "agent_memory");
   t("resolveRealDatabase 解析真实库名", resolved, "41694_agent_memory");
 
-  console.log("\n【测试】R2 默认桶名必须等于真实数据库名（同源同变量）");
-  // 模拟 r2Setup 取默认桶名的逻辑：当未显式传 bucket_name 时，桶名取 db
+  console.log("\n【测试】R2 默认桶名必须从真实数据库名派生合规桶名（纯函数同一源头）");
+  // 模拟 r2Setup 取默认桶名的逻辑：当未显式传 bucket_name 时，由 deriveLegalBucketName(db) 派生
   const testDb = await resolveRealDatabase({}, "agent_memory");
-  const defaultBucketName = testDb;
-  assert.strictEqual(defaultBucketName, testDb, "默认桶名必须严格全等于数据库真实名");
-  assert.strictEqual(defaultBucketName, "41694_agent_memory", "默认桶名必须为真实库名 41694_agent_memory");
-  t("桶名与 REST Instance 同源同名", defaultBucketName, testDb);
+  const defaultBucketName = deriveLegalBucketName(testDb);
+  assert.strictEqual(defaultBucketName, "41694-agent-memory", "默认桶名必须将下划线替换为合法连字符 41694-agent-memory");
+  assert.strictEqual(deriveLegalBucketName("my_custom_db"), "my-custom-db", "自定义带下划线库名正确派生");
+  assert.strictEqual(deriveLegalBucketName("valid-bucket-123"), "valid-bucket-123", "合规桶名原样保留");
+  const s3Regex = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+  assert.ok(s3Regex.test(defaultBucketName), "派生桶名必须满足 S3/R2 命名规范正则");
+  assert.ok(s3Regex.test(deriveLegalBucketName("Upper_Case_DB_123")), "大写与下划线必须派生出合规桶名");
+  assert.ok(!deriveLegalBucketName("Upper_Case_DB_123").includes("_"), "桶名绝不能包含下划线");
+  assert.strictEqual(deriveLegalBucketName("a"), "a-bkt", "过短名称自动补齐满足至少 3 字符");
+  assert.ok(deriveLegalBucketName("a".repeat(100)).length <= 63, "超长名称截断满足至多 63 字符");
+  assert.ok(s3Regex.test(deriveLegalBucketName("a".repeat(100))), "超长名称截断后仍满足 S3/R2 正则规范");
+  // 边界强化测试（纯下划线/点/横杠/纯非 ASCII/空字符绝不产出非法或空桶名）
+  assert.strictEqual(deriveLegalBucketName("___"), "memhub-r2-bkt", "纯下划线必须安全回退到默认合规桶名");
+  assert.strictEqual(deriveLegalBucketName("..."), "memhub-r2-bkt", "纯点号必须安全回退到默认合规桶名");
+  assert.strictEqual(deriveLegalBucketName("---"), "memhub-r2-bkt", "纯连字符必须安全回退到默认合规桶名");
+  assert.strictEqual(deriveLegalBucketName("我的知识库"), "memhub-r2-bkt", "纯非 ASCII 字符必须安全回退到默认合规桶名");
+  assert.strictEqual(deriveLegalBucketName("a.b"), "a-b", "点号自动转为连字符以完全契合 Cloudflare R2 规范");
+  assert.ok(s3Regex.test(deriveLegalBucketName("___")), "纯下划线派生桶名必须满足规范正则");
+  assert.ok(s3Regex.test(deriveLegalBucketName("我的知识库")), "纯中文派生桶名必须满足规范正则");
+  t("桶名经 deriveLegalBucketName 纯函数合法化", defaultBucketName, "41694-agent-memory");
 
   console.log("\n【测试】secretCheck 三类失败分支与可操作指引");
   // 1) 未填写 Secret Key (本地无捕获且未手动传)
@@ -118,6 +134,32 @@ try {
     assert.ok(!interceptedUrl.includes("Instance=agent_memory&"), "严禁使用逻辑名 agent_memory 探测");
     assert.ok(checkProbe.lines.some((l) => l.includes("两个最常见原因")), "必须给出两个高频原因说明");
     t("分支3: 403 INVALID 且探测 URL 使用真实库名 41694_agent_memory", checkProbe.verdict, "INVALID");
+
+    // 4) TLS 握手失败与非法桶名精准分类断言
+    globalThis.fetch = async () => ({
+      status: 500,
+      json: async () => ({ status: "failed", error: "SSL alert number 40: handshake failure" }),
+    });
+    const checkTls = await secretCheck({ instance: "agent_memory" }, { secret: "ncb_sec_sample_invalid_key_999" });
+    assert.strictEqual(checkTls.verdict, "R2_TLS_ERROR", "远端 500 TLS 握手失败必须识别为 R2_TLS_ERROR");
+    assert.ok(checkTls.lines.some((l) => l.includes("并非密钥无效")), "必须向用户澄清 Secret Key 已通过验证");
+    t("分支4: 远端连 R2 发生 TLS 握手失败 (SSL alert 40)", checkTls.verdict, "R2_TLS_ERROR");
+
+    globalThis.fetch = async () => ({
+      status: 500,
+      json: async () => ({ status: "failed", error: "InvalidBucketName: The specified bucket is not valid." }),
+    });
+    const checkBucket = await secretCheck({ instance: "agent_memory" }, { secret: "ncb_sec_sample_invalid_key_999" });
+    assert.strictEqual(checkBucket.verdict, "R2_BUCKET_INVALID", "远端 500 非法桶名必须识别为 R2_BUCKET_INVALID");
+    t("分支5: 远端存储桶名非法 (InvalidBucketName)", checkBucket.verdict, "R2_BUCKET_INVALID");
+
+    globalThis.fetch = async () => {
+      throw new Error("connect EPROTO 104.21.5.12:443: sslv3 alert handshake failure");
+    };
+    const checkClientTls = await secretCheck({ instance: "agent_memory" }, { secret: "ncb_sec_sample_invalid_key_999" });
+    assert.strictEqual(checkClientTls.verdict, "ERROR");
+    assert.ok(checkClientTls.title.includes("TLS 握手异常"), "本机到 NCB TLS 握手异常必须在标题明确指出");
+    t("分支6: 本机到 NCB TLS 握手异常 (EPROTO)", checkClientTls.verdict, "ERROR");
   } finally {
     globalThis.fetch = origFetch;
   }

@@ -345,6 +345,8 @@ def is_command_retry_compatible(failed_cmd, solution_cmd, error_type="general"):
     if bin_a in GENERIC_NOISE_TOOLS or bin_b in GENERIC_NOISE_TOOLS:
         return False
     if bin_a == bin_b:
+        if error_type == "missing_dependency" and re.search(r"(?:install|add|get)\b", solution_cmd, re.I):
+            return True
         s1, s2 = str(failed_cmd).strip(), str(solution_cmd).strip()
         max_len = max(len(s1), len(s2))
         dist = levenshtein_distance(s1, s2)
@@ -405,8 +407,24 @@ def is_explicit_user_memory(text):
         s = "\n".join(parts)
     if not s:
         return False
-    return bool(re.search(r"(?:^|\n|[。！？；：!?;:\n]\s*)(?:记下来|记住|避坑|备忘|必须记住|一定要记|务必遵守|mark|remember)[:：]", s, re.I) or
-                re.search(r"(?:^|\n|[。！？；：!?;:\n]\s*)(?:注意|规则|规范要求)[:：]", s, re.I))
+    return bool(re.search(r"(?:^|\n|[。！？；：!?;:\n]\s*)(?:记下来|记住|存入记忆|记入记忆|记入避坑|记录避坑|避坑|备忘|必须记住|一定要记|务必遵守|务必记住|mark|remember)[:：\s]", s, re.I) or
+                re.search(r"(?:^|\n|[。！？；：!?;:\n]\s*)(?:避坑指南|踩坑记录|避坑备忘)[:：]", s, re.I))
+
+
+def is_documentation_or_scaffolding(line):
+    """判定是否为文档/任务书/规范说明行（绝非真实执行报错或处置解法）"""
+    s = str(line or "").strip()
+    if not s:
+        return True
+    if re.search(r"^[-*+]\s+.*(?:不要改代码|由主控裁决|复现步骤|验收标准|任务书|报告里|需求|约束|原则|回归测试|实测输出)", s):
+        return True
+    if re.search(r"\*\*(?:不要|严禁|必须|禁止|注意)[^*]+\*\*", s):
+        return True
+    if re.search(r"^(?:要求|约束|注意|规范|原则|提示|目标|修法|根因|说明)[：:]", s):
+        return True
+    if re.search(r"^[「“\"'].*FAIL.*[」”\"']", s):
+        return True
+    return False
 
 
 def _sig(s):
@@ -435,7 +453,13 @@ def mine_failures(text):
             continue
         if is_code_or_syntax_noise(line):
             continue
+        if is_documentation_or_scaffolding(line):
+            continue
         if is_generic_tool_invocation(line):
+            continue
+        if re.search(r"^[#*+-]\s", line):
+            continue
+        if re.search(r"[「“\"'][^」”\"']*\bFAIL\b[^」”\"']*[」”\"']", line):
             continue
 
         line_without_inline = strip_inline_code(line).strip()
@@ -470,6 +494,8 @@ def mine_failures(text):
             trimmed = l.strip()
             if not trimmed or is_pure_status_or_noise(trimmed):
                 continue
+            if is_documentation_or_scaffolding(trimmed):
+                continue
             if is_generic_tool_invocation(trimmed):
                 continue
 
@@ -491,6 +517,11 @@ def mine_failures(text):
                     elif "connection refused" in low_f or "timed out" in low_f:
                         prelim_etype = "network"
                     if not is_command_retry_compatible(failed_cmd, trimmed, prelim_etype):
+                        continue
+                elif not failed_cmd and not ACTION_CMD_RE.search(trimmed) and not re.search(r"^[$#>]\s*", trimmed):
+                    tokens_a = [t for t in re.split(r"[^\w\u4e00-\u9fa5]+", f["raw"].lower()) if len(t) >= 3]
+                    low_trimmed = trimmed.lower()
+                    if not any(t in low_trimmed for t in tokens_a):
                         continue
 
                 solution_line = trimmed
@@ -595,7 +626,7 @@ ACTION_CMD_RE = re.compile(
 )
 
 FIX_DESC_RE = re.compile(
-    r"(?:(?:建议|请|必须|统一|改用|已)?(?:通过|采用|使用|执行|运行|改用|安装|配置|调整|更新|升级|修复|修改|重新)\s*[^\n]{2,80}?(?:解决|修复|搞定|奏效|恢复|生效|成功|pass)|(?:解决(?:方法|方案|办法)?|修复(?:方法|方案|办法)?|处置(?:方法|方案)?|应对措施|workaround)[：:\s]+[^\n]{3,120}|(?:已|后续)?(?:通过|改用|切换到|重新安装|修复为|添加|配置)\s*[^\n]{3,120}|(?:fix(?:ed)?|solution|resolved?)\s*(?:by|via|with|using|to)?[：:\s]+[^\n]{3,120})",
+    r"(?:(?:建议|请|必须|统一|改用|已)?(?:通过|采用|使用|执行|运行|改用|安装|配置|调整|更新|升级|修复|修改|重新)\s*[^\n]{2,80}?(?:解决|修复|搞定|奏效|恢复|生效|成功|pass)|(?:解决(?:方法|方案|办法)?|修复(?:方法|方案|办法)?|处置(?:方法|方案)?|应对措施|workaround)[：:\s]+[^\n]{3,120}|(?:已|后续)?(?:通过|改用|切换到|重新安装|修复为|添加|配置)\s*[^\n]{3,120}|(?:fix(?:ed)?|solution|resolved)\s*(?:[：:]|(?:by|via|with|using|to)\s+)[^\n]{3,120})",
     re.I
 )
 
@@ -1019,6 +1050,11 @@ def save_memory(ncb, cfg, m, cache):
             "invalid_at": None,
             "invalid_reason": "",
             "last_used_at": None,
+            # 空值语义说明：
+            # source_session 与 source_turn 为 NULL 是完全合法且符合设计的正常行为。
+            # 离线合成、无会话头调用或无法推导时写 None（NULL），严禁伪造假数据。
+            "source_session": str(m.get("source_session")).strip()[:128] if m.get("source_session") else None,
+            "source_turn": int(m["source_turn"]) if m.get("source_turn") is not None else None,
             # 必须显式写：NCB 不生效 DEFAULT CURRENT_TIMESTAMP，省略即 NULL。
             "created_at": now_str(),
             "updated_at": now_str(),
@@ -1078,6 +1114,9 @@ def save_pitfall(ncb, cfg, p, cache):
             "tags": str(p.get("tags") or "").lower(),
             "content_fingerprint": fp,
             "recurrence": rec,
+            # 空值语义说明：同 save_memory，无会话信息时写 None（NULL），严禁伪造假数据。
+            "source_session": str(p.get("source_session")).strip()[:128] if p.get("source_session") else None,
+            "source_turn": int(p["source_turn"]) if p.get("source_turn") is not None else None,
             "last_occurred_at": now_str(),
             # 同上：NCB 不生效列默认值，必须显式写。
             "created_at": now_str(),
@@ -1728,13 +1767,16 @@ def process_turn(cfg, ncb, turn, caches, dry_run):
     stats = {"memories": [], "pitfalls": [], "errors": [], "compressed": None}
     convo = f"用户提问：\n{turn.get('prompt', '')}\n\n助手回复：\n{turn.get('response', '')}"
     is_explicit = is_explicit_user_memory(convo)
+    raw_sess = str(turn.get("session") or turn.get("session_id") or "").strip()
+    session_val = raw_sess[:128] if raw_sess else None
+    turn_val = int(turn["turn"]) if turn.get("turn") is not None else (int(turn["turn_index"]) if turn.get("turn_index") is not None else None)
 
     # ---- ① 失败学习（零 LLM 成本，纯启发式）----
     try:
         accumulator = caches.get("evidence") if caches else None
         pit_cache = caches["pitfall"] if caches and "pitfall" in caches else set()
         for p in mine_failures(convo):
-            item = dict(p, project=cfg["project"])
+            item = dict(p, project=cfg["project"], source_session=session_val, source_turn=turn_val)
             if not item.get("component"):
                 item["component"] = "auto"
             res = record_pitfall(ncb, cfg, item, pit_cache,
@@ -1749,7 +1791,7 @@ def process_turn(cfg, ncb, turn, caches, dry_run):
         if heuristic_mems:
             cands = rule_judge(cfg, ncb, heuristic_mems, cfg["project"], stats)
             for cand in cands:
-                item = dict(cand, project=cfg["project"], source="harvest:heuristic")
+                item = dict(cand, project=cfg["project"], source="harvest:heuristic", source_session=session_val, source_turn=turn_val)
                 if dry_run:
                     stats["memories"].append({"action": "DRYRUN", **item})
                 else:
