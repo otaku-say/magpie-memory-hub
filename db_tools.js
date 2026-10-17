@@ -674,65 +674,104 @@ export async function secretCheck(cfg, args) {
       };
     }
 
-    // 远端返回错误：细分原因（区分「密钥无效」与「NCB 远端连 R2 发生异常」）
-    let errorDetail = "Invalid secret_key.";
+    // 远端返回错误：细分原因（区分「密钥无效」与「NCB 远端连 R2 发生异常」与「网关宕机 502/503/504」）
+    let errorDetail = "";
     try {
       const body = await res.json();
       if (body && (body.error || body.message)) {
         errorDetail = body.error || body.message;
       }
-    } catch (_) {}
+    } catch (_) {
+      errorDetail = res.statusText || ("HTTP " + res.status);
+    }
+    if (!errorDetail) {
+      errorDetail = res.statusText || ("HTTP " + res.status);
+    }
+
+    // 远端网关异常（502 Bad Gateway / 503 Service Unavailable / 504 Gateway Timeout / 520-526）
+    // 此时请求未被 NCB 鉴权核心处理，必须判为 ok: false，绝不误判为密钥有效
+    const isGatewayError = res.status === 502 || res.status === 503 || res.status === 504 || (res.status >= 520 && res.status <= 526);
+    if (isGatewayError) {
+      return {
+        ok: false,
+        verdict: "GATEWAY_ERROR",
+        source,
+        database: db || rawDb,
+        title: `NoCodeBackend 远端网关异常（HTTP ${res.status}）`,
+        lines: [
+          `目标数据库：${db || rawDb}（来源：${source}）`,
+          `远端接口返回：${errorDetail}（HTTP ${res.status}）`,
+          "远端反向代理或服务器暂时不可用（Bad Gateway / Gateway Timeout），请求未能到达 NoCodeBackend 鉴权服务。",
+          "处理建议：请检查 NoCodeBackend 服务是否正常运行，或稍后重试。",
+        ],
+      };
+    }
 
     const errStr = String(errorDetail || "");
     const isTlsHandshake = /handshake failure|SSL alert number 40|EPROTO|sslv3/i.test(errStr);
     const isInvalidBucket = /bucket name is not valid|InvalidBucketName/i.test(errStr);
 
-    if (res.status >= 500 && isTlsHandshake) {
+    if (res.status === 500 && isTlsHandshake) {
       return {
-        ok: false,
+        ok: true,
         verdict: "R2_TLS_ERROR",
         source,
         database: db || rawDb,
-        title: "Secret Key 已通过鉴权，但远端连 Cloudflare R2 发生 TLS 握手失败",
+        title: "Secret Key 有效（已通过鉴权），但远端连 Cloudflare R2 发生 TLS 握手失败",
         lines: [
           `目标数据库：${db || rawDb}（来源：${source}）`,
           `远端接口返回：${errorDetail}（HTTP ${res.status}）`,
-          "【排查关键】Secret Key 本身已通过 NoCodeBackend 验证，并非密钥无效！",
+          "【排查关键】密钥本身有效（鉴权已通过）。并非密钥无效。这个报错来自 NoCodeBackend 侧访问该库的 R2 存储通道失败，与你的密钥无关。若要让 R2 相关功能可用，请先挂载 R2 存储。",
           "根本原因：此报错来自 NoCodeBackend 远端对 R2 存储通道的连带校验（与你的密钥无关）。NoCodeBackend 拿它保存的 Cloudflare 凭据去连 R2 时，被 Cloudflare 拒绝了 TLS 握手（SSL alert 40）。",
           "常见原因与指引：① 若尚未挂载 R2，请先前往 R2 卡片点击『挂载 R2 存储』；② 若已挂载，请检查 Cloudflare 侧 R2 API Token 权限（须选【Admin Read & Write】）或在 NCB 控制台更新 R2 连接（注意：此握手发生在远端与 Cloudflare 之间，与本地 Docker / 容器 TLS 环境无关，切勿在容器内安装 openssl）。",
         ],
       };
     }
 
-    if (res.status >= 500 && isInvalidBucket) {
+    if (res.status === 500 && isInvalidBucket) {
       return {
-        ok: false,
+        ok: true,
         verdict: "R2_BUCKET_INVALID",
         source,
         database: db || rawDb,
-        title: "Secret Key 已通过鉴权，但关联的 R2 存储桶名非法",
+        title: "Secret Key 有效（已通过鉴权），但关联的 R2 存储桶名非法",
         lines: [
           `目标数据库：${db || rawDb}（来源：${source}）`,
           `远端接口返回：${errorDetail}（HTTP ${res.status}）`,
-          "【排查关键】Secret Key 本身已通过 NoCodeBackend 验证，并非密钥无效！",
+          "【排查关键】密钥本身有效（鉴权已通过）。并非密钥无效。这个报错来自 NoCodeBackend 侧访问该库的 R2 存储通道失败，与你的密钥无关。若要让 R2 相关功能可用，请先挂载 R2 存储。",
           "根本原因：当前关联的 Cloudflare R2 存储桶名不符合 S3/R2 命名规范（例如包含了下划线 _）。",
           "处理步骤：请点本插件的「挂载 R2 存储」，插件会自动将下划线转为连字符重新挂载合法桶名（如 41694-agent-memory）。",
         ],
       };
     }
 
-    if (res.status >= 500) {
+    if (res.status === 500) {
       return {
-        ok: false,
+        ok: true,
         verdict: "UPSTREAM_ERROR",
         source,
         database: db || rawDb,
-        title: "Secret Key 已通过鉴权，但远端处理发生异常",
+        title: "Secret Key 有效（已通过鉴权），但远端存储通道异常",
         lines: [
           `目标数据库：${db || rawDb}（来源：${source}）`,
           `远端接口返回：${errorDetail}（HTTP ${res.status}）`,
-          "【排查关键】NoCodeBackend 鉴权已通过，但远端服务在处理存储操作时报错。",
-          "处理步骤：请根据远端返回的具体错误信息进行排查，或检查 NoCodeBackend 控制台配置。",
+          "【排查关键】密钥本身有效（鉴权已通过）。并非密钥无效。这个报错来自 NoCodeBackend 侧访问该库的 R2 存储通道失败，与你的密钥无关。若要让 R2 相关功能可用，请先挂载 R2 存储。",
+          "处理步骤：NoCodeBackend 鉴权已通过；若需使用对象存储功能，请先在 R2 卡片完成挂载或在控制台检查配置。",
+        ],
+      };
+    }
+
+    if (res.status > 500) {
+      return {
+        ok: false,
+        verdict: "GATEWAY_ERROR",
+        source,
+        database: db || rawDb,
+        title: `NoCodeBackend 远端服务器异常（HTTP ${res.status}）`,
+        lines: [
+          `目标数据库：${db || rawDb}（来源：${source}）`,
+          `远端接口返回：${errorDetail}（HTTP ${res.status}）`,
+          "远端服务器返回非预期的 5xx 状态码，请求未能被正常鉴权处理。",
         ],
       };
     }

@@ -14,7 +14,7 @@
   var CARD_FIELDS = {
     ncb: ["ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init"],
     r2: ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"],
-    harvest: ["auto_harvest"],
+    harvest: ["auto_harvest", "gatewayTimeoutMs"],
     extract: ["inline_extract", "min_confidence"],
     inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"],
     compress: ["compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"]
@@ -32,7 +32,8 @@
     max_budget_chars: 2048,
     compress_max_chars: 3000,
     compress_min_chars: 1200,
-    max_principles: 2
+    max_principles: 2,
+    gatewayTimeoutMs: 8000
   };
   var BOOL = [
     "auto_init",
@@ -217,6 +218,9 @@
       var el = $(k); if (!el) return;
       next[k] = el.value;
     });
+    if (typeof next.gatewayTimeoutMs !== "number" || isNaN(next.gatewayTimeoutMs)) {
+      next.gatewayTimeoutMs = (typeof current.gatewayTimeoutMs === "number" && !isNaN(current.gatewayTimeoutMs)) ? current.gatewayTimeoutMs : 8000;
+    }
     if (!Array.isArray(next.memories)) next.memories = [];
     return next;
   }
@@ -911,7 +915,12 @@
       var fields = CARD_FIELDS[cardKey] || [];
       fields.forEach(function (k) {
         var el = $(k);
-        if (!el) return;
+        if (!el) {
+          if (k === "gatewayTimeoutMs") {
+            next[k] = (typeof next[k] === "number" && !isNaN(next[k])) ? next[k] : 8000;
+          }
+          return;
+        }
         if (BOOL.indexOf(k) !== -1) {
           next[k] = el.checked;
         } else if (NUM[k] !== undefined) {

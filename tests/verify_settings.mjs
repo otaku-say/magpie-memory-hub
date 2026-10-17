@@ -302,7 +302,7 @@ console.log("\n=== 9. 底部整体保存测试（全部 23 个字段都在）===
     const allRequired = [
       "ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init",
       "r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url",
-      "auto_harvest",
+      "auto_harvest", "gatewayTimeoutMs",
       "inline_extract", "min_confidence",
       "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
       "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"
@@ -311,7 +311,8 @@ console.log("\n=== 9. 底部整体保存测试（全部 23 个字段都在）===
     for (const f of allRequired) {
       if (lastSet[f] === undefined) { allPresent = false; no(`字段 ${f} 缺失`); }
     }
-    check(allPresent, `全部 23 个可配置项字段均在保存 payload 中完整存在`);
+    check(allPresent, `全部 24 个可配置项字段均在保存 payload 中完整存在`);
+    check(lastSet.gatewayTimeoutMs === 8000, `gatewayTimeoutMs 默认写入 8000`);
     check(JSON.stringify(lastSet.memories) === JSON.stringify(REMOTE.memories), "底部保存同样不丢 memories 快照");
   }
 }

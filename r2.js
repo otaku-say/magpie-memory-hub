@@ -19,7 +19,7 @@
 import { NcbMcp } from "./ncb_mcp.js";
 import fs from "node:fs";
 import path from "node:path";
-import { lookupSecret, lookupRealDatabase, rememberDatabase, rememberR2Mount, lookupR2Mount } from "./local_state.js";
+import { lookupSecret, lookupRealDatabase, rememberDatabase, rememberR2Mount, lookupR2Mount, forgetR2Mount } from "./local_state.js";
 
 const REST_BASE = "https://api.nocodebackend.com";
 
@@ -448,6 +448,8 @@ export async function r2Setup(cfg, args) {
       account_id_tail: accId ? accId.slice(-6) : "",
       at: Date.now(),
     });
+  } else {
+    forgetR2Mount(db);
   }
 
   return {
@@ -527,9 +529,26 @@ export async function r2Check(cfg, args) {
     : "未提供任何凭据（使用 NCB 缓存连接）";
 
   // 不做 setupR2Storage，直接用真实探针判断凭据是否可用
-  const probe = await r2Probe(cfg, db);
+  let probe;
+  try {
+    probe = await r2Probe(cfg, db);
+  } catch (e) {
+    probe = { ok: false, error: (e && e.message) || String(e) };
+  }
   const explained = probe.ok ? null : explainProbeFailure(probe.error);
   const ok = !!probe.ok;
+
+  if (ok) {
+    const accId = (cfg && (cfg.r2AccountId || cfg.account_id)) || (a && (a.account_id || a.r2AccountId)) || "";
+    rememberR2Mount(db, {
+      bucket: bucketName,
+      public_url: publicUrl,
+      account_id_tail: accId ? accId.slice(-6) : "",
+      at: Date.now(),
+    });
+  } else {
+    forgetR2Mount(db);
+  }
 
   return {
     ok,

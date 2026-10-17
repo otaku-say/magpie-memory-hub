@@ -19,7 +19,12 @@ import {
   extractTextFromMessages,
   extractTextFromReply,
   processDialogueAndHarvest,
+  triggerBackgroundDrain,
 } from "../gateway_harvest.hooks.js";
+import {
+  readHarvestQueue,
+  clearHarvestQueue,
+} from "../local_state.js";
 import {
   mineEnvironmentFacts,
   mineArchitecturalDecisions,
@@ -545,6 +550,318 @@ ModuleNotFoundError: No module named 'requests'
   console.log("  ✓ 质量回归测试隔离写入与残余为 0 校验全部通过\n");
 }
 
+// -----------------------------------------------------------------------------
+// 8. 治本自证断言：options 缺失 gatewayTimeoutMs 时，网关采集链路仍然能完成并写库
+// -----------------------------------------------------------------------------
+{
+  console.log("▶ [Test 8] 缺失 gatewayTimeoutMs 自证测试（默认 1000ms 预算下的非阻塞采集与写库）...");
+
+  const testProject = `__test_no_timeout_opt_${Date.now()}__`;
+  const memoryStore = new Map();
+  const pitfallStore = new Map();
+  let nextId = 1;
+
+  // 构造模拟慢速数据库客户端：每次网络调用耗时 200ms，2 次写入将耗时 400-800ms
+  // 若钩子采用同步阻塞，宿主默认 1000ms 定时器极易触发 abort；
+  // 采用非阻塞异步后台机制后，钩子在 <50ms 内即可 resolve，且后台最终 100% 写入成功。
+  const mockDbClient = {
+    list: async (table, params) => {
+      await new Promise((r) => setTimeout(r, 200));
+      const store = table === "memories" ? memoryStore : pitfallStore;
+      const rows = [];
+      for (const row of store.values()) {
+        if (params.project && row.project !== params.project) continue;
+        if (params.content_fingerprint && row.content_fingerprint !== params.content_fingerprint) continue;
+        rows.push({ ...row });
+      }
+      return { data: rows };
+    },
+    create: async (table, data) => {
+      await new Promise((r) => setTimeout(r, 200));
+      const store = table === "memories" ? memoryStore : pitfallStore;
+      const id = nextId++;
+      const saved = { ...data, id };
+      store.set(id, saved);
+      return saved;
+    },
+    remove: async (table, id) => {
+      const store = table === "memories" ? memoryStore : pitfallStore;
+      const had = store.delete(id);
+      return { affectedRows: had ? 1 : 0 };
+    },
+  };
+
+  const slowDialogueBody = {
+    messages: [
+      { role: "user", content: "请给出本项目环境部署与运行规范" },
+    ],
+  };
+  const slowReply = {
+    choices: [
+      {
+        message: {
+          content: "好的，首先执行 source /opt/production_venv/bin/activate 激活 Python 虚拟环境。另外项目代码构建规范要求使用 pnpm 构建。",
+        },
+      },
+    ],
+  };
+
+  // 模拟宿主传入的 options：
+  // 关键：【绝对不包含 gatewayTimeoutMs】（模拟旧配置与 undefined 现状）
+  const testOptions = {
+    auto_harvest: true,
+    // gatewayTimeoutMs 显式为 undefined
+    gatewayTimeoutMs: undefined,
+    project: testProject,
+    _client: mockDbClient,
+    _force_test: true,
+  };
+  assert.strictEqual(testOptions.gatewayTimeoutMs, undefined, "断言验证：options 中绝不包含 gatewayTimeoutMs");
+
+  // 模拟宿主网关上下文与 1000ms 默认超时 signal
+  const hostAbortController = new AbortController();
+  const hostTimeoutTimer = setTimeout(() => hostAbortController.abort(), 1000);
+
+  const ctx = {
+    options: testOptions,
+    state: {},
+    session: "session-test-no-timeout",
+    agent: "gateway-agent",
+    signal: hostAbortController.signal,
+    success: true,
+    request: slowDialogueBody,
+  };
+
+  const hookStart = performance.now();
+  // 执行网关响应钩子
+  await onResponse(slowReply, ctx);
+  const hookDurationMs = performance.now() - hookStart;
+
+  // 核心断言 1：网关响应钩子必须极速 resolve（耗时远低于宿主 1000ms 预算，通常 < 50ms）
+  console.log(`  - onResponse 执行耗时: ${hookDurationMs.toFixed(2)} ms (远低于宿主 1000ms 预算)`);
+  assert.ok(hookDurationMs < 500, `onResponse 绝不能阻塞等待远端网络 I/O，耗时必须 < 500ms (实测: ${hookDurationMs.toFixed(2)}ms)`);
+  assert.strictEqual(hostAbortController.signal.aborted, false, "宿主 1000ms 超时定时器绝未被触发 abort");
+  clearTimeout(hostTimeoutTimer);
+
+  // 核心断言 2：等待后台落库任务完全消费完毕
+  const waitStart = Date.now();
+  while (Date.now() - waitStart < 3000) {
+    if (memoryStore.size >= 2) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  // 额外等待 100ms 保证所有微任务与落库完全收敛
+  await new Promise((r) => setTimeout(r, 100));
+
+  // 核心断言 3：即使 options 中没有 gatewayTimeoutMs，后台采集依然顺利落库！
+  const savedMemories = await mockDbClient.list("memories", { project: testProject });
+  assert.strictEqual(savedMemories.data.length, 2, `自证断言成功：即使 options 缺失 gatewayTimeoutMs，仍成功落库全部 2 条记忆！`);
+  const firstMem = savedMemories.data[0];
+  assert.ok(firstMem.content.includes("activate") || firstMem.content.includes("pnpm"), "成功提取出环境规范事实内容");
+  assert.ok(firstMem.created_at && firstMem.updated_at, "落库数据显式包含完整时间戳");
+  console.log(`  - 后台异步成功写库: memories=${savedMemories.data.length} 条 (提炼内容: ${firstMem.title})`);
+
+  // 清理逻辑 (Cleanup) 与残余数 === 0 断言
+  for (const m of savedMemories.data) {
+    await mockDbClient.remove("memories", m.id);
+  }
+  // 如果在清理期间还有任何残留，一并清理
+  const recheckMem = await mockDbClient.list("memories", { project: testProject });
+  for (const m of recheckMem.data) {
+    await mockDbClient.remove("memories", m.id);
+  }
+  const residualMem = await mockDbClient.list("memories", { project: testProject });
+  const residualPit = await mockDbClient.list("pitfalls", { project: testProject });
+  const totalResidue = residualMem.data.length + residualPit.data.length;
+  assert.strictEqual(totalResidue, 0, `测试后数据残余断言失败：预期 0，实得 ${totalResidue}`);
+  console.log(`  - 清理后残余数: ${totalResidue} (断言通过: residue === 0)`);
+  console.log("  ✓ 缺失 gatewayTimeoutMs 场景自证测试与残余为 0 校验全部通过\n");
+}
+
+// -----------------------------------------------------------------------------
+// 9. Null client 韧性断言：无客户端时不丢数据，安全入队并在后续消费时落库
+// -----------------------------------------------------------------------------
+{
+  console.log("▶ [Test 9] Null client 韧性自证测试（无客户端时不丢数据，安全排队后连带消费）...");
+
+  const testProject = `__test_null_client_${Date.now()}__`;
+  const memoryStore = new Map();
+  let nextId = 1;
+  const mockDbClient = {
+    list: async (table, params) => {
+      const rows = [];
+      for (const row of memoryStore.values()) {
+        if (params.project && row.project !== params.project) continue;
+        if (params.content_fingerprint && row.content_fingerprint !== params.content_fingerprint) continue;
+        rows.push({ ...row });
+      }
+      return { data: rows };
+    },
+    create: async (table, data) => {
+      const id = nextId++;
+      const saved = { ...data, id };
+      memoryStore.set(id, saved);
+      return saved;
+    },
+    remove: async (table, id) => {
+      const had = memoryStore.delete(id);
+      return { affectedRows: had ? 1 : 0 };
+    },
+  };
+
+  clearHarvestQueue();
+  assert.strictEqual(readHarvestQueue().length, 0, "前提：初始队列为空");
+
+  const testDialogue = `
+[user]: 请记录我们项目的部署规范
+[assistant]: 执行 source /opt/production_venv/bin/activate 激活 Python 虚拟环境。
+`.trim();
+
+  // 1) 模拟钩子在无 client（如 mcp_key 缺失）时执行提炼
+  const harvestRes = await processDialogueAndHarvest(
+    testDialogue,
+    { project: testProject },
+    null // client 为 null
+  );
+
+  assert.strictEqual(harvestRes.memoriesSaved, 1, "即使 client 为 null，提炼产物也必须正确识别并计划入库");
+  const queued = readHarvestQueue();
+  assert.ok(queued.length > 0, `核心目标自证：client 为 null 时，产物绝不丢弃，必须安全持久化至 harvest_queue（当前队列表数: ${queued.length}）`);
+  assert.strictEqual(queued[0].table, "memories", "队列项表名正确");
+  assert.strictEqual(queued[0].project, testProject, "队列项项目正确");
+
+  // 2) 模拟后续工具调用触发连带消费 triggerBackgroundDrain
+  const drainRes = await triggerBackgroundDrain(mockDbClient);
+  assert.ok(drainRes.processed >= 1, `工具调用连带消费成功消费队列项: ${drainRes.processed}`);
+  assert.strictEqual(readHarvestQueue().length, 0, "消费完成后队列必须被清空");
+
+  const savedList = await mockDbClient.list("memories", { project: testProject });
+  assert.strictEqual(savedList.data.length, 1, "连带消费成功落库到数据库");
+
+  // 清理逻辑 (Cleanup) 与残余数 === 0 断言
+  async function cleanup() {
+    for (const m of savedList.data) {
+      await mockDbClient.remove("memories", m.id);
+    }
+  }
+  await cleanup();
+  const residualMem = await mockDbClient.list("memories", { project: testProject });
+  const totalResidue = residualMem.data.length;
+  assert.strictEqual(totalResidue, 0, `测试后数据残余断言失败：预期 0，实得 ${totalResidue}`);
+  console.log(`  - 清理后残余数: ${totalResidue} (断言通过: residue === 0)`);
+  console.log("  ✓ Null client 数据零丢失与连带消费自证测试全部通过\n");
+}
+
+// -----------------------------------------------------------------------------
+// 10. 并发防重入与零重复写入断言（模拟工具调用与后台异步消费并发）
+// -----------------------------------------------------------------------------
+{
+  console.log("▶ [Test 10] 并发防重入与零重复写入对抗测试（排他锁保障网络延迟下 0 重复插入）...");
+
+  const testProject = `__test_race_${Date.now()}__`;
+  const memoryStore = new Map();
+  let nextId = 1;
+  const mockDbClient = {
+    list: async (table, params) => {
+      // 模拟 50ms 网络延迟
+      await new Promise((r) => setTimeout(r, 50));
+      const rows = [];
+      for (const row of memoryStore.values()) {
+        if (params.project && row.project !== params.project) continue;
+        if (params.content_fingerprint && row.content_fingerprint !== params.content_fingerprint) continue;
+        rows.push({ ...row });
+      }
+      return { data: rows };
+    },
+    create: async (table, data) => {
+      // 模拟 100ms 慢速写入网络延迟
+      await new Promise((r) => setTimeout(r, 100));
+      const id = nextId++;
+      const saved = { ...data, id };
+      memoryStore.set(id, saved);
+      return saved;
+    },
+    remove: async (table, id) => {
+      const had = memoryStore.delete(id);
+      return { affectedRows: had ? 1 : 0 };
+    },
+  };
+
+  clearHarvestQueue();
+
+  const testDialogue = `
+[user]: 请给出数据层设计决策
+[assistant]: 架构选型决策：统一决定采用 mcp_client 替代 db_tools 作为数据持久层客户端。
+`.trim();
+
+  // 1) 仅入队不立即阻塞写库
+  await processDialogueAndHarvest(testDialogue, { project: testProject }, null);
+  assert.ok(readHarvestQueue().length > 0, "已安全入队");
+
+  // 2) 故意并发调用两次消费（模拟后台消费尚未完成时工具调用再次触发消费）
+  const [resA, resB] = await Promise.all([
+    triggerBackgroundDrain(mockDbClient),
+    triggerBackgroundDrain(mockDbClient),
+  ]);
+
+  console.log(`  - 并发消费结果: A=${resA.processed}, B=${resB.processed} (inProgress 防重入生效)`);
+
+  const savedList = await mockDbClient.list("memories", { project: testProject });
+  assert.strictEqual(savedList.data.length, 1, `对抗自证成功：并发消费下数据库最终仅有 1 条记录，严禁重复插入（实得: ${savedList.data.length}）`);
+
+  // 清理逻辑 (Cleanup) 与残余数 === 0 断言
+  async function cleanup() {
+    for (const m of savedList.data) {
+      await mockDbClient.remove("memories", m.id);
+    }
+  }
+  await cleanup();
+  const residualMem = await mockDbClient.list("memories", { project: testProject });
+  const totalResidue = residualMem.data.length;
+  assert.strictEqual(totalResidue, 0, `测试后数据残余断言失败：预期 0，实得 ${totalResidue}`);
+  console.log(`  - 清理后残余数: ${totalResidue} (断言通过: residue === 0)`);
+  console.log("  ✓ 并发防重入与零重复写入对抗测试全部通过\n");
+}
+
+// -----------------------------------------------------------------------------
+// 11. ER_DUP_ENTRY 重复主键/唯一索引异常安全出队测试（杜绝队列死锁残留）
+// -----------------------------------------------------------------------------
+{
+  console.log("▶ [Test 11] ER_DUP_ENTRY 异常安全出队测试（唯一索引冲突时安全出队，防队列永久死锁）...");
+
+  const testProject = `__test_dup_err_${Date.now()}__`;
+  const memoryStore = new Map();
+  const mockDbClient = {
+    list: async () => ({ data: [] }), // 故意模拟写后读延迟，让 list 查不到
+    create: async () => {
+      // 故意模拟远端数据库唯一索引冲突异常
+      const dupError = new Error("ER_DUP_ENTRY: Duplicate entry 'test_fp' for key 'idx_memories_uniq_fp'");
+      throw dupError;
+    },
+    remove: async () => ({ affectedRows: 0 }),
+  };
+
+  clearHarvestQueue();
+  const testDialogue = `
+[user]: 记录规范
+[assistant]: 执行 source /test_venv/bin/activate 激活环境。
+`.trim();
+
+  // 1) 入队
+  await processDialogueAndHarvest(testDialogue, { project: testProject }, null);
+  assert.ok(readHarvestQueue().length > 0, "数据已入队");
+
+  // 2) 消费时触发 ER_DUP_ENTRY
+  const drainRes = await triggerBackgroundDrain(mockDbClient);
+  assert.ok(drainRes.processed >= 1, "命中唯一索引冲突时，消费器识别为已成功存在并正常推进出队");
+  assert.strictEqual(readHarvestQueue().length, 0, "遇到 ER_DUP_ENTRY 时项必须安全出队，绝不在队列无限残留死锁");
+
+  // 严谨残余断言
+  const totalResidue = memoryStore.size;
+  assert.strictEqual(totalResidue, 0, `残余断言失败: ${totalResidue}`);
+  console.log(`  - 清理后残余数: ${totalResidue} (断言通过: residue === 0)`);
+  console.log("  ✓ ER_DUP_ENTRY 异常安全出队防死锁测试全部通过\n");
+}
+
 console.log("=================================================================");
-console.log("✅ 全部 7 项严谨性与保真度测试 100% 通过！");
+console.log("✅ 全部 11 项严谨性与保真度测试 100% 通过！");
 console.log("=================================================================");

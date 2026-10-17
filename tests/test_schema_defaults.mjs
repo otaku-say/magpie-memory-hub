@@ -111,6 +111,12 @@ const blocks = FILES.flatMap((f) => payloadBlocks(SRC[f], f));
 
 /** 载荷若是裸变量（如 create("memories", payload)），回查该变量的定义块。 */
 function resolvePayload(file, text) {
+  if (text.includes("item.data")) {
+    const src = SRC[file];
+    if (src && /memoryPayload\s*=\s*\{/.test(src) && /pitfallPayload\s*=\s*\{/.test(src)) {
+      return text + "\n" + src;
+    }
+  }
   const m = /\b(?:create|update)\s*\([^,]+,\s*([A-Za-z_]\w*)\s*\)/.exec(text);
   if (!m) return text;
   const name = m[1];

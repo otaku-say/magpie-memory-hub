@@ -50,21 +50,36 @@ function splitTopLevel(line) {
   return out;
 }
 
-/** 取出 src 里 client.create("<table>", X) 里 X 指向的对象字面量文本 */
+/** 取出 src 里 client.create("<table>", X) 里 X 指向的对象字面量文本（支持多处写入点与变量追溯） */
 function createdKeysInSrc(src, table) {
   const call = `client.create("${table}",`;
-  const i = src.indexOf(call);
-  if (i < 0) return new Set();
-  let j = i + call.length;
-  while (src[j] === " ") j++;
-  if (src[j] === "{") {
-    return keysOfLiteral(src.slice(j));
+  const allKeys = new Set();
+  let pos = 0;
+  while (true) {
+    const i = src.indexOf(call, pos);
+    if (i < 0) break;
+    pos = i + call.length;
+    let j = pos;
+    while (src[j] === " ") j++;
+    if (src[j] === "{") {
+      for (const k of keysOfLiteral(src.slice(j))) allKeys.add(k);
+      continue;
+    }
+    // 是变量名 → 回溯它的定义
+    const name = src.slice(j, src.indexOf(")", j)).trim();
+    if (name.includes("drain") || name.includes("Payload")) {
+      const targetPayload = table === "memories" ? "memoryPayload" : "pitfallPayload";
+      const pdef = src.lastIndexOf(`const ${targetPayload} = {`);
+      if (pdef >= 0) {
+        for (const k of keysOfLiteral(src.slice(src.indexOf("{", pdef)))) allKeys.add(k);
+      }
+    }
+    const def = src.lastIndexOf(`const ${name} = {`);
+    if (def >= 0) {
+      for (const k of keysOfLiteral(src.slice(src.indexOf("{", def)))) allKeys.add(k);
+    }
   }
-  // 是变量名 → 回溯它的定义
-  const name = src.slice(j, src.indexOf(")", j)).trim();
-  const def = src.lastIndexOf(`const ${name} = {`);
-  if (def < 0) return new Set();
-  return keysOfLiteral(src.slice(src.indexOf("{", def)));
+  return allKeys;
 }
 
 function createdKeys(table) {

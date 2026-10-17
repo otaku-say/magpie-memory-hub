@@ -24,6 +24,7 @@ import { makeMcpClient } from "./mcp_client.js";
 import { checkLocalModel, MODEL_SPEC, modelDir } from "./model_check.js";
 import { runPendingAction, readAction, writeCardStatus, parseDbInfo, isModelDownloading, startBackgroundModelDownload } from "./page_actions.js";
 import { harvestGateway, isTestMode } from "./gateway_harvest.js";
+import { triggerBackgroundDrain } from "./gateway_harvest.hooks.js";
 
 const NCB_BASE = "https://api.nocodebackend.com";
 
@@ -1211,6 +1212,9 @@ export const MagpieMemoryHub = async (input, options) => {
           };
         } else {
           callClient = makeClient(callCfg, abortSignal);
+        }
+        if (callClient && !isTestMode()) {
+          triggerBackgroundDrain(callClient).catch(() => {});
         }
         const result = await def.run(args || {}, {
           _client: callClient,

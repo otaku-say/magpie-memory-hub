@@ -33,11 +33,11 @@ export function statePath() {
 /** 读状态。任何异常都退化为空状态，绝不让调用方崩。 */
 export function readState() {
   const p = statePath();
-  if (!p) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, _ok: false };
+  if (!p) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: false };
   try {
-    if (!fs.existsSync(p)) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, _ok: true, _missing: true };
+    if (!fs.existsSync(p)) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: true, _missing: true };
     const o = JSON.parse(fs.readFileSync(p, "utf8"));
-    if (!o || typeof o !== "object") return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, _ok: true };
+    if (!o || typeof o !== "object") return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: true };
     return {
       current: typeof o.current === "string" ? o.current : "",
       secrets: o.secrets && typeof o.secrets === "object" ? o.secrets : {},
@@ -45,10 +45,11 @@ export function readState() {
       gateway_harvest: o.gateway_harvest && typeof o.gateway_harvest === "object" ? o.gateway_harvest : {},
       pending_patterns: o.pending_patterns && typeof o.pending_patterns === "object" ? o.pending_patterns : {},
       r2_mounts: o.r2_mounts && typeof o.r2_mounts === "object" ? o.r2_mounts : {},
+      harvest_queue: Array.isArray(o.harvest_queue) ? o.harvest_queue : [],
       _ok: true,
     };
   } catch (e) {
-    return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, _ok: false, _err: String(e && e.message || e) };
+    return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: false, _err: String(e && e.message || e) };
   }
 }
 
@@ -65,6 +66,7 @@ export function writeState(state) {
       gateway_harvest: state.gateway_harvest && typeof state.gateway_harvest === "object" ? state.gateway_harvest : {},
       pending_patterns: state.pending_patterns && typeof state.pending_patterns === "object" ? state.pending_patterns : {},
       r2_mounts: state.r2_mounts && typeof state.r2_mounts === "object" ? state.r2_mounts : {},
+      harvest_queue: Array.isArray(state.harvest_queue) ? state.harvest_queue : [],
     });
     delete out._ok;
     delete out._missing;
@@ -467,4 +469,65 @@ export function cleanExpiredPending(ttlMs = DEFAULT_PENDING_TTL_MS, now = Date.n
   }
   return removed;
 }
+
+/* ================================================================== *
+ * 5. 待写入记忆/踩坑落库队列（持久化缓冲，解耦网关钩子执行超时）
+ * ================================================================== */
+
+export function enqueueHarvestItems(items) {
+  if (!Array.isArray(items) || items.length === 0) return 0;
+  const st = readState();
+  const queue = Array.isArray(st.harvest_queue) ? st.harvest_queue : [];
+  let added = 0;
+  for (const item of items) {
+    if (!item || !item.table || !item.data) continue;
+    const fp = item.fp || "";
+    if (fp && queue.some((q) => q.fp === fp && q.table === item.table)) continue;
+    queue.push({
+      id: item.id || `hq_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      table: item.table,
+      data: item.data,
+      project: item.project || "global",
+      fp: fp,
+      enqueued_at: Date.now(),
+    });
+    added++;
+  }
+  if (added > 0) {
+    // 队列容量软上限 200 项，防止异常无限堆积
+    if (queue.length > 200) {
+      queue.splice(0, queue.length - 200);
+    }
+    st.harvest_queue = queue;
+    writeState(st);
+  }
+  return added;
+}
+
+export function readHarvestQueue() {
+  const st = readState();
+  return Array.isArray(st.harvest_queue) ? st.harvest_queue : [];
+}
+
+export function removeHarvestItems(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const idSet = new Set(ids);
+  const st = readState();
+  const queue = Array.isArray(st.harvest_queue) ? st.harvest_queue : [];
+  const initialLen = queue.length;
+  const nextQueue = queue.filter((q) => !idSet.has(q.id));
+  const removed = initialLen - nextQueue.length;
+  if (removed > 0) {
+    st.harvest_queue = nextQueue;
+    writeState(st);
+  }
+  return removed;
+}
+
+export function clearHarvestQueue() {
+  const st = readState();
+  st.harvest_queue = [];
+  return writeState(st);
+}
+
 

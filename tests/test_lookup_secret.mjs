@@ -16,8 +16,8 @@ import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
 
-const { lookupSecret, lookupRealDatabase } = await import(new URL("../local_state.js", import.meta.url).href);
-const { resolveRealDatabase, deriveLegalBucketName } = await import(new URL("../r2.js", import.meta.url).href);
+const { lookupSecret, lookupRealDatabase, lookupR2Mount, rememberR2Mount, forgetR2Mount } = await import(new URL("../local_state.js", import.meta.url).href);
+const { resolveRealDatabase, deriveLegalBucketName, isR2Mounted, r2Check } = await import(new URL("../r2.js", import.meta.url).href);
 const { secretCheck } = await import(new URL("../db_tools.js", import.meta.url).href);
 
 // 找到实际使用的 state 文件路径（local_state.js 自己算的）
@@ -129,11 +129,12 @@ try {
 
   try {
     const checkProbe = await secretCheck({ instance: "agent_memory" }, { secret: "ncb_sec_sample_invalid_key_999" });
+    assert.strictEqual(checkProbe.ok, false, "反证门：远端 403 Invalid secret_key 必须坚决判定为 ok: false 失败！");
     assert.strictEqual(checkProbe.verdict, "INVALID", "远端 403 应返回 INVALID");
     assert.ok(interceptedUrl.includes("Instance=41694_agent_memory"), `探测 URL 必须使用真实库名！实际: ${interceptedUrl}`);
     assert.ok(!interceptedUrl.includes("Instance=agent_memory&"), "严禁使用逻辑名 agent_memory 探测");
     assert.ok(checkProbe.lines.some((l) => l.includes("两个最常见原因")), "必须给出两个高频原因说明");
-    t("分支3: 403 INVALID 且探测 URL 使用真实库名 41694_agent_memory", checkProbe.verdict, "INVALID");
+    t("分支3: 403 INVALID 判定为 ok: false 且探测 URL 使用真实库名", checkProbe.ok, false);
 
     // 4) TLS 握手失败与非法桶名精准分类断言
     globalThis.fetch = async () => ({
@@ -141,25 +142,97 @@ try {
       json: async () => ({ status: "failed", error: "SSL alert number 40: handshake failure" }),
     });
     const checkTls = await secretCheck({ instance: "agent_memory" }, { secret: "ncb_sec_sample_invalid_key_999" });
+    assert.strictEqual(checkTls.ok, true, "核心目标：HTTP 500 TLS 握手类错误必须判为密钥有效 ok: true，而非失败！");
     assert.strictEqual(checkTls.verdict, "R2_TLS_ERROR", "远端 500 TLS 握手失败必须识别为 R2_TLS_ERROR");
+    assert.ok(checkTls.title.includes("有效（已通过鉴权）"), "标题必须明确包含『有效（已通过鉴权）』");
     assert.ok(checkTls.lines.some((l) => l.includes("并非密钥无效")), "必须向用户澄清 Secret Key 已通过验证");
-    t("分支4: 远端连 R2 发生 TLS 握手失败 (SSL alert 40)", checkTls.verdict, "R2_TLS_ERROR");
+    assert.ok(checkTls.lines.some((l) => l.includes("密钥本身有效（鉴权已通过）")), "必须明确说明密钥本身有效");
+    t("分支4: 远端连 R2 发生 TLS 握手失败判定为 ok: true (SSL alert 40)", checkTls.ok, true);
 
     globalThis.fetch = async () => ({
       status: 500,
       json: async () => ({ status: "failed", error: "InvalidBucketName: The specified bucket is not valid." }),
     });
     const checkBucket = await secretCheck({ instance: "agent_memory" }, { secret: "ncb_sec_sample_invalid_key_999" });
+    assert.strictEqual(checkBucket.ok, true, "核心目标：HTTP 500 非法桶名类错误必须判为密钥有效 ok: true，而非失败！");
     assert.strictEqual(checkBucket.verdict, "R2_BUCKET_INVALID", "远端 500 非法桶名必须识别为 R2_BUCKET_INVALID");
-    t("分支5: 远端存储桶名非法 (InvalidBucketName)", checkBucket.verdict, "R2_BUCKET_INVALID");
+    assert.ok(checkBucket.title.includes("有效（已通过鉴权）"), "标题必须明确包含『有效（已通过鉴权）』");
+    assert.ok(checkBucket.lines.some((l) => l.includes("密钥本身有效（鉴权已通过）")), "必须明确说明密钥本身有效");
+    t("分支5: 远端存储桶名非法判定为 ok: true (InvalidBucketName)", checkBucket.ok, true);
+
+    // 4.1) 通用 HTTP 500 / 远端存储通道未挂载异常（例如远端报 Unauthorized / upstream 错误）
+    globalThis.fetch = async () => ({
+      status: 500,
+      json: async () => ({ status: "failed", error: "Unauthorized" }),
+    });
+    const checkUpstream = await secretCheck({ instance: "agent_memory" }, { secret: "ncb_sec_sample_invalid_key_999" });
+    assert.strictEqual(checkUpstream.ok, true, "核心目标：HTTP 500 远端存储通道异常必须判为密钥有效 ok: true，而非失败！");
+    assert.strictEqual(checkUpstream.verdict, "UPSTREAM_ERROR", "远端 500 识别为 UPSTREAM_ERROR");
+    assert.ok(checkUpstream.title.includes("有效（已通过鉴权）"), "标题必须明确包含『有效（已通过鉴权）』");
+    assert.ok(checkUpstream.lines.some((l) => l.includes("密钥本身有效（鉴权已通过）")), "必须明确说明密钥本身有效");
+    t("分支5.1: 远端 500 存储异常判定为 ok: true (UPSTREAM_ERROR)", checkUpstream.ok, true);
+
+    // 4.2) 强反证：远端 502 Bad Gateway / 503 Service Unavailable 绝不能误判为 ok: true
+    globalThis.fetch = async () => ({
+      status: 502,
+      statusText: "Bad Gateway",
+      json: async () => { throw new Error("not json"); },
+    });
+    const check502 = await secretCheck({ instance: "agent_memory" }, { secret: "ncb_sec_sample_invalid_key_999" });
+    assert.strictEqual(check502.ok, false, "强反证门：远端 502 Bad Gateway 必须坚决判定为 ok: false，绝不误判为密钥有效！");
+    assert.strictEqual(check502.verdict, "GATEWAY_ERROR", "502 错误必须识别为 GATEWAY_ERROR");
+    assert.ok(!check502.lines.some((l) => l.includes("密钥本身有效")), "502 错误绝不能输出『密钥本身有效』的假结论");
+    assert.ok(!check502.lines.some((l) => l.includes("Invalid secret_key.")), "502 非 JSON 响应绝不能默认输出『Invalid secret_key.』矛盾文案");
+    t("分支5.2: 远端 502 Bad Gateway 判定为 ok: false (GATEWAY_ERROR)", check502.ok, false);
+
+    globalThis.fetch = async () => ({
+      status: 503,
+      statusText: "Service Unavailable",
+      json: async () => ({ status: "failed", error: "Service Unavailable" }),
+    });
+    const check503 = await secretCheck({ instance: "agent_memory" }, { secret: "ncb_sec_sample_invalid_key_999" });
+    assert.strictEqual(check503.ok, false, "强反证门：远端 503 Service Unavailable 必须判定为 ok: false");
+    assert.strictEqual(check503.verdict, "GATEWAY_ERROR", "503 识别为 GATEWAY_ERROR");
+    t("分支5.3: 远端 503 Service Unavailable 判定为 ok: false (GATEWAY_ERROR)", check503.ok, false);
 
     globalThis.fetch = async () => {
       throw new Error("connect EPROTO 104.21.5.12:443: sslv3 alert handshake failure");
     };
     const checkClientTls = await secretCheck({ instance: "agent_memory" }, { secret: "ncb_sec_sample_invalid_key_999" });
+    assert.strictEqual(checkClientTls.ok, false, "反证门：本地连接异常必须判定为 ok: false");
     assert.strictEqual(checkClientTls.verdict, "ERROR");
     assert.ok(checkClientTls.title.includes("连接异常") || checkClientTls.title.includes("异常"), "连接异常必须在标题明确指出");
-    t("分支6: 连接异常 (EPROTO)", checkClientTls.verdict, "ERROR");
+    t("分支6: 本地连接异常判定为 ok: false (EPROTO)", checkClientTls.ok, false);
+
+    // 5) R2 挂载状态双向一致性测试（隐患 1 与隐患 2）
+    console.log("\n【测试】R2 挂载状态双向一致性（隐患 1 与隐患 2）");
+    rememberR2Mount("41694_agent_memory", { bucket: "41694-agent-memory", public_url: "", at: Date.now() });
+    assert.strictEqual(isR2Mounted({}, "41694_agent_memory").mounted, true, "前提：已记录为已挂载");
+    // 隐患 1：模拟 r2Setup 探针失败时调用 forgetR2Mount
+    forgetR2Mount("41694_agent_memory");
+    assert.strictEqual(isR2Mounted({}, "41694_agent_memory").mounted, false, "r2Setup 失败调用 forgetR2Mount 后必须被判为未挂载");
+    t("隐患1验证: forgetR2Mount 成功清除失效挂载", isR2Mounted({}, "41694_agent_memory").mounted, false);
+
+    // 隐患 1 延伸：r2Check 探针失败时也必须调用 forgetR2Mount 清除挂载
+    rememberR2Mount("41694_agent_memory", { bucket: "41694-agent-memory", public_url: "", at: Date.now() });
+    assert.strictEqual(isR2Mounted({}, "41694_agent_memory").mounted, true, "前提：已记录为已挂载");
+    globalThis.fetch = async () => ({
+      status: 403,
+      json: async () => ({ status: "failed", error: "AccessDenied" }),
+    });
+    const r2CheckFail = await r2Check({ instance: "agent_memory", ncb_secret: "ncb_sec_sample_invalid_key_999" }, {});
+    assert.strictEqual(r2CheckFail.ok, false, "r2Check 探针失败");
+    assert.strictEqual(isR2Mounted({}, "41694_agent_memory").mounted, false, "r2Check 失败后必须自动 forgetR2Mount");
+    t("隐患1延伸: r2Check 失败清除失效挂载记录", isR2Mounted({}, "41694_agent_memory").mounted, false);
+
+    // 隐患 2：r2Check 成功时落盘挂载记录
+    forgetR2Mount("41694_agent_memory");
+    assert.strictEqual(lookupR2Mount("41694_agent_memory"), null, "前提：当前无挂载记录");
+    rememberR2Mount("41694_agent_memory", { bucket: "41694-agent-memory", public_url: "https://pub.example.com", account_id_tail: "123456", at: Date.now() });
+    const checkMountRecord = lookupR2Mount("41694_agent_memory");
+    assert.ok(checkMountRecord && checkMountRecord.mounted === true, "r2Check 探针成功后必须落盘挂载记录");
+    assert.strictEqual(checkMountRecord.bucket, "41694-agent-memory");
+    t("隐患2验证: r2Check 成功落地 rememberR2Mount", checkMountRecord.mounted, true);
   } finally {
     globalThis.fetch = origFetch;
   }

@@ -37,6 +37,9 @@ import {
   lookupDatabase,
   recordPendingEvidence,
   DEFAULT_MIN_EVIDENCE,
+  enqueueHarvestItems,
+  readHarvestQueue,
+  removeHarvestItems,
 } from "./local_state.js";
 
 /** Headroom :68-80 脚手架注入前缀黑名单 */
@@ -467,56 +470,38 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       }
     }
 
-    if (client) {
-      try {
-        // 查重：按 content_fingerprint 精确索引查询，彻底根治超过 100 条分页截断导致的失效
-        const existing = await client.list("memories", {
-          project,
-          content_fingerprint: fp,
-          limit: 1,
-        });
-        const isDupe = Array.isArray(existing?.data) && existing.data.length > 0;
-        if (isDupe) {
-          markRecent("m:" + fp);
-          continue;
-        }
-
-        const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-        await client.create("memories", {
-          project,
-          category: item.category || "fact",
-          scope_level: item.scope_level || "project",
-          client: agent,
-          origin: "harvest",
-          title,
-          content,
-          full_text: content,
-          tags: item.tags || "auto-harvest",
-          related_entities: "",
-          content_fingerprint: fp,
-          confidence_score: Math.round((item.confidence || 0.8) * 100),
-          lifecycle_status: "active",
-          superseded_by_id: null,
-          revision: 1,
-          retrieval_count: 0,
-          created_at: now,
-          updated_at: now,
-          invalid_at: null,
-          invalid_reason: "",
-          expires_at: null,
-          last_used_at: null,
-          source_session: sourceSession,
-          source_turn: sourceTurn,
-        });
-        markRecent("m:" + fp);
-        memoriesSaved++;
-      } catch (err) {
-        // 静默容错，fail-open
-      }
-    } else {
-      markRecent("m:" + fp);
-      memoriesSaved++;
-    }
+    // 1. 入库 memories（环境事实与架构决策）
+    const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const queueId = `hq_m_${fp}`;
+    const memoryPayload = {
+      project,
+      category: item.category || "fact",
+      scope_level: item.scope_level || "project",
+      client: agent,
+      origin: "harvest",
+      title,
+      content,
+      full_text: content,
+      tags: item.tags || "auto-harvest",
+      related_entities: "",
+      content_fingerprint: fp,
+      confidence_score: Math.round((item.confidence || 0.8) * 100),
+      lifecycle_status: "active",
+      superseded_by_id: null,
+      revision: 1,
+      retrieval_count: 0,
+      created_at: now,
+      updated_at: now,
+      invalid_at: null,
+      invalid_reason: "",
+      expires_at: null,
+      last_used_at: null,
+      source_session: sourceSession,
+      source_turn: sourceTurn,
+    };
+    enqueueHarvestItems([{ id: queueId, table: "memories", data: memoryPayload, project, fp }]);
+    markRecent("m:" + fp);
+    memoriesSaved++;
   }
 
   // 2. 入库 pitfalls（踩坑与失败规避）
@@ -545,60 +530,44 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       recurrence = pendingRes.count;
     }
 
-    if (client) {
-      try {
-        // 查重：按 content_fingerprint 精确索引查询，彻底根治超过 100 条分页截断导致的失效
-        const existing = await client.list("pitfalls", {
-          project,
-          content_fingerprint: fp,
-          limit: 1,
-        });
-        const isDupe = Array.isArray(existing?.data) && existing.data.length > 0;
-        if (isDupe) {
-          const row = existing.data[0];
-          const next = (Number(row.recurrence) || 1) + recurrence;
-          const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-          try {
-            await client.update("pitfalls", row.id, {
-              recurrence: next,
-              last_occurred_at: now,
-              updated_at: now,
-            });
-          } catch (_) {}
-          markRecent(pitKey);
-          continue;
-        }
+    const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const queueId = `hq_p_${fp}`;
+    const pitfallPayload = {
+      project,
+      client: agent,
+      component,
+      symptom,
+      root_cause: item.root_cause || `执行中出现 ${symptom}，后续成功解决`,
+      solution: item.solution || "",
+      severity: item.severity || "medium",
+      error_type: item.error_type || "general",
+      tags: item.tags || "auto-harvest,gateway",
+      content_fingerprint: fp,
+      recurrence,
+      created_at: now,
+      updated_at: now,
+      invalid_at: null,
+      invalid_reason: "",
+      last_occurred_at: now,
+      source_session: sourceSession,
+      source_turn: sourceTurn,
+    };
+    enqueueHarvestItems([{ id: queueId, table: "pitfalls", data: pitfallPayload, project, fp }]);
+    markRecent(pitKey);
+    pitfallsSaved++;
+  }
 
-        const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-        await client.create("pitfalls", {
-          project,
-          client: agent,
-          component,
-          symptom,
-          root_cause: item.root_cause || `执行中出现 ${symptom}，后续成功解决`,
-          solution: item.solution || "",
-          severity: item.severity || "medium",
-          error_type: item.error_type || "general",
-          tags: item.tags || "auto-harvest,gateway",
-          content_fingerprint: fp,
-          recurrence,
-          created_at: now,
-          updated_at: now,
-          invalid_at: null,
-          invalid_reason: "",
-          last_occurred_at: now,
-          source_session: sourceSession,
-          source_turn: sourceTurn,
-        });
-        markRecent(pitKey);
-        pitfallsSaved++;
-      } catch (err) {
-        // 静默容错，fail-open
+  // 若传入了 client，由唯一受控的消费器统一执行落库（防并发重入与重复插入）
+  if (client) {
+    try {
+      const drainRes = await triggerBackgroundDrain(client);
+      if (drainRes && typeof drainRes.memoriesSaved === "number") {
+        memoriesSaved = drainRes.memoriesSaved;
       }
-    } else {
-      markRecent("p:" + fp);
-      pitfallsSaved++;
-    }
+      if (drainRes && typeof drainRes.pitfallsSaved === "number") {
+        pitfallsSaved = drainRes.pitfallsSaved;
+      }
+    } catch (_) {}
   }
 
   return { memoriesSaved, pitfallsSaved, pendingSaved, skipped: false };
@@ -667,8 +636,8 @@ export async function onResponse(reply, ctx) {
       return;
     }
 
-    // 严禁在测试环境或非生产跑批中触发写库
-    if (isTestMode()) {
+    // 严禁在测试环境意外触发真实数据库写入（除非显式传入 mock/隔离 client 或 _force_test 标记）
+    if (isTestMode() && !opts._force_test && !opts._client && !opts.client) {
       return;
     }
 
@@ -691,19 +660,154 @@ export async function onResponse(reply, ctx) {
     };
 
     // 构造 NCB client（如果配置了 mcp_key）
-    let client = null;
-    const mcpKey = opts.mcp_key || opts.mcpKey || process.env.NCB_API_KEY || "";
-    const instance = opts.ncb_instance || opts.instance || lookupDatabase() || "memory";
-    if (mcpKey) {
-      try {
-        client = makeMcpClient({ mcpKey, instance });
-      } catch (_) {
-        client = null;
+    let client = (opts && (opts._client || opts.client)) || null;
+    if (!client) {
+      const mcpKey = opts.mcp_key || opts.mcpKey || process.env.NCB_API_KEY || "";
+      const instance = opts.ncb_instance || opts.instance || lookupDatabase() || "memory";
+      if (mcpKey) {
+        try {
+          client = makeMcpClient({ mcpKey, instance });
+        } catch (_) {
+          client = null;
+        }
       }
     }
 
-    await processDialogueAndHarvest(dialogueText, meta, client, opts);
+    // 治本策略：
+    // 网关钩子采用非阻塞后台异步任务（detached background promise）。
+    // 提炼与本地排队在毫秒内完成，钩子极速 resolve，绝不阻塞网关交付；
+    // 无论 gatewayTimeoutMs 是否存在（默认 1000ms 还是未配置），宿主超时定时器绝不会触发 abort！
+    const taskPromise = processDialogueAndHarvest(dialogueText, meta, client, opts);
+    if (opts.wait_for_flush === true) {
+      await taskPromise;
+    } else {
+      taskPromise.catch(() => {});
+    }
   } catch (e) {
     // 极致 fail-open：吞掉一切异常，绝不向上抛出
   }
 }
+
+/* ================================================================== *
+ * 5. 后台异步队列消费器（供常驻后台与工具调用连带消费）
+ * ================================================================== */
+
+let _isDraining = false;
+export async function triggerBackgroundDrain(client, options = {}) {
+  if (!client || _isDraining) return { processed: 0, memoriesSaved: 0, pitfallsSaved: 0, inProgress: _isDraining };
+  _isDraining = true;
+  let totalMemoriesSaved = 0;
+  let totalPitfallsSaved = 0;
+  try {
+    let totalProcessed = 0;
+    while (true) {
+      const queue = readHarvestQueue();
+      if (!queue || queue.length === 0) break;
+      let batchSuccess = 0;
+      const successIds = [];
+      for (const item of queue) {
+        try {
+          if (item.table === "memories") {
+            const fp = item.fp || item.data?.content_fingerprint || "";
+            const project = item.project || "global";
+            const existing = await client.list("memories", {
+              project,
+              content_fingerprint: fp,
+              limit: 1,
+            });
+            const isDupe = Array.isArray(existing?.data) && existing.data.length > 0;
+            if (isDupe) {
+              markRecent("m:" + fp);
+              successIds.push(item.id);
+              batchSuccess++;
+              continue;
+            }
+            const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+            const drainMemoryPayload = {
+              ...item.data,
+              created_at: (item.data && item.data.created_at) || now,
+              updated_at: now,
+            };
+            try {
+              await client.create("memories", drainMemoryPayload);
+              totalMemoriesSaved++;
+            } catch (createErr) {
+              const msg = String(createErr?.message || createErr || "");
+              if (/duplicate|ER_DUP_ENTRY|already exists/i.test(msg)) {
+                // 已存在则视为成功去重消费
+              } else {
+                throw createErr;
+              }
+            }
+            markRecent("m:" + fp);
+            successIds.push(item.id);
+            batchSuccess++;
+          } else if (item.table === "pitfalls") {
+            const fp = item.fp || item.data?.content_fingerprint || "";
+            const project = item.project || "global";
+            const pitKey = `p:${project}:${fp}`;
+            const existing = await client.list("pitfalls", {
+              project,
+              content_fingerprint: fp,
+              limit: 1,
+            });
+            const isDupe = Array.isArray(existing?.data) && existing.data.length > 0;
+            if (isDupe) {
+              const row = existing.data[0];
+              const next = (Number(row.recurrence) || 1) + (Number(item.data?.recurrence) || 1);
+              const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+              try {
+                await client.update("pitfalls", row.id, {
+                  recurrence: next,
+                  last_occurred_at: now,
+                  updated_at: now,
+                });
+              } catch (_) {}
+              markRecent(pitKey);
+              successIds.push(item.id);
+              batchSuccess++;
+              continue;
+            }
+            const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+            const drainPitfallPayload = {
+              ...item.data,
+              created_at: (item.data && item.data.created_at) || now,
+              updated_at: now,
+            };
+            try {
+              await client.create("pitfalls", drainPitfallPayload);
+              totalPitfallsSaved++;
+            } catch (createErr) {
+              const msg = String(createErr?.message || createErr || "");
+              if (/duplicate|ER_DUP_ENTRY|already exists/i.test(msg)) {
+                // 已存在则视为成功去重消费
+              } else {
+                throw createErr;
+              }
+            }
+            markRecent(pitKey);
+            successIds.push(item.id);
+            batchSuccess++;
+          }
+        } catch (_) {
+          // 单项失败容错并保留在队列
+        }
+      }
+      if (successIds.length > 0) {
+        removeHarvestItems(successIds);
+      }
+      totalProcessed += batchSuccess;
+      if (batchSuccess === 0) {
+        break;
+      }
+    }
+    return {
+      processed: totalProcessed,
+      memoriesSaved: totalMemoriesSaved,
+      pitfallsSaved: totalPitfallsSaved,
+    };
+  } finally {
+    _isDraining = false;
+  }
+}
+
