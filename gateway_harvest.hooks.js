@@ -44,6 +44,14 @@ import {
   readHarvestQueue,
   removeHarvestItems,
 } from "./local_state.js";
+import {
+  MEMHUB_INTERNAL_HEADER,
+  MEMHUB_INTERNAL_VALUE,
+  isInternalHarvestRequest,
+  modelBudgetCheck,
+  modelBudgetRecord,
+  getModelBudgetState,
+} from "./model_budget.js";
 
 /** Headroom :68-80 脚手架注入前缀黑名单 */
 export const SCAFFOLDING_PATTERNS = [
@@ -473,7 +481,15 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
   const threshold = typeof options.classify_threshold === "number" ? options.classify_threshold : 0.5;
   const doFetch = options._fetch || globalThis.fetch;
 
-  const headers = { "Content-Type": "application/json" };
+  // 调用预算熔断（v6.20.0 自激放大事故修复）：超限则跳过判定、默认放行提炼链路，
+  // 绝不因限流改变采集语义（fail-open），只打一行诊断。
+  const _budget = modelBudgetCheck(options);
+  if (!_budget.allowed) {
+    _diag("budget_skip_classify", `模型调用预算超限(${_budget.reason}, 60s=${_budget.perMinute}, 累计=${_budget.total})，跳过判定过滤`);
+    return { shouldHarvest: true, score: null, reason: _budget.reason, budgetSkipped: true };
+  }
+
+  const headers = { "Content-Type": "application/json", [MEMHUB_INTERNAL_HEADER]: MEMHUB_INTERNAL_VALUE };
   if (apiKey) {
     headers["Authorization"] = `Bearer ${apiKey}`;
   }
@@ -501,6 +517,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
+      try { modelBudgetRecord(); } catch (_) {}
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
@@ -546,6 +563,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
+      try { modelBudgetRecord(); } catch (_) {}
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
@@ -642,10 +660,18 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
   const timeoutMs = Number(options.harvest_timeout_ms) || 12000;
   const doFetch = options._fetch || globalThis.fetch;
 
+  // 调用预算熔断（v6.20.0 事故修复）：超限则直接跳过提炼（返回 null = 安全跳过），
+  // 不改变 fail-open 语义，只打一行诊断。
+  const _hBudget = modelBudgetCheck(options);
+  if (!_hBudget.allowed) {
+    _diag("budget_skip_harvest", `模型调用预算超限(${_hBudget.reason}, 60s=${_hBudget.perMinute}, 累计=${_hBudget.total})，跳过本次提炼`);
+    return null;
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const headers = { "Content-Type": "application/json" };
+  const headers = { "Content-Type": "application/json", [MEMHUB_INTERNAL_HEADER]: MEMHUB_INTERNAL_VALUE };
   if (apiKey) {
     headers["Authorization"] = `Bearer ${apiKey}`;
   }
@@ -667,6 +693,7 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
+    try { modelBudgetRecord(); } catch (_) {}
 
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
@@ -730,6 +757,20 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
 export async function processDialogueAndHarvest(dialogueText, meta = {}, client = null, options = {}) {
   if (!dialogueText || dialogueText.length < 20) {
     return { memoriesSaved: 0, pitfallsSaved: 0, pendingSaved: 0, skipped: true, reason: "dialogue too short" };
+  }
+
+  // v6.20.0 事故修复·无价值短路（零模型调用前置拦截）：
+  // 纯闲聊/问候/感谢（< 60 字符且无任何技术信号）直接跳过，连判定模型都不调。
+  // 显式记忆沉淀指令（"记住…"/"避坑…"）不受此短路影响，仍走正常提炼链路。
+  // 注意：短路只看纯文本信号，不看模型名——不硬编码任何模型。
+  if (!isExplicitUserMemory(dialogueText)) {
+    const _probe = String(dialogueText).slice(0, 400);
+    // 技术信号分两组判定（注意：常量组必须大小写敏感，否则 [A-Z]{3} 会误匹配任意英文词）：
+    const _hasTechSignalCI = /[a-z_]{2,}\.[a-z]{2,}|[\\/][\w.-]+|```|\b(error|报错|异常|配置|端口|bug|fix|deploy|api|sql|cors|token|key|安装|依赖|版本|数据库|架构|选型|规范|偏好|记住|踩坑)\b/i.test(_probe);
+    const _hasTechSignalCS = /[A-Z][A-Z0-9_]{2,}/.test(_probe);
+    if (dialogueText.length < 60 && !_hasTechSignalCI && !_hasTechSignalCS) {
+      return { memoriesSaved: 0, pitfallsSaved: 0, pendingSaved: 0, skipped: true, reason: "trivial_chatter_shortcircuit" };
+    }
   }
 
   const project = String(meta.project || "global").trim();
@@ -1008,6 +1049,17 @@ export async function onRequest(body, ctx) {
   try {
     const opts = (ctx && ctx.options) || {};
     _hookProbe("onRequest", opts);
+    // 防线一（v6.20.0 自激放大事故修复）：内部模型调用豁免——必须放在
+    // auto_harvest 判断【之前】，否则开关开启时豁免永远够不着。
+    try {
+      if (isInternalHarvestRequest(body, ctx)) {
+        if (ctx && typeof ctx === "object") {
+          if (!ctx.state || typeof ctx.state !== "object") ctx.state = {};
+          ctx.state.memhubInternal = true;
+        }
+        return undefined;
+      }
+    } catch (_) {}
     // 默认关闭：未显式开启时立即退出，0 额外开销
     if (opts.auto_harvest !== true) {
       return undefined;
@@ -1038,6 +1090,17 @@ export async function onResponse(reply, ctx) {
   try {
     const opts = (ctx && ctx.options) || {};
     _hookProbe("onResponse", opts);
+    // 防线一（v6.20.0 自激放大事故修复）：内部模型调用豁免——必须放在
+    // auto_harvest 判断【之前】。钩子自己经 loopback 发出的判定/提炼请求
+    // 会再次走 serveAgent 触发 onResponse；此处按请求体指纹识别后立即
+    // return，切断 2^n 指数自激环（零模型调用、零入库）。
+    try {
+      const _reqForExempt = ctx && (ctx.request || (ctx.state && ctx.state.requestBody));
+      if ((ctx && ctx.state && ctx.state.memhubInternal === true) ||
+          isInternalHarvestRequest(_reqForExempt, ctx)) {
+        return;
+      }
+    } catch (_) {}
     // 默认关闭校验
     if (opts.auto_harvest !== true) {
       return;

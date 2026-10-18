@@ -240,6 +240,7 @@ async function execute(action, cfg, fs, sp, state, options) {
     else if (action.op === "clean_probe") result = await cleanProbes(cfg, args);
     else if (action.op === "model_check") {
       const { testModelConnectivity } = await import("./gateway_harvest.hooks.js");
+      const { getModelBudgetState } = await import("./model_budget.js");
       const modelOpts = Object.assign({}, cfg, options || {});
       const conn = await testModelConnectivity("all", modelOpts);
       const ok = conn.ok;
@@ -261,6 +262,12 @@ async function execute(action, cfg, fs, sp, state, options) {
       if (lines.length < 2) {
         lines.push(ok ? "在线模型全部校验通过，响应正常" : "请在设置中配置有效的在线模型名称");
       }
+      try {
+        const bs = getModelBudgetState();
+        const maxPerMin = Number((options || {}).harvest_max_per_min ?? cfg.harvest_max_per_min ?? 20);
+        const maxTotal = Number((options || {}).harvest_max_total ?? cfg.harvest_max_total ?? 2000);
+        lines.push(`调用预算: 60s窗口 ${bs.perMinute}/${maxPerMin} · 累计 ${bs.total}/${maxTotal}${bs.tripped ? " · 已熔断（重启网关恢复）" : ""}`);
+      } catch (_) {}
       result = {
         ok,
         at: Date.now(),

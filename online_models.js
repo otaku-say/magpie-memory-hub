@@ -93,6 +93,13 @@ export const QUERY_REWRITE_SYSTEM_PROMPT = `你是一个专业的长期记忆检
 4. 输出 2~5 个最重要的关键词，用空格分隔。
 5. 严禁输出任何解释、标点符号或前缀说明，仅输出空格分隔的关键词文本。`;
 
+import {
+  MEMHUB_INTERNAL_HEADER,
+  MEMHUB_INTERNAL_VALUE,
+  modelBudgetCheck,
+  modelBudgetRecord,
+} from "./model_budget.js";
+
 /**
  * 健壮解析 JSON 对象
  */
@@ -151,10 +158,13 @@ export async function explainUnknownErrorWithModel({
   const timeoutMs = Number(options.diagnose_timeout_ms) || 8000;
   const doFetch = options._fetch || globalThis.fetch;
 
+  // 调用预算熔断（v6.20.0 事故修复）：错误诊断属于后台辅助调用，超限直接跳过。
+  if (!modelBudgetCheck(options).allowed) return null;
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const headers = { "Content-Type": "application/json" };
+  const headers = { "Content-Type": "application/json", [MEMHUB_INTERNAL_HEADER]: MEMHUB_INTERNAL_VALUE };
   if (apiKey) {
     headers["Authorization"] = `Bearer ${apiKey}`;
   }
@@ -184,6 +194,7 @@ ${rawError.slice(0, 2000)}
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
+    try { modelBudgetRecord(); } catch (_) {}
 
     if (!res.ok) {
       return null;
@@ -286,10 +297,13 @@ export async function rewriteSearchQuery({
   const timeoutMs = Number(options.search_rewrite_timeout_ms) || 3500;
   const doFetch = options._fetch || globalThis.fetch;
 
+  // 调用预算熔断（v6.20.0 事故修复）：搜索改写超限直接跳过，调用方回落纯词面检索。
+  if (!modelBudgetCheck(options).allowed) return null;
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const headers = { "Content-Type": "application/json" };
+  const headers = { "Content-Type": "application/json", [MEMHUB_INTERNAL_HEADER]: MEMHUB_INTERNAL_VALUE };
   if (apiKey) {
     headers["Authorization"] = `Bearer ${apiKey}`;
   }
@@ -312,6 +326,7 @@ export async function rewriteSearchQuery({
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
+    try { modelBudgetRecord(); } catch (_) {}
 
     if (!res.ok) {
       return null;

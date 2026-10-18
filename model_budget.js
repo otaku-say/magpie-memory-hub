@@ -1,0 +1,203 @@
+/**
+ * model_budget.js —— 在线模型调用的自激豁免判定与调用预算/熔断（v6.20.0 新增）
+ * ============================================================================
+ *
+ * 背景（调用失控放大事故）：
+ * 网关钩子 onResponse 在每次用户模型交互后，会经本机 loopback（默认
+ * http://127.0.0.1:3425）调用网关自己的 /v1/chat/completions 做判定+提炼。
+ * 而这次内部模型调用本身也会走网关 serveAgent → 再次触发同组 gatewayHooks
+ * 的 onResponse → 又发起判定+提炼 → 指数级自激放大（2^n，约 18 代即破 15 万次）。
+ * /v1/systemone 链路不受影响（Magpie 源码：serveSystemOne 永不调用 serveAgent，
+ * 不触发任何插件钩子/中间件），但 classify_endpoint=auto/chat 回退路径会命中
+ * /v1/chat/completions，同样进入自激环。
+ *
+ * 本模块提供两道独立防线（均无硬编码模型名，全部经 options 可配置）：
+ *
+ * 防线一 · 内部请求豁免（切断自激环）：
+ * - 所有内部模型调用统一携带请求头 X-Memhub-Internal: 1（可观测性 + 未来宿主透出时生效）；
+ * - 主判定依据是请求体特征：四条内部 system prompt 的稳定子串
+ *   （INTERNAL_PROMPT_MARKERS），钩子在 onRequest/onResponse 最开头检查，
+ *   命中立即 return，零模型调用、零入库；
+ * - onRequest 命中的同时在 ctx.state 打标（memhubInternal），同请求传递到 onResponse。
+ * - 为什么不用“模型名比对”做主判据：用户正常聊天也可能使用与提炼/判定
+ *   相同的模型，按模型名豁免会误伤正常采集（漏采）；按请求体指纹只豁免
+ *   插件自己发出的、携带内部提示词的请求，误伤面最小。
+ *
+ * 防线二 · 调用预算与熔断（即使豁免被绕过，调用量仍有硬上界）：
+ * - 滑动窗口限流：60 秒内模型调用超过 harvest_max_per_min（默认 20）→ 跳过采集；
+ * - 单进程总量熔断：累计超过 harvest_max_total（默认 2000）→ 锁存熔断，
+ *   本进程不再发起任何自动采集（手动“真实检测模型”不受限但计入总量）；
+ * - 超限行为一律 fail-open：跳过采集 + 打一行诊断日志，绝不抛错、绝不阻断网关；
+ * - 熔断状态经 getModelBudgetState() 可查，并在设置页「真实检测模型」结果中展示。
+ *
+ * Live 测试门控：
+ * - shouldRunLiveTests()：仅当 MEMHUB_LIVE_TEST=1 且存在 MAGPIE_API_KEY 时才跑
+ *   真实网关调用；默认一律跳过，保证全套测试默认零真实模型调用。
+ */
+
+export const MEMHUB_INTERNAL_HEADER = "x-memhub-internal";
+export const MEMHUB_INTERNAL_VALUE = "1";
+
+/**
+ * 内部模型调用请求体指纹：四条内部 system prompt 的稳定子串。
+ * 与提示词原文强绑定——若修改下列提示词，必须同步更新此处，否则豁免失效：
+ * - "会话价值判定器"：gateway_harvest.hooks.js classify 经 chat 端点的判定提示词
+ * - "长期记忆与踩坑经验提炼助手"：gateway_harvest.hooks.js HARVEST_SYSTEM_PROMPT
+ * - "系统故障诊断专家"：online_models.js ERROR_DIAGNOSE_SYSTEM_PROMPT
+ * - "长期记忆检索改写助手"：online_models.js QUERY_REWRITE_SYSTEM_PROMPT
+ */
+export const INTERNAL_PROMPT_MARKERS = [
+  "会话价值判定器",
+  "长期记忆与踩坑经验提炼助手",
+  "系统故障诊断专家",
+  "长期记忆检索改写助手",
+];
+
+/**
+ * 判定一次网关请求是否为本插件内部模型调用（命中则钩子必须立即豁免）。
+ * @param {object} body 请求体（chat: {messages}；systemone: {state, questions}）
+ * @param {object} ctx 钩子上下文（含 options/state/headers 等，字段缺失时容错）
+ */
+export function isInternalHarvestRequest(body, ctx) {
+  try {
+    const c = ctx && typeof ctx === "object" ? ctx : {};
+
+    // 1) 同请求传递的进程内标记（onRequest 命中后打标，onResponse 直接复用）
+    if (c.state && c.state.memhubInternal === true) return true;
+    if (c.memhubInternal === true) return true;
+
+    // 2) 显式请求头（宿主若透出请求头则命中；不透出则走第 3 条，不依赖它）
+    const headerSources = [c.headers, c.requestHeaders, c.httpHeaders, c.reqHeaders];
+    for (const h of headerSources) {
+      if (!h || typeof h !== "object") continue;
+      for (const k of Object.keys(h)) {
+        if (String(k).toLowerCase() === MEMHUB_INTERNAL_HEADER &&
+            String(h[k]).trim() === MEMHUB_INTERNAL_VALUE) {
+          return true;
+        }
+      }
+    }
+
+    // 3) 请求体特征（主判据，不依赖宿主透出任何额外字段）
+    if (body && typeof body === "object") {
+      // systemone 决策请求体（{model, state, questions}）不可能是用户会话流量；
+      // 钩子正常情况下见不到它（systemone 不触发钩子），防御性覆盖。
+      if (body.questions !== undefined && body.state !== undefined) return true;
+      if (Array.isArray(body.messages)) {
+        const blobs = [];
+        for (const m of body.messages) {
+          if (!m) continue;
+          if (typeof m.content === "string") blobs.push(m.content);
+          else if (m.content !== undefined) {
+            try { blobs.push(JSON.stringify(m.content)); } catch (_) {}
+          }
+        }
+        const text = blobs.join("\n");
+        for (const mk of INTERNAL_PROMPT_MARKERS) {
+          if (mk && text.includes(mk)) return true;
+        }
+      }
+      // Gemini contents / Responses input 形态的内部调用同样覆盖
+      if (Array.isArray(body.contents) || typeof body.input === "string" || Array.isArray(body.input)) {
+        let text = "";
+        try { text = JSON.stringify(body).slice(0, 20000); } catch (_) {}
+        for (const mk of INTERNAL_PROMPT_MARKERS) {
+          if (mk && text.includes(mk)) return true;
+        }
+      }
+    }
+  } catch (_) {
+    // 极致 fail-open：判定自身绝不抛错；拿不准时返回 false（走正常采集路径）
+  }
+  return false;
+}
+
+/* ================================================================== *
+ * 调用预算与熔断
+ * ================================================================== */
+
+export const BUDGET_WINDOW_MS = 60000;
+export const DEFAULT_MAX_PER_MIN = 20;
+export const DEFAULT_MAX_TOTAL = 2000;
+
+const _callTimestamps = [];
+let _totalCalls = 0;
+let _tripped = false;
+const _warned = new Set();
+
+function _numOpt(v, dflt) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt;
+}
+
+function _prune(now) {
+  const cutoff = (typeof now === "number" ? now : Date.now()) - BUDGET_WINDOW_MS;
+  while (_callTimestamps.length > 0 && _callTimestamps[0] <= cutoff) {
+    _callTimestamps.shift();
+  }
+}
+
+function _warnOnce(tag, msg) {
+  if (_warned.has(tag)) return;
+  _warned.add(tag);
+  try { console.log("[memory-hub][model-budget] " + msg); } catch (_) {}
+}
+
+export function getModelBudgetState() {
+  _prune(Date.now());
+  return {
+    perMinute: _callTimestamps.length,
+    total: _totalCalls,
+    tripped: _tripped,
+    windowMs: BUDGET_WINDOW_MS,
+  };
+}
+
+/**
+ * 调用前检查：是否允许再发起一次模型调用。
+ * @returns {{allowed:boolean, reason:string, perMinute:number, total:number, tripped:boolean}}
+ */
+export function modelBudgetCheck(options = {}) {
+  const o = options && typeof options === "object" ? options : {};
+  const maxPerMin = _numOpt(o.harvest_max_per_min ?? o.model_max_per_min, DEFAULT_MAX_PER_MIN);
+  const maxTotal = _numOpt(o.harvest_max_total ?? o.model_max_total, DEFAULT_MAX_TOTAL);
+  _prune(Date.now());
+  if (_tripped) {
+    return { allowed: false, reason: "budget_total_tripped", perMinute: _callTimestamps.length, total: _totalCalls, tripped: true, maxPerMin, maxTotal };
+  }
+  if (_totalCalls >= maxTotal) {
+    _tripped = true;
+    _warnOnce("tripped", `单进程累计模型调用已达上限 (${_totalCalls}/${maxTotal})，已熔断：本进程不再自动采集，需重启网关恢复`);
+    return { allowed: false, reason: "budget_total_exceeded", perMinute: _callTimestamps.length, total: _totalCalls, tripped: true, maxPerMin, maxTotal };
+  }
+  if (_callTimestamps.length >= maxPerMin) {
+    _warnOnce("minute", `60 秒窗口模型调用已达上限 (${_callTimestamps.length}/${maxPerMin})，超限采集已跳过`);
+    return { allowed: false, reason: "budget_minute_exceeded", perMinute: _callTimestamps.length, total: _totalCalls, tripped: false, maxPerMin, maxTotal };
+  }
+  return { allowed: true, reason: "ok", perMinute: _callTimestamps.length, total: _totalCalls, tripped: false, maxPerMin, maxTotal };
+}
+
+/** 实际发起一次模型 HTTP 调用后记录（成功/失败均计数，防止失败紧循环打爆额度）。 */
+export function modelBudgetRecord() {
+  _totalCalls += 1;
+  _callTimestamps.push(Date.now());
+  _prune(Date.now());
+  return getModelBudgetState();
+}
+
+/** 仅供测试：重置进程内预算计数器与熔断锁存。 */
+export function resetModelBudget() {
+  _callTimestamps.length = 0;
+  _totalCalls = 0;
+  _tripped = false;
+  _warned.clear();
+}
+
+/**
+ * Live 真实网关测试门控：默认关闭，仅 MEMHUB_LIVE_TEST=1 且具备
+ * MAGPIE_API_KEY 时返回 true。保证全套测试默认零真实模型调用。
+ */
+export function shouldRunLiveTests(env) {
+  const e = env || (typeof process !== "undefined" ? process.env : {});
+  return String(e && e.MEMHUB_LIVE_TEST) === "1" && !!(e && e.MAGPIE_API_KEY);
+}

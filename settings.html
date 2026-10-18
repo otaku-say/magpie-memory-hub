@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.19.0</span>
+    <span class="version-tag">v6.20.0</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、上下文压缩、R2 存储。</p>
 
@@ -319,6 +319,34 @@
         </div>
         <div class="side">
           <label class="switch"><input type="checkbox" id="search_rewrite"><span></span></label>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="harvest_max_per_min">调用预算 · 每分钟上限 (harvest_max_per_min)</label>
+          <span class="badge rec">默认 20</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">60 秒滑动窗口内允许的模型调用次数。超出后自动跳过采集并打日志，不报错、不阻断网关。</div>
+          <div class="hint-diff"><strong>默认 20</strong>：正常一轮对话仅 0~1 次调用，20 足够覆盖突发；调小更省额度。</div>
+        </div>
+        <div class="control">
+          <input type="number" id="harvest_max_per_min" min="1" max="600" step="1" value="20">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="harvest_max_total">调用预算 · 单进程累计上限 (harvest_max_total)</label>
+          <span class="badge rec">默认 2000</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">网关进程累计模型调用熔断线。触达后本进程永久停止自动采集（重启网关恢复），超限跳过不报错。</div>
+          <div class="hint-diff"><strong>默认 2000</strong>：按一轮 1 次计可支撑约 2000 轮；熔断状态在「真实检测模型」结果中可见。</div>
+        </div>
+        <div class="control">
+          <input type="number" id="harvest_max_total" min="10" max="100000" step="10" value="2000">
         </div>
       </div>
 

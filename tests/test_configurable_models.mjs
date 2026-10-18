@@ -374,7 +374,8 @@ pytest tests/unit/ -v 24 passed in 0.5s OK done!
 {
   console.log("▶ [Test 6] 真实网关在线 API 调用实测 (Live Gateway Test)...");
 
-  const liveApiKey = process.env.MAGPIE_API_KEY;
+  // v6.20.0 事故修复：Live 真实网关测试默认关闭，仅 MEMHUB_LIVE_TEST=1 且具备 MAGPIE_API_KEY 时才跑。
+    const liveApiKey = process.env.MEMHUB_LIVE_TEST === "1" ? process.env.MAGPIE_API_KEY : undefined;
   const liveBaseUrl = process.env.MAGPIE_BASE_URL || "https://magpie-api.4a8a.com";
 
   if (liveApiKey) {
@@ -488,7 +489,7 @@ pytest tests/unit/ -v 24 passed in 0.5s OK done!
 
   // 7.1 执行配置模型后的正例提炼
   const harvestRes = await processDialogueAndHarvest(
-    "[user]: 请问本地网关默认监听哪个端口？\n[assistant]: 本地网关固定监听 3425 端口。",
+    "[user]: 请问本地网关默认监听哪个端口？这个配置在 config.toml 里怎么写？\n[assistant]: 本地网关固定监听 3425 端口，在 config.toml 中配置 port = 3425 即可生效。",
     { project: testProject, agent: "test-agent" },
     mockDbClient,
     {

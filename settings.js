@@ -14,7 +14,7 @@
   var CARD_FIELDS = {
     ncb: ["ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init"],
     r2: ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"],
-    model: ["extract_model", "classify_model", "classify_endpoint", "search_rewrite"],
+    model: ["extract_model", "classify_model", "classify_endpoint", "search_rewrite", "harvest_max_per_min", "harvest_max_total"],
     harvest: ["auto_harvest", "gatewayTimeoutMs"],
     extract: ["inline_extract", "min_confidence"],
     inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"],
@@ -35,7 +35,9 @@
     compress_max_chars: 3000,
     compress_min_chars: 1200,
     max_principles: 2,
-    gatewayTimeoutMs: 8000
+    gatewayTimeoutMs: 8000,
+    harvest_max_per_min: 20,
+    harvest_max_total: 2000
   };
   var BOOL = [
     "auto_init",
@@ -289,6 +291,10 @@
       return "最低入库置信度应在 0~1 之间";
     if (o.compress && o.compress_min_chars >= o.compress_max_chars)
       return "压缩阈值不合理：『小于此长度不动』应小于『单块压缩后上限』";
+    if (o.harvest_max_per_min != null && (o.harvest_max_per_min < 1 || o.harvest_max_per_min > 600))
+      return "每分钟调用上限应在 1~600 之间";
+    if (o.harvest_max_total != null && (o.harvest_max_total < 10 || o.harvest_max_total > 100000))
+      return "单进程累计上限应在 10~100000 之间";
     return "";
   }
 

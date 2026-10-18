@@ -78,6 +78,8 @@ const REMOTE = {
   extract_model: "",
   classify_model: "",
   classify_endpoint: "auto",
+  harvest_max_per_min: 20,
+  harvest_max_total: 2000,
   search_rewrite: true,
   memories: [{ id: 1, title: "宿主推进来的快照，绝不能被覆盖掉" }],
   some_future_field: "未来新增的字段也必须在",
@@ -248,7 +250,7 @@ console.log("\n=== 6. 静态检查：卡片标题与表格逐字一致 ===");
   }
 }
 
-console.log("\n=== 7. 静态检查：全部 23 个可配置项均包含推荐值或必填徽章 ===");
+console.log("\n=== 7. 静态检查：全部可配置项均包含推荐值或必填徽章 ===");
 {
   const all23Fields = [
     "ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init",
@@ -256,7 +258,8 @@ console.log("\n=== 7. 静态检查：全部 23 个可配置项均包含推荐值
     "auto_harvest",
     "inline_extract", "min_confidence",
     "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
-    "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"
+    "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars",
+    "harvest_max_per_min", "harvest_max_total"
   ];
   let allHaveBadge = true;
   for (const f of all23Fields) {
@@ -293,7 +296,7 @@ console.log("\n=== 8. 独立卡片保存测试（只改本卡片字段，其它�
   }
 }
 
-console.log("\n=== 9. 底部整体保存测试（全部 23 个字段都在）===");
+console.log("\n=== 9. 底部整体保存测试（全部字段都在）===");
 {
   await new Promise((r) => setTimeout(r, 1100)); // 绕开频控
   lastSet = null; setCalls = 0;
@@ -309,13 +312,14 @@ console.log("\n=== 9. 底部整体保存测试（全部 23 个字段都在）===
       "auto_harvest", "gatewayTimeoutMs",
       "inline_extract", "min_confidence",
       "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
-      "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"
+      "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars",
+      "harvest_max_per_min", "harvest_max_total"
     ];
     let allPresent = true;
     for (const f of allRequired) {
       if (lastSet[f] === undefined) { allPresent = false; no(`字段 ${f} 缺失`); }
     }
-    check(allPresent, `全部 24 个可配置项字段均在保存 payload 中完整存在`);
+    check(allPresent, `全部可配置项字段均在保存 payload 中完整存在`);
     check(lastSet.gatewayTimeoutMs === 8000, `gatewayTimeoutMs 默认写入 8000`);
     check(JSON.stringify(lastSet.memories) === JSON.stringify(REMOTE.memories), "底部保存同样不丢 memories 快照");
   }

@@ -132,7 +132,7 @@ function createDOMStub(initialOptions) {
     if (id.startsWith("btn_") || id === "save" || id === "copy" || id === "toggle_mcp_key") tag = "button";
     else if (id.includes("instance") || id.includes("secret") || id.includes("key") || id.includes("chars") || id.includes("count") || id.includes("url") || id.includes("principles") || id.includes("confidence") || id.includes("account") || id.includes("bucket")) tag = "input";
     else if (id === "on_exist") tag = "select";
-    else if (id.includes("compress") || id.includes("disabled") || id.includes("cards") || id.includes("principles") || id.includes("dedup") || id.includes("extract") || id === "auto_init") tag = "input";
+    else if (id.includes("compress") || id.includes("disabled") || id.includes("cards") || id.includes("principles") || id.includes("dedup") || id.includes("extract") || id.includes("harvest_max") || id === "auto_init") tag = "input";
     elements[id] = new MockElement(id, tag);
   }
 
@@ -241,6 +241,8 @@ async function runTests() {
     classify_model: "group/clef",
     classify_endpoint: "auto",
     search_rewrite: true,
+    harvest_max_per_min: 20,
+    harvest_max_total: 2000,
     // 关键外部保留字段：
     custom_external_field: "do_not_lose_me",
     memories: [{ id: 101, title: "important memory" }]
@@ -264,6 +266,8 @@ async function runTests() {
   assert.strictEqual(env.elements.extract_model.value, "group/gemini-3.5-flash-lite");
   assert.strictEqual(env.elements.classify_model.value, "group/clef");
   assert.strictEqual(env.elements.classify_endpoint.value, "auto");
+  assert.strictEqual(Number(env.elements.harvest_max_per_min.value), 20, "harvest_max_per_min 默认 20");
+  assert.strictEqual(Number(env.elements.harvest_max_total.value), 2000, "harvest_max_total 默认 2000");
   assert.strictEqual(env.elements.search_rewrite.checked, true);
   assert.strictEqual(env.elements.btn_download_model, undefined, "本地小模型下载按钮已彻底移除");
   console.log("PASS: 表单字段 fill() 初始填充正确（包含在线模型配置项，且旧下载按钮已删除）");
@@ -575,13 +579,14 @@ async function runTests() {
   console.log("PASS: 未检测到对话录制时卡片正确渲染友好提示与精准开启指引！");
 
   // ==========================================
-  // 测试 10: 静态校验 23 个可配置项独立徽章完整性
+  // 测试 10: 静态校验全部可配置项独立徽章完整性
   // ==========================================
-  console.log("\n--- 测试 10: 全部 23 个可配置项独立徽章校验 ---");
-  const all23Fields = [
+  console.log("\n--- 测试 10: 全部可配置项独立徽章校验 ---");
+  const all23Fields = [ // v6.20.0 新增 harvest_max_per_min / harvest_max_total 后共 25 项
     "ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init",
     "r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url",
     "auto_harvest",
+    "harvest_max_per_min", "harvest_max_total",
     "inline_extract", "min_confidence",
     "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
     "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"
@@ -643,6 +648,8 @@ async function runTests() {
   env.elements.classify_model.value = "group/fast-clef";
   env.elements.classify_endpoint.value = "chat";
   env.elements.search_rewrite.checked = false;
+  env.elements.harvest_max_per_min.value = "30";
+  env.elements.harvest_max_total.value = "5000";
   const callsBeforeModelSave = env.setCalls.length;
   env.elements.btn_save_card_model.click();
   await new Promise((r) => setTimeout(r, 60));
@@ -652,6 +659,8 @@ async function runTests() {
   assert.strictEqual(modelSavePayload.classify_model, "group/fast-clef");
   assert.strictEqual(modelSavePayload.classify_endpoint, "chat");
   assert.strictEqual(modelSavePayload.search_rewrite, false);
+  assert.strictEqual(modelSavePayload.harvest_max_per_min, 30, "harvest_max_per_min 独立保存");
+  assert.strictEqual(modelSavePayload.harvest_max_total, 5000, "harvest_max_total 独立保存");
   assert.strictEqual(modelSavePayload.ncb_instance, "agent_memory", "其它卡片配置项保持不变");
   assert.deepStrictEqual(modelSavePayload.memories, [{ id: 101, title: "important memory" }], "memories 数组保持不变");
   console.log("PASS: 在线大模型配置卡片独立保存测试通过，所有在线模型字段均正确保存！");

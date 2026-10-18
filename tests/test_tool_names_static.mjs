@@ -43,6 +43,12 @@ const KNOWN_NON_TOOL_SYMBOLS = new Set([
   "r2_public_url",
   "storage_public_url",
   "model_dir",
+  // v6.20.0 调用预算配置选项（非工具，仅 options 字段；扫描器按 model_ 前缀误报）
+  "model_budget",
+  "model_max_per_min",
+  "model_max_total",
+  "harvest_max_per_min",
+  "harvest_max_total",
   // 设置页 DOM 元素 ID
   "db_action_status",
   "model_action_status",

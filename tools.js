@@ -111,6 +111,9 @@ function readOptions(options) {
     search_rewrite: o.search_rewrite !== false,
     gateway_url: o.gateway_url || o.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425",
     gateway_api_key: o.gateway_api_key || o.api_key || process.env.MAGPIE_API_KEY || "",
+    // v6.20.0 调用预算与熔断（可配置，保守默认；见 model_budget.js）
+    harvest_max_per_min: Number(o.harvest_max_per_min ?? o.model_max_per_min) > 0 ? Math.floor(Number(o.harvest_max_per_min ?? o.model_max_per_min)) : 20,
+    harvest_max_total: Number(o.harvest_max_total ?? o.model_max_total) > 0 ? Math.floor(Number(o.harvest_max_total ?? o.model_max_total)) : 2000,
     _fetch: o._fetch,
   };
 }

@@ -495,7 +495,8 @@ console.log("=================================================================\n
 {
   console.log("▶ [Test 5] 真实网关在线 API 调用实测 (Live Gateway Test)...");
 
-  const liveApiKey = process.env.MAGPIE_API_KEY;
+  // v6.20.0 事故修复：Live 真实网关测试默认关闭，仅 MEMHUB_LIVE_TEST=1 且具备 MAGPIE_API_KEY 时才跑。
+    const liveApiKey = process.env.MEMHUB_LIVE_TEST === "1" ? process.env.MAGPIE_API_KEY : undefined;
   const liveBaseUrl = process.env.MAGPIE_BASE_URL || "https://magpie-api.4a8a.com";
 
   if (liveApiKey) {
