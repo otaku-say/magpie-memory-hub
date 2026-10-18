@@ -25,6 +25,12 @@ import { runPendingAction, readAction, writeCardStatus, parseDbInfo } from "./pa
 import { harvestGateway, isTestMode } from "./gateway_harvest.js";
 import { triggerBackgroundDrain } from "./gateway_harvest.hooks.js";
 import { rewriteSearchQuery } from "./online_models.js";
+import {
+  normalizeSemanticText,
+  semanticFingerprint,
+  isSemanticallySimilar,
+  findSemanticDuplicate,
+} from "./semantic_dedup.js";
 
 const NCB_BASE = "https://api.nocodebackend.com";
 
@@ -350,29 +356,46 @@ async function saveMemory(client, cfg, m, ctx) {
   if (!title) throw new Error("title 不能为空");
   if (!content) throw new Error("content 不能为空");
 
-  const fp = fingerprint(`${project}:${category}:${title}:${content}`);
+  const initialRecurrence = typeof m.recurrence === "number" && m.recurrence >= 1 ? Math.floor(m.recurrence) : 1;
+  const fp = (m.content_fingerprint && String(m.content_fingerprint).trim()) || semanticFingerprint(project, category, title, content);
 
   // 0) 进程内近期写入 → 挡掉写后读延迟窗口里的重复
   if (justWritten("m:" + fp)) {
     return { action: "NOOP", id: null, note: "刚刚写入过（写后读延迟窗口内），已忽略重复" };
   }
 
-  // 1) 完全相同的指纹 → NOOP，不虚增检索计数，不更新 last_used_at
-  const same = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT })).filter(
-    (r) => r.content_fingerprint === fp
-  );
-  if (same.length) {
-    const hit = same[0];
-    markRecent("m:" + fp);
-    return { action: "NOOP", id: hit.id, retrieval_count: Number(hit.retrieval_count) || 0, note: "内容未变化" };
+  // 1) 候选集拉取（同项目、同分类活跃记忆）
+  const projectRows = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT }));
+  const categoryRows = projectRows.filter((r) => r.category === category);
+
+  // 2) Layer ① 语义指纹查重 + Layer ② 局部滑动窗口语义相似度比对
+  const dup = findSemanticDuplicate(categoryRows, title, content, fp);
+  if (dup) {
+    const next = (Number(dup.recurrence) || 1) + initialRecurrence;
+    const now = nowSql();
+    try {
+      await client.update("memories", dup.id, {
+        recurrence: next,
+        updated_at: now,
+      });
+      markRecent("m:" + (dup.content_fingerprint || fp));
+      return {
+        action: "NOOP",
+        id: dup.id,
+        recurrence: next,
+        retrieval_count: Number(dup.retrieval_count) || 0,
+        note: dup.content_fingerprint === fp ? "内容未变化，累加复发计数" : "语义相似去重命中，累加复发计数",
+      };
+    } catch (e) {
+      if (!/404|not found/i.test(String(e.message))) throw e;
+    }
   }
 
-  // 2) 同项目同分类同标题但内容不同 → 新版本，旧版进 supersede 版本链
-  const superseded = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT })).filter(
+  // 3) 同项目同分类同标题但内容不同 → 新版本，旧版进 supersede 版本链
+  const superseded = categoryRows.filter(
     (r) =>
       r.lifecycle_status === "active" &&
-      String(r.title || "").trim().toLowerCase() === title.toLowerCase() &&
-      String(r.category || "") === category
+      String(r.title || "").trim().toLowerCase() === title.toLowerCase()
   );
 
   const payload = {
@@ -396,6 +419,7 @@ async function saveMemory(client, cfg, m, ctx) {
     superseded_by_id: null,
     /* 修订版本号 = 被取代那批里最大的修订号 + 1。没有旧版时就是 1。 */
     revision: superseded.reduce(function (mx, r) { return Math.max(mx, Number(r.revision) || 1); }, 0) + 1,
+    recurrence: initialRecurrence,
     retrieval_count: 0,
     invalid_at: null,
     invalid_reason: '',
@@ -419,11 +443,15 @@ async function saveMemory(client, cfg, m, ctx) {
   } catch (e) {
     if (/duplicate entry/i.test(String(e.message))) {
       markRecent("m:" + fp);
-      const dup = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT })).filter(
+      const dupRow = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT })).filter(
         (r) => r.content_fingerprint === fp
       )[0];
-      if (dup) {
-        return { action: "NOOP", id: dup.id, retrieval_count: Number(dup.retrieval_count) || 0, note: "唯一索引拦下重复" };
+      if (dupRow) {
+        const next = (Number(dupRow.recurrence) || 1) + initialRecurrence;
+        try {
+          await client.update("memories", dupRow.id, { recurrence: next, updated_at: nowSql() });
+        } catch (_) {}
+        return { action: "NOOP", id: dupRow.id, recurrence: next, retrieval_count: Number(dupRow.retrieval_count) || 0, note: "唯一索引拦下重复，累加复发计数" };
       }
       return { action: "NOOP", id: null, note: "唯一索引拦下重复（写后读延迟内读不到既有行）" };
     }
@@ -441,14 +469,14 @@ async function saveMemory(client, cfg, m, ctx) {
         invalid_reason: "superseded",
         updated_at: nowSql(),
       });
-      return { action: "UPDATE", id: newId, superseded_id: oldId, superseded_count: superseded.length };
+      return { action: "UPDATE", id: newId, superseded_id: oldId, superseded_count: superseded.length, recurrence: initialRecurrence };
     } catch (e) {
       if (!/404|not found/i.test(String(e.message))) throw e;
       // 旧行已不可达（被清理/缓存残留）：新版本已写入，直接按 ADD 返回
-      return { action: "ADD", id: newId, note: "旧版本行不可达，已跳过 supersede 标记" };
+      return { action: "ADD", id: newId, recurrence: initialRecurrence, note: "旧版本行不可达，已跳过 supersede 标记" };
     }
   }
-  return { action: "ADD", id: newId };
+  return { action: "ADD", id: newId, recurrence: initialRecurrence };
 }
 
 /* ================================================================== *
@@ -542,6 +570,7 @@ async function memorySearch(client, cfg, args) {
     content: x.row.content,
     tags: x.row.tags,
     confidence: x.row.confidence_score,
+    recurrence: Number(x.row.recurrence) || 1,
     retrieval_count: Number(x.row.retrieval_count) || 0,
     last_used_at: x.row.last_used_at || null,
     updated_at: x.row.updated_at,
@@ -579,6 +608,7 @@ async function memoryList(client, cfg, args) {
       client: r.client || "unknown",
       origin: r.origin || "tool",
       title: r.title, tags: r.tags,
+      recurrence: Number(r.recurrence) || 1,
       retrieval_count: Number(r.retrieval_count) || 0,
       last_used_at: r.last_used_at || null,
     })),
@@ -824,6 +854,8 @@ const TOOLS = {
         tags: { type: "string", description: "逗号分隔的检索关键词" },
         related_entities: { type: "string", description: "相关实体/技术栈" },
         confidence: { type: "number", description: "置信度 0~1，默认 1" },
+        recurrence: { type: "integer", description: "观察与复发次数，默认 1" },
+        content_fingerprint: { type: "string", description: "指定内容指纹（可选）" },
         source_session: { type: "string", description: "来源会话标识（如客户端会话 ID，可选）" },
         source_turn: { type: "integer", description: "来源会话轮次序号（从 1 起始，可选）" },
       },

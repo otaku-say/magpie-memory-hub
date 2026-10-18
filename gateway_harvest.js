@@ -31,6 +31,7 @@ import {
 } from "./local_state.js";
 import { writeCardStatus } from "./page_actions.js";
 import { harvestWithOnlineModel } from "./gateway_harvest.hooks.js";
+import { semanticFingerprint } from "./semantic_dedup.js";
 
 /* 诊断：把静默吞掉的错误说出来（每类只打一次，不含对话内容） */
 var _diagLogged = {};
@@ -516,7 +517,7 @@ export async function harvestGateway(args, context) {
         for (const item of facts.concat(decisions)) {
           if (signal && signal.aborted) { aborted = true; break; }
 
-          const mFp = crypto.createHash("sha256").update(`${targetProject}:${item.category}:${item.title}:${item.content}`).digest("hex").slice(0, 32);
+          const mFp = semanticFingerprint(targetProject, item.category, item.title, item.content);
           if (!isExplicit && minEvidenceMemory > 1) {
             const pendingRes = recordPendingEvidence(`m:${targetProject}:${mFp}`, {
               ...item,

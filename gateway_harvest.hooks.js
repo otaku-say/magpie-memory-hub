@@ -28,6 +28,12 @@ import {
   isTestMode,
   isExplicitUserMemory,
 } from "./gateway_harvest.js";
+import {
+  normalizeSemanticText,
+  semanticFingerprint,
+  isSemanticallySimilar,
+  findSemanticDuplicate,
+} from "./semantic_dedup.js";
 import { makeMcpClient, buildSelect, buildInsert, sqlValue } from "./mcp_client.js";
 import {
   lookupSecret,
@@ -842,7 +848,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     const content = String(item.content || "").trim();
     if (!title || !content) continue;
 
-    const fp = fingerprint(`${project}:${item.category}:${title}:${content}`);
+    const fp = semanticFingerprint(project, item.category || "fact", title, content);
     if (isRecent("m:" + fp)) continue;
 
     // 门禁按类型区分：非显式表达且显式指定了 minEvidenceMemory > 1 时进入 pending 门禁
@@ -876,6 +882,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       lifecycle_status: "active",
       superseded_by_id: null,
       revision: 1,
+      recurrence: 1,
       retrieval_count: 0,
       created_at: now,
       updated_at: now,
@@ -1111,14 +1118,29 @@ export async function triggerBackgroundDrain(client, options = {}) {
           if (item.table === "memories") {
             const fp = item.fp || item.data?.content_fingerprint || "";
             const project = item.project || "global";
+            const category = item.data?.category || "fact";
+            const title = item.data?.title || "";
+            const content = item.data?.content || item.data?.full_text || "";
+
+            // Layer ① 语义指纹查重 + Layer ② 滑动窗口语义相似度比对
             const existing = await client.list("memories", {
               project,
-              content_fingerprint: fp,
-              limit: 1,
+              limit: 50,
             });
-            const isDupe = Array.isArray(existing?.data) && existing.data.length > 0;
-            if (isDupe) {
-              markRecent("m:" + fp);
+            const rows = Array.isArray(existing?.data) ? existing.data : (Array.isArray(existing) ? existing : []);
+            const categoryRows = rows.filter((r) => !category || r.category === category);
+            const dup = findSemanticDuplicate(categoryRows, title, content, fp);
+
+            if (dup) {
+              const next = (Number(dup.recurrence) || 1) + (Number(item.data?.recurrence) || 1);
+              const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+              try {
+                await client.update("memories", dup.id, {
+                  recurrence: next,
+                  updated_at: now,
+                });
+              } catch (_) {}
+              markRecent("m:" + (dup.content_fingerprint || fp));
               successIds.push(item.id);
               batchSuccess++;
               continue;
@@ -1126,6 +1148,7 @@ export async function triggerBackgroundDrain(client, options = {}) {
             const now = new Date().toISOString().slice(0, 19).replace("T", " ");
             const drainMemoryPayload = {
               ...item.data,
+              recurrence: Number(item.data?.recurrence) || 1,
               created_at: (item.data && item.data.created_at) || now,
               updated_at: now,
             };
@@ -1135,7 +1158,15 @@ export async function triggerBackgroundDrain(client, options = {}) {
             } catch (createErr) {
               const msg = String(createErr?.message || createErr || "");
               if (/duplicate|ER_DUP_ENTRY|already exists/i.test(msg)) {
-                // 已存在则视为成功去重消费
+                // 唯一索引拦截：累加复发计数
+                try {
+                  const dupRows = await client.list("memories", { project, content_fingerprint: fp, limit: 1 });
+                  const hit = Array.isArray(dupRows?.data) ? dupRows.data[0] : null;
+                  if (hit) {
+                    const next = (Number(hit.recurrence) || 1) + (Number(item.data?.recurrence) || 1);
+                    await client.update("memories", hit.id, { recurrence: next, updated_at: now });
+                  }
+                } catch (_) {}
               } else {
                 throw createErr;
               }

@@ -11,7 +11,7 @@
  */
 
 /** 结构版本号。每次改动 TABLES 都要 +1，并在 MIGRATIONS 里补一条说明。 */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /** 各版本做了什么（给人看，也用于生成变更说明）。 */
 export const MIGRATIONS = {
@@ -19,6 +19,7 @@ export const MIGRATIONS = {
   2: "新增 client 来源字段（memories / pitfalls）与 full_content 全文存储（memories）",
   3: "数据库表与字段语义重构：删除 dead fields (entities/hits/source)，重命名为语义明确字段 (scope_level, content_fingerprint, retrieval_count, related_entities, full_text, superseded_by_id, lifecycle_status, revision, last_used_at)，新增 origin 产生方式，改默认值 client='unknown'，重命名元数据表为 schema_meta",
   4: "新增来源可追溯性字段：memories 与 pitfalls 表增加 source_session (VARCHAR 128) 与 source_turn (INT)",
+  5: "新增复发与去重计数机制：memories 表增加 recurrence (INT, default 1) 字段，对齐 pitfalls 表",
 };
 
 /**
@@ -52,6 +53,7 @@ export const TABLES = {
      * （superseded_by_id → memories.id），0 不是合法引用会违约。 */
     { name: "superseded_by_id", type: "INT", default: "NULL" },
       { name: "revision", type: "INT", default: "1" },
+      { name: "recurrence", type: "INT", default: "1" },
       { name: "retrieval_count", type: "INT", default: "0" },
       { name: "invalid_at", type: "DATETIME", nullable: true },
       // 软失效的原因，便于审计（superseded / user_forgot / duplicate / expired）

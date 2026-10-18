@@ -76,6 +76,7 @@ CREATE TABLE memories (
   lifecycle_status VARCHAR(16) DEFAULT 'active',
   superseded_by_id INT NULL,
   revision INT DEFAULT 1,
+  recurrence INT DEFAULT 1,
   retrieval_count INT DEFAULT 0,
   invalid_at DATETIME NULL,
   invalid_reason VARCHAR(64) DEFAULT '',

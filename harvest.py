@@ -234,6 +234,37 @@ class NCB:
         return acc
 
 
+def normalize_semantic_text(text):
+    if not text:
+        return ""
+    s = str(text).lower()
+    for ch in "`*#_~[]「」『』“”‘’\"'":
+        s = s.replace(ch, "")
+    for ch in "的之地得":
+        s = s.replace(ch, "")
+    synonyms = [
+        ("端点与工具特性", "端点与特性"), ("工具特性与端点", "端点与特性"),
+        ("接口与特性", "端点与特性"), ("端点及特性", "端点与特性"),
+        ("特性说明", "特性"), ("工具特性", "特性"), ("功能特性", "特性"),
+        ("依赖管理", "管理依赖"), ("进行依赖管理", "管理依赖"), ("依赖包管理", "管理依赖"),
+        ("记忆保存", "保存记忆"), ("严禁", "禁止"), ("不可", "禁止"), ("不要", "禁止"),
+        ("切勿", "禁止"), ("采用", "使用"), ("利用", "使用"), ("直达", "直接"),
+        ("进行", ""), ("关于", ""), ("对于", ""), ("具备", "提供"), ("拥有", "提供")
+    ]
+    for old, new in synonyms:
+        s = s.replace(old, new)
+    import re
+    s = re.sub(r"[，。！？、；：:,\.!\?;\\/\-_|~～\(\)（）《》〈〉【】〔〕\s\t\r\n]+", "", s)
+    return s
+
+
+def semantic_fingerprint(project, category, title, content):
+    norm_title = normalize_semantic_text(title)
+    norm_content = normalize_semantic_text(content)
+    text = f"{project}:{category}:{norm_title}:{norm_content}"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+
+
 def fingerprint(text):
     return hashlib.sha256(str(text).strip().lower().encode("utf-8")).hexdigest()[:32]
 
@@ -992,7 +1023,7 @@ def save_memory(ncb, cfg, m, cache):
     if not title or not content:
         return {"action": "SKIP", "reason": "title/content 为空"}
 
-    fp = fingerprint(f"{project}:{category}:{title}:{content}")
+    fp = str(m.get("content_fingerprint") or semantic_fingerprint(project, category, title, content)).strip()
     if fp in cache:
         return {"action": "NOOP", "cached": True}
     cache.add(fp)
@@ -1000,7 +1031,12 @@ def save_memory(ncb, cfg, m, cache):
     same = [r for r in ncb.all("memories", {"project": project}) if r.get("content_fingerprint") == fp]
     if same:
         rid = same[0]["id"]
-        return {"action": "NOOP", "id": rid}
+        next_rec = int(same[0].get("recurrence") or 1) + 1
+        try:
+            ncb.update("memories", rid, {"recurrence": next_rec, "updated_at": now_str()})
+        except Exception:
+            pass
+        return {"action": "NOOP", "id": rid, "recurrence": next_rec}
 
     superseded = [
         r for r in ncb.all("memories", {"project": project})
@@ -1040,6 +1076,7 @@ def save_memory(ncb, cfg, m, cache):
             # superseded_by_id -> memories.id，写 0 会违约导致整条写入失败。
             "superseded_by_id": None,
             "revision": max([int(r.get("revision") or 1) for r in superseded] or [0]) + 1,
+            "recurrence": 1,
             "retrieval_count": 0,
             "invalid_at": None,
             "invalid_reason": "",
@@ -1055,6 +1092,14 @@ def save_memory(ncb, cfg, m, cache):
         })
     except RuntimeError as e:
         if "duplicate" in str(e).lower():
+            dup = [r for r in ncb.all("memories", {"project": project}) if r.get("content_fingerprint") == fp]
+            if dup:
+                next_rec = int(dup[0].get("recurrence") or 1) + 1
+                try:
+                    ncb.update("memories", dup[0]["id"], {"recurrence": next_rec, "updated_at": now_str()})
+                except Exception:
+                    pass
+                return {"action": "NOOP", "id": dup[0]["id"], "recurrence": next_rec, "note": "唯一索引拦下重复"}
             return {"action": "NOOP", "note": "唯一索引拦下重复"}
         raise
     new_id = res.get("id") or res.get("insertId")

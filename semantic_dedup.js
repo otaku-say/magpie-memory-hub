@@ -1,0 +1,240 @@
+/**
+ * semantic_dedup.js —— 记忆中枢语义级去重引擎
+ *
+ * 核心设计：
+ *   Layer ① 语义归一化指纹（廉价/快速/无损）：
+ *     去除标点、空白、助词、括号、大小写，归一化常见同义词与前后缀（如「端点与工具特性」↔「端点与特性」）。
+ *     使字面微调变体直接收敛至相同哈希，充分发挥数据库唯一索引的天然去重能力。
+ *   Layer ② 局部滑动窗口语义相似度比对（token Jaccard + Overlap + Levenshtein）：
+ *     在入库前与同项目同分类的最近 N 条活跃记忆做相似度比对。
+ *     含专有技术名词实体防护（避免句式相仿但实体不同的误报）。
+ *     命中语义相似则不新建记录，转而累加既有记忆的 recurrence 观察计数并刷新 updated_at。
+ */
+
+import crypto from "node:crypto";
+
+/**
+ * 文本语义归一化（Layer ①）
+ */
+export function normalizeSemanticText(text) {
+  if (!text) return "";
+  let s = String(text).toLowerCase();
+
+  // 1. 去除 Markdown 标记、各类引号、括号与修饰符号
+  s = s.replace(/[`*#_~\[\]「」『』“”‘’"']/g, "");
+
+  // 2. 弱化中文结构助词与无实义虚词
+  s = s.replace(/[的之地得]/g, "");
+
+  // 3. 常见同义表达与前后缀变体归一化（长词优先替换）
+  const SYNONYM_MAP = [
+    // MCP 端点与特性表述
+    [/端点与工具特性/g, "端点与特性"],
+    [/工具特性与端点/g, "端点与特性"],
+    [/接口与特性/g, "端点与特性"],
+    [/端点及特性/g, "端点与特性"],
+    [/特性说明/g, "特性"],
+    [/工具特性/g, "特性"],
+    [/功能特性/g, "特性"],
+
+    // 依赖管理表述
+    [/依赖管理/g, "管理依赖"],
+    [/进行依赖管理/g, "管理依赖"],
+    [/依赖包管理/g, "管理依赖"],
+
+    // 显式记忆保存表述
+    [/记忆保存/g, "保存记忆"],
+
+    // 动作与否定词归一化
+    [/严禁/g, "禁止"],
+    [/不可/g, "禁止"],
+    [/不要/g, "禁止"],
+    [/切勿/g, "禁止"],
+    [/采用/g, "使用"],
+    [/利用/g, "使用"],
+    [/直达/g, "直接"],
+
+    // 常见填充词弱化
+    [/进行/g, ""],
+    [/关于/g, ""],
+    [/对于/g, ""],
+    [/具备/g, "提供"],
+    [/拥有/g, "提供"],
+  ];
+
+  for (const [pattern, replacement] of SYNONYM_MAP) {
+    s = s.replace(pattern, replacement);
+  }
+
+  // 4. 去除所有中英文标点、符号与空白字符
+  s = s.replace(/[，。！？、；：:,\.!\?;\\\/\-_|~～\(\)（）《》〈〉【】〔〕\s\t\r\n]+/gu, "");
+
+  return s;
+}
+
+/**
+ * 计算语义归一化指纹
+ */
+export function semanticFingerprint(project, category, title, content) {
+  const normTitle = normalizeSemanticText(title);
+  const normContent = normalizeSemanticText(content);
+  const text = `${project}:${category}:${normTitle}:${normContent}`;
+  return crypto.createHash("sha256").update(text).digest("hex").slice(0, 32);
+}
+
+/**
+ * 分词并提取语义单元（英文单词 + 中文单字/双字 n-gram）
+ */
+export function tokenize(text) {
+  const norm = normalizeSemanticText(text);
+  const tokens = new Set();
+
+  // 1. 英文与数字专有标识（如 pnpm, react18, api, search）
+  const words = norm.match(/[a-z0-9_-]+/g) || [];
+  for (const w of words) tokens.add(w);
+
+  // 2. 中文单字与双字元
+  const cjk = norm.replace(/[a-z0-9_-]+/g, "");
+  for (let i = 0; i < cjk.length; i++) {
+    tokens.add(cjk[i]);
+    if (i < cjk.length - 1) tokens.add(cjk.slice(i, i + 2));
+  }
+
+  return { tokens, str: norm };
+}
+
+/** Jaccard 相似度 |A ∩ B| / |A ∪ B| */
+export function jaccardSimilarity(setA, setB) {
+  if (setA.size === 0 && setB.size === 0) return 1.0;
+  if (setA.size === 0 || setB.size === 0) return 0.0;
+  let intersection = 0;
+  for (const x of setA) {
+    if (setB.has(x)) intersection++;
+  }
+  const union = setA.size + setB.size - intersection;
+  return intersection / union;
+}
+
+/** 词集包含率/重叠系数 |A ∩ B| / min(|A|, |B|) */
+export function overlapCoefficient(setA, setB) {
+  if (setA.size === 0 && setB.size === 0) return 1.0;
+  if (setA.size === 0 || setB.size === 0) return 0.0;
+  let intersection = 0;
+  for (const x of setA) {
+    if (setB.has(x)) intersection++;
+  }
+  return intersection / Math.min(setA.size, setB.size);
+}
+
+/** Levenshtein 编辑距离 */
+export function levenshteinDistance(s1, s2) {
+  const m = s1.length;
+  const n = s2.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (s1[i - 1] === s2[j - 1]) dp[i][j] = dp[i - 1][j - 1];
+      else dp[i][j] = Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]) + 1;
+    }
+  }
+  return dp[m][n];
+}
+
+/** 基于编辑距离的归一化相似度 (0 ~ 1) */
+export function levSimilarity(s1, s2) {
+  const maxLen = Math.max(s1.length, s2.length);
+  if (maxLen === 0) return 1.0;
+  const dist = levenshteinDistance(s1, s2);
+  return 1 - dist / maxLen;
+}
+
+/**
+ * 判断两个记忆条目是否表达「同一事实」（Layer ② 语义判重）
+ */
+export function isSemanticallySimilar(title1, content1, title2, content2) {
+  const t1 = tokenize(title1);
+  const t2 = tokenize(title2);
+  const c1 = tokenize(content1);
+  const c2 = tokenize(content2);
+
+  // 1. 归一化文本完全一致
+  if (t1.str && t1.str === t2.str && c1.str && c1.str === c2.str) return true;
+
+  // 2. 专有实体技术词与序号交集检查（防止句式相同但技术实体/编号不同的误判，如 React 18 vs Node.js 20，或 条目 3 vs 条目 4）
+  const alpha1 = new Set(t1.str.match(/[a-z0-9_-]+/g) || []);
+  const alpha2 = new Set(t2.str.match(/[a-z0-9_-]+/g) || []);
+  if (alpha1.size > 0 && alpha2.size > 0) {
+    let sharedAlpha = 0;
+    for (const a of alpha1) {
+      for (const b of alpha2) {
+        if (a === b || a.includes(b) || b.includes(a)) {
+          sharedAlpha++;
+          break;
+        }
+      }
+    }
+    if (sharedAlpha === 0) return false;
+  }
+
+  // 3. 计算多维相似度指标
+  const tJaccard = jaccardSimilarity(t1.tokens, t2.tokens);
+  const tOverlap = overlapCoefficient(t1.tokens, t2.tokens);
+  const tLev = levSimilarity(t1.str, t2.str);
+
+  const cJaccard = jaccardSimilarity(c1.tokens, c2.tokens);
+  const cOverlap = overlapCoefficient(c1.tokens, c2.tokens);
+  const cLev = levSimilarity(c1.str, c2.str);
+
+  const contentRelevant = cOverlap >= 0.38 || cJaccard >= 0.22 || cLev >= 0.28;
+
+  // 4. 标题完全归一相同，且内容具有相关性（内容不冲突/变体表述）
+  if (t1.str && t1.str === t2.str && contentRelevant) return true;
+
+  // 5. 判定门限：
+  // 5.1 标题高度相似（同义词、语序倒装、修饰变体）且内容具备相关性
+  const titleVeryClose = (tOverlap >= 0.75 && tJaccard >= 0.45) || tLev >= 0.7;
+  if (titleVeryClose && contentRelevant) return true;
+
+  // 5.2 标题与内容双向高重合
+  if (tOverlap >= 0.8 && cOverlap >= 0.5) return true;
+  if (tLev >= 0.75 && cLev >= 0.5) return true;
+
+  // 5.3 内容极高重合（详略不同的变体）且标题具备基本关联
+  if (cOverlap >= 0.85 && cJaccard >= 0.6 && tOverlap >= 0.4) return true;
+
+  // 5.4 综合加权相似度得分
+  const combined = (tJaccard * 0.35 + tLev * 0.25) + (cJaccard * 0.25 + cLev * 0.15);
+  return combined >= 0.6 && contentRelevant;
+}
+
+/**
+ * 从已存在的候选记忆列表中寻找语义重复项
+ * @param {Array<Object>} candidates - 候选记忆列表（同 project + 同 category）
+ * @param {string} title - 待检测标题
+ * @param {string} content - 待检测内容
+ * @param {string} normFp - 待检测归一化指纹
+ * @returns {Object|null} 匹配到的已有记忆条目
+ */
+export function findSemanticDuplicate(candidates, title, content, normFp) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+
+  // 1. 优先比对 content_fingerprint
+  if (normFp) {
+    const exact = candidates.find((r) => r.content_fingerprint === normFp);
+    if (exact) return exact;
+  }
+
+  // 2. 逐条进行 Layer ② 语义相似度比对
+  for (const cand of candidates) {
+    if (cand.lifecycle_status && cand.lifecycle_status !== "active") continue;
+    const candTitle = String(cand.title || "");
+    const candContent = String(cand.content || cand.full_text || "");
+    if (isSemanticallySimilar(title, content, candTitle, candContent)) {
+      return cand;
+    }
+  }
+
+  return null;
+}

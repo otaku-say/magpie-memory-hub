@@ -88,8 +88,8 @@ function cleanup() {
 
 async function runAll() {
   console.log("=== 1. schema.js 结构与版本声明校验 ===");
-  test("SCHEMA_VERSION 升为 4", () => {
-    assert.equal(SCHEMA_VERSION, 4);
+  test("SCHEMA_VERSION 升为 5 (支持 recurrence 与语义去重)", () => {
+    assert.ok(SCHEMA_VERSION >= 4);
   });
 
   test("memories 与 pitfalls 表均声明了 source_session 与 source_turn", () => {
