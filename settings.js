@@ -866,7 +866,7 @@
         clean_probe: "清理探针文件",
         model_check: "真实检测模型",
         memory_audit: "全自动去重",
-        dedup_undo: "撤销上次去重",
+        dedup_undo: "还原到指定时间点",
         init: "初始化数据库",
         reset: "清空数据库",
         status: "检查结构状态",
