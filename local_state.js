@@ -208,19 +208,21 @@ export function rememberSecret(database, secret) {
   return writeState(st);
 }
 
-/** 读回记忆体检调度状态 (last_audit_at, last_summary, etc.) */
+/** 读回全自动去重调度与状态 (last_dedup_at, last_dedup_batch_ts, last_dedup_ids, etc.) */
 export function lookupAuditState() {
   const st = readState();
   return st.audit || {};
 }
+export const lookupDedupState = lookupAuditState;
 
-/** 记录记忆体检调度状态 */
+/** 记录全自动去重状态 */
 export function rememberAuditState(auditState) {
   const st = readState();
   st.audit = Object.assign({}, st.audit || {}, auditState || {});
   writeState(st);
   return st.audit;
 }
+export const rememberDedupState = rememberAuditState;
 
 /** 读回指定项目的记忆体检增量游标（断点续跑与避免上万条全量扫描） */
 export function getAuditCursor(project) {

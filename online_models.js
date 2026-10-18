@@ -349,34 +349,37 @@ export async function rewriteSearchQuery({
 }
 
 /**
- * 记忆体检与质量审阅 System Prompt
+ * 记忆全自动去重 System Prompt（单次模型调用完成判定与合并结果生成）
  */
-export const AUDIT_SYSTEM_PROMPT = `你是一个专业的长期记忆中枢体检与质量审阅专家。
-你的任务是审阅给定的长期记忆列表与踩坑经验列表，输出质量与去重建议卡片。
-【审阅维度】：
-1. 重复组 (duplicate_groups)：
-   - 识别表达同一事实、同一决策或同一规则的变体记录；
-   - 建议保留主记录（优先保留内容更详尽、复发频次更高或更新的记录）；
-   - 建议软删除其余重复变体记录。
-2. 冲突/过时组 (conflicts)：
-   - 识别同主题但结论矛盾或已过时的记录，标明哪条已过时并建议软失效。
-3. 高频踩坑提升准则 (promotions)：
-   - 识别复发频次高（recurrence >= 3）或影响严重的工程踩坑，建议提升为全局准则 (principle) 置顶注入。
+export const AUDIT_SYSTEM_PROMPT = `你是一个专业的长期记忆中枢全自动去重专家。
+你的任务是在单次调用中同时完成「判定 + 生成合并结果」，识别重复记忆与踩坑条目。
 
-【红线纪律】：
-1. 绝不删改数据：你只输出建议方案，绝不能直接修改或删除数据。
-2. 格式规范：输出合法的 JSON 对象，严禁包裹 markdown 代码块，格式如下：
+【判定规则与合并标准】：
+1. 记忆查重 (memory_duplicates)：
+   - 识别表达同一事实、同一偏好或同一决策的重复/变体记忆；
+   - 选定一条主记录 primary_id（优先保留信息更详尽、复发频次更高或更新的记录）；
+   - 列出需合并软删除的多余副本 duplicate_ids（这些副本将被软失效，主记录 recurrence 将累加）。
+2. 踩坑查重 (pitfall_duplicates)：
+   - 识别同一组件、相同报错现象与根因的重复踩坑记录；
+   - 选定主记录 primary_id 并列出需合并的多余副本 duplicate_ids。
+
+【输出规范】：
+严格输出合法 JSON 对象，严禁包裹 markdown 代码块，格式如下：
 {
-  "duplicate_groups": [
+  "memory_duplicates": [
     {
-      "title": "重复组主题",
       "primary_id": 1,
       "duplicate_ids": [2],
-      "reason": "变体说明"
+      "reason": "表达相同事实"
     }
   ],
-  "conflicts": [],
-  "promotions": []
+  "pitfall_duplicates": [
+    {
+      "primary_id": 10,
+      "duplicate_ids": [11],
+      "reason": "相同组件报错"
+    }
+  ]
 }`;
 
 /**
@@ -426,7 +429,7 @@ export async function auditMemoriesWithModel({
     recurrence: p.recurrence,
   }));
 
-  const userContent = `【待体检记忆列表】：\n${JSON.stringify(memSummary, null, 2)}\n\n【待体检踩坑列表】：\n${JSON.stringify(pitSummary, null, 2)}\n\n请审阅上述内容，输出重复组、冲突组与高频踩坑提升准则建议（严格输出合法 JSON）。`;
+  const userContent = `【待去重记忆列表】：\n${JSON.stringify(memSummary, null, 2)}\n\n【待去重踩坑列表】：\n${JSON.stringify(pitSummary, null, 2)}\n\n请在单次调用中同时完成「判定 + 生成合并结果」，输出 memory_duplicates 与 pitfall_duplicates（严格输出合法 JSON）。`;
 
   try {
     const url = `${baseUrl}/v1/chat/completions`;
@@ -452,7 +455,12 @@ export async function auditMemoriesWithModel({
 
     const json = await res.json();
     const rawContent = json?.choices?.[0]?.message?.content || "";
-    const parsed = parseJsonObject(rawContent);
+    const parsed = parseJsonObject(rawContent) || {};
+    if (Array.isArray(parsed.duplicate_groups) && !parsed.memory_duplicates) {
+      parsed.memory_duplicates = parsed.duplicate_groups;
+    } else if (Array.isArray(parsed.memory_duplicates) && !parsed.duplicate_groups) {
+      parsed.duplicate_groups = parsed.memory_duplicates;
+    }
     return {
       modelUsed: model,
       result: parsed,
@@ -507,8 +515,8 @@ export async function rerankSearchResultsWithModel({
     return null;
   }
 
-  // 模型解析：rerank_model -> extract_model -> audit_model -> harvest_model
-  const model = String(options.rerank_model || options.extract_model || options.audit_model || options.harvest_model || "").trim();
+  // 模型解析：优先使用 audit_model，若留空回退到 extract_model（兼容 options.rerank_model）
+  const model = String(options.audit_model || options.extract_model || options.rerank_model || options.harvest_model || "").trim();
   if (!model || model === "off" || model === "none") {
     return null;
   }

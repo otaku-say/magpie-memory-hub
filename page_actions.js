@@ -101,6 +101,9 @@ export function readAction(options) {
     secret_access_key: a.secret_access_key ? String(a.secret_access_key) : "",
     region: a.region ? String(a.region) : "",
     secret: a.secret ? String(a.secret) : "",
+    undo: a.undo === true ? true : undefined,
+    undo_before: a.undo_before ? String(a.undo_before) : undefined,
+    args: a.args && typeof a.args === "object" ? a.args : undefined,
   };
 }
 
@@ -315,20 +318,35 @@ async function execute(action, cfg, fs, sp, state, options) {
     else if (action.op === "memory_audit") {
       const { MagpieMemoryHub } = await import("./tools.js");
       const hub = await MagpieMemoryHub(options || {}, { client });
-      const auditResRaw = await hub.tool.memory_audit.execute(action.args || {}, {});
+      const auditArgs = Object.assign({}, action.args || {});
+      if (action.undo) auditArgs.undo = true;
+      if (action.undo_before) auditArgs.undo_before = action.undo_before;
+      const auditResRaw = await hub.tool.memory_audit.execute(auditArgs, {});
       const auditRes = typeof auditResRaw === "string" ? JSON.parse(auditResRaw) : auditResRaw;
-      const ok = auditRes && auditRes.action === "AUDIT_REPORT";
-      const lines = [
-        `扫描记忆: ${auditRes?.scanned?.memories || 0} 条 · 踩坑: ${auditRes?.scanned?.pitfalls || 0} 条`,
-        `发现重复组: ${auditRes?.summary?.duplicate_groups || 0} · 跨表重合: ${auditRes?.summary?.cross_table_overlaps || 0} · 准则提升建议: ${auditRes?.summary?.principle_promotions || 0}`
-      ];
+      const ok = auditRes && auditRes.success !== false;
+      let lines = [];
+      if (auditRes?.action === "DEDUP_UNDONE") {
+        lines = [
+          auditRes.note || `已恢复 ${auditRes.restored_records || 0} 条 · 撤销 recurrence ${auditRes.undone_recurrence || 0} 次 · 跳过 ${auditRes.skipped || 0} 条`,
+          "状态: 已完成"
+        ];
+      } else if (Array.isArray(auditRes?.lines) && auditRes.lines.length > 0) {
+        lines = auditRes.lines;
+      } else {
+        lines = [
+          `扫描记忆: ${auditRes?.scanned?.memories || 0} 条 · 去重合并: ${auditRes?.deduped?.memories || 0} 条`,
+          `扫描踩坑: ${auditRes?.scanned?.pitfalls || 0} 条 · 去重合并: ${auditRes?.deduped?.pitfalls || 0} 条`,
+          `批次: ${auditRes?.batch || "1/1"}  ·  状态: ${auditRes?.status || "已完成"}`
+        ];
+      }
       result = {
         ok,
         at: Date.now(),
         op: "memory_audit",
-        title: ok ? "记忆体检完成（已生成审阅卡片）" : "记忆体检未完成",
+        title: auditRes?.action === "DEDUP_UNDONE" ? "去重撤销已完成" : (ok ? "全自动去重完成" : "全自动去重未完成"),
         lines,
         detail: auditRes,
+        logs: auditRes?.logs || [],
       };
     }
     else result = await dbStatus(cfg, args);
@@ -345,7 +363,7 @@ async function execute(action, cfg, fs, sp, state, options) {
       provision: "ncb", init: "ncb", reset: "ncb", status: "ncb", ncb_check: "ncb", secret_check: "ncb",  // db-col-ok: UI 操作对应的卡片映射表，非数据库列
       storage_setup: "r2", r2_check: "r2", clean_probe: "r2",
       model_check: "model",
-      memory_audit: "model",
+      memory_audit: "audit",
       harvest_gateway: "gateway",
       sync_snapshot: "db",
     };
@@ -587,6 +605,15 @@ export function formatCardStatus(key, rawResult, opHint) {
     } else {
       lines.push(ok ? "在线模型配置有效且响应正常" : "在线模型未配置或检测未通过");
     }
+  } else if (key === "audit") {
+    title = res.title || (ok ? "全自动去重完成" : "全自动去重未完成");
+    if (Array.isArray(res.lines) && res.lines.length) {
+      lines.push(...res.lines);
+    } else if (res.message) {
+      lines.push(res.message);
+    } else {
+      lines.push(ok ? "全自动去重已完成" : "去重任务执行异常");
+    }
   }
 
   while (lines.length < 2) {
@@ -601,6 +628,7 @@ export function formatCardStatus(key, rawResult, opHint) {
     lines: lines.slice(0, 5),
   };
   if (res.progress) outCard.progress = res.progress;
+  if (Array.isArray(res.logs)) outCard.logs = res.logs;
   return outCard;
 }
 
@@ -658,8 +686,8 @@ export function parseDbInfo(rawName, fallbackLogical) {
  *   - 静默降级：只读目录或写文件报错时不抛异常，只在 console.error 里打日志
  */
 export function writeCardStatus(key, payloadOrResult, opHint, customStatusPath) {
-  if (key !== "ncb" && key !== "r2" && key !== "model" && key !== "gateway" && key !== "db") {
-    console.error(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2", "model", "gateway" or "db"`);
+  if (key !== "ncb" && key !== "r2" && key !== "model" && key !== "gateway" && key !== "db" && key !== "audit") {
+    console.error(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2", "model", "gateway", "audit" or "db"`);
     return false;
   }
 

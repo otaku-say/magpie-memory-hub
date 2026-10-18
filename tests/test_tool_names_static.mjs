@@ -49,6 +49,9 @@ const KNOWN_NON_TOOL_SYMBOLS = new Set([
   "model_max_total",
   "harvest_max_per_min",
   "harvest_max_total",
+  // v6.28.0 去重模型响应字段
+  "memory_duplicates",
+  "pitfall_duplicates",
   // 设置页 DOM 元素 ID
   "db_action_status",
   "model_action_status",

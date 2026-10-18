@@ -224,79 +224,50 @@ async function run() {
     const countMemBefore = snapMemBefore.length;
     const countPitBefore = snapPitBefore.length;
 
-    // 执行 memory_audit（无 apply 参数，纯只读模式）
-    console.log("  执行 memory_audit (默认只读模式)...");
+    // 执行 memory_audit（全自动去重模式）
+    console.log("  执行 memory_audit (全自动去重)...");
     const auditRes = parseOut(await memAudit.execute({ project: env.project }));
-    console.log("  auditRes 摘要:", JSON.stringify(auditRes.summary));
+    console.log("  auditRes 指标:", JSON.stringify(auditRes.lines));
 
-    // 【红线断言 1】：data_changed 必须严格为 false
-    assert.strictEqual(auditRes.data_changed, false, "【红线断言】：体检工具默认模式 data_changed 必须严格为 false");
-    assert.strictEqual(auditRes.action, "AUDIT_REPORT", "返回 action 必须为 AUDIT_REPORT");
+    // 【指标断言 1】：action 与状态
+    assert.strictEqual(auditRes.action, "DEDUP_REPORT", "返回 action 必须为 DEDUP_REPORT");
+    assert.strictEqual(auditRes.status, "已完成", "status 必须为 已完成");
+    assert.strictEqual(auditRes.data_changed, true, "发生去重合并时 data_changed 应为 true");
+    assert.ok(auditRes.deduped.memories >= 1, "重复记忆必须被合并");
 
-    // 【红线断言 2】：数据 0 变动（全量行数、字段对比）
+    // 【反证门 1】：3 个不同事实不能被误合并软删除
     const snapMemAfter = rowsOf(await env.client.list("memories", { project: env.project }));
-    const snapPitAfter = rowsOf(await env.client.list("pitfalls", { project: env.project }));
-    assert.strictEqual(snapMemAfter.length, countMemBefore, "体检后 memories 表总行数必须严格等于体检前（0 新增、0 删除）");
-    assert.strictEqual(snapPitAfter.length, countPitBefore, "体检后 pitfalls 表总行数必须严格等于体检前（0 新增、0 删除）");
-
-    for (const rowB of snapMemBefore) {
-      const rowA = snapMemAfter.find((r) => r.id === rowB.id);
-      assert.ok(rowA, `体检后必须找到原行 ID=${rowB.id}`);
-      assert.strictEqual(rowA.updated_at, rowB.updated_at, `原行 ID=${rowB.id} 的 updated_at 必须完全未变`);
-      assert.strictEqual(rowA.recurrence, rowB.recurrence, `原行 ID=${rowB.id} 的 recurrence 必须完全未变`);
-    }
-    console.log("  ✓ 【反证门 3 通过】：体检跑完数据库严格 0 变动！");
-
-    // 【反证门 1】：3 个不同事实不能被误合并为重复组
-    const cards = auditRes.cards || [];
-    const dupCards = cards.filter((c) => c.type === "duplicate_group");
-    for (const dc of dupCards) {
-      const allIdsInCard = [dc.primary_item.id, ...(dc.duplicate_items || []).map((x) => x.id)];
-      const hasFact1 = allIdsInCard.includes(fact1.id);
-      const hasFact2 = allIdsInCard.includes(fact2.id);
-      const hasFact3 = allIdsInCard.includes(fact3.id);
-      const diffCount = (hasFact1 ? 1 : 0) + (hasFact2 ? 1 : 0) + (hasFact3 ? 1 : 0);
-      assert.ok(diffCount <= 1, "【反证门 1 强断言】：3 个完全不同事实绝对不许被误合并进同一个重复组！");
-    }
+    const f1 = snapMemAfter.find((r) => r.id === fact1.id);
+    const f2 = snapMemAfter.find((r) => r.id === fact2.id);
+    const f3 = snapMemAfter.find((r) => r.id === fact3.id);
+    assert.strictEqual(f1.lifecycle_status, "active", "【反证门 1 强断言】：不同事实 1 绝不能被误软删除");
+    assert.strictEqual(f2.lifecycle_status, "active", "【反证门 1 强断言】：不同事实 2 绝不能被误软删除");
+    assert.strictEqual(f3.lifecycle_status, "active", "【反证门 1 强断言】：不同事实 3 绝不能被误软删除");
     console.log("  ✓ 【反证门 1 通过】：3 个不同事实未被误合并！");
 
-    // 【反证门 2】：同一事实的历史变体必须被精准识别为 duplicate_group
-    const legacyDupCard = dupCards.find((c) => {
-      const ids = [c.primary_item.id, ...(c.duplicate_items || []).map((x) => x.id)];
-      return ids.includes(leg1Id) && ids.includes(leg2Id);
-    });
-    assert.ok(legacyDupCard, "【反证门 2 强断言】：同一事实的变体必须被精准识别为重复组建议卡片！");
-    console.log("  ✓ 【反证门 2 通过】：同一事实变体被精准识别并归入重复组卡片！");
+    // 【软删除与合并验证】：重复变体 legacy2 必须被软删除，legacy1 的 recurrence 必须累加
+    const leg1After = snapMemAfter.find((r) => r.id === leg1Id);
+    const leg2After = snapMemAfter.find((r) => r.id === leg2Id);
+    assert.ok(leg2After.invalid_at !== null && leg2After.invalid_at !== "", "被合并副本 invalid_at 必须已写入");
+    assert.strictEqual(leg2After.lifecycle_status, "invalid", "被合并副本 lifecycle_status 必须为 invalid");
+    assert.ok(String(leg2After.invalid_reason).startsWith("dedup:"), "invalid_reason 必须以 dedup: 开头编码批次");
+    assert.strictEqual(Number(leg1After.recurrence), 2, "主记录 recurrence 必须累加至 2");
+    console.log("  ✓ 全自动去重软失效与 recurrence 累加验证通过！");
 
-    // 高频踩坑提升准则建议卡片验证
-    const promoCards = cards.filter((c) => c.type === "principle_promotion");
-    assert.ok(promoCards.length >= 1, "复发 3 次的高频踩坑必须产出 principle_promotion 建议卡片");
-    const ishPromo = promoCards.find((c) => c.source_pitfall?.id === highPit.id);
-    assert.ok(ishPromo, "必须精准识别出 iSH 编译高频踩坑并建议提升为准则");
-    console.log("  ✓ 高频踩坑提升 principle 审阅卡片产出正常！");
+    // 【撤销去重验证】：调用 undo 必须完整恢复 invalid_at 为 NULL，状态为 active，recurrence 减回 1
+    console.log("  测试撤销去重 (undo: true)...");
+    const undoRes = parseOut(await memAudit.execute({ project: env.project, undo: true }));
+    assert.strictEqual(undoRes.action, "DEDUP_UNDONE", "撤销操作必须返回 DEDUP_UNDONE");
+    assert.strictEqual(undoRes.restored_records >= 1, true, "至少恢复 1 条记录");
+    assert.strictEqual(undoRes.undone_recurrence >= 1, true, "至少撤销 1 次 recurrence");
 
-    // 4.3 人工批准执行（apply=true）
-    console.log("  模拟用户在设置页点击【批准】执行重复合并与准则提升...");
-    const applyRes = parseOut(await memAudit.execute({
-      project: env.project,
-      apply: true,
-      approved_cards: [ishPromo.card_id, legacyDupCard.card_id],
-    }));
-    assert.strictEqual(applyRes.action, "AUDIT_APPLIED", "人工批准后应返回 AUDIT_APPLIED");
-    assert.strictEqual(applyRes.data_changed, true, "执行批准建议后 data_changed 应为 true");
-
-    // 验证重复组被软删除（绝不物理删除）
-    const legacy2After = rowsOf(await env.client.list("memories", { project: env.project, id: leg2Id }));
-    assert.ok(legacy2After && legacy2After.length > 0, "被合并记录物理行依然存在（绝不物理删除）");
-    assert.ok(legacy2After[0].invalid_at !== null && legacy2After[0].invalid_at !== "", "被合并记录 invalid_at 必须已被写入软失效时间戳");
-    assert.strictEqual(legacy2After[0].lifecycle_status, "invalid", "被合并记录状态必须为 invalid");
-
-    // 验证提升后的 principle 记忆已安全落库
-    const newPrinciples = rowsOf(await env.client.list("memories", { project: env.project, category: "principle" }));
-    const promotedRow = newPrinciples.find((r) => r.origin === "tool" && r.client === "audit");
-    assert.ok(promotedRow, "批准后必须成功新增一条 category=principle 的准则记忆！");
-    assert.strictEqual(promotedRow.lifecycle_status, "active", "提升入库的准则状态必须为 active");
-    console.log("  ✓ 人工批准执行与安全提升准则验证通过！\n");
+    const snapMemRestored = rowsOf(await env.client.list("memories", { project: env.project }));
+    const leg1Restored = snapMemRestored.find((r) => r.id === leg1Id);
+    const leg2Restored = snapMemRestored.find((r) => r.id === leg2Id);
+    assert.strictEqual(leg2Restored.invalid_at, null, "撤销后副本 invalid_at 必须恢复为 null");
+    assert.strictEqual(leg2Restored.lifecycle_status, "active", "撤销后副本 lifecycle_status 必须恢复为 active");
+    assert.strictEqual(Number(leg1Restored.recurrence), 1, "撤销后主记录 recurrence 必须精确减回 1");
+    console.log("  ✓ 撤销完整还原（invalid_at=null, active, recurrence精确减回）验证通过！\n");
 
     // =================================================================
     // 5. 独立模型配置与定时调度状态验证
@@ -304,8 +275,7 @@ async function run() {
     console.log("--- [Test 5] 独立模型配置与定时调度状态验证 ---");
     // 5.1 验证体检状态持久化
     const stAudit = lookupAuditState();
-    assert.ok(stAudit.last_audit_at, "体检执行后必须持久化记录 last_audit_at");
-    assert.ok(stAudit.last_summary, "体检执行后必须持久化记录 last_summary");
+    assert.ok(stAudit.last_dedup_at || stAudit.last_audit_at, "去重执行后必须持久化记录 last_dedup_at");
 
     // 5.2 验证 auditMemoriesWithModel 优先读取 audit_model
     let capturedModel = null;

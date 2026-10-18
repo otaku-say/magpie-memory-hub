@@ -1026,4 +1026,37 @@ code, .mono {
   color: var(--magpie-fg);
 }
 
+.dedup-log-container {
+  margin-top: 14px;
+  border: 1px solid var(--magpie-line);
+  border-radius: var(--radius-sm);
+  background: var(--magpie-card);
+  overflow: hidden;
+}
+
+.dedup-log-header {
+  padding: 8px 12px;
+  font-size: var(--fs-hint);
+  font-weight: 600;
+  color: var(--magpie-fg-2);
+  border-bottom: 1px solid var(--magpie-line);
+  background: color-mix(in srgb, var(--magpie-card) 85%, var(--magpie-bg));
+}
+
+.dedup-rolling-logs {
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: var(--magpie-code);
+  font-size: var(--fs-code);
+  line-height: 1.5;
+  color: var(--magpie-fg);
+}
+
+.dedup-rolling-logs .log-line {
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+
 

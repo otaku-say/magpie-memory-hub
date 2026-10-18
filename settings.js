@@ -14,7 +14,7 @@
   var CARD_FIELDS = {
     ncb: ["ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init"],
     r2: ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"],
-    model: ["extract_model", "classify_model", "audit_model", "rerank_model", "audit_interval", "classify_endpoint", "search_rewrite", "search_rerank", "harvest_max_per_min", "harvest_max_total"],
+    model: ["extract_model", "classify_model", "audit_model", "dedup_schedule", "dedup_time", "dedup_weekday", "dedup_day", "dedup_batch_size", "classify_endpoint", "search_rewrite", "search_rerank", "harvest_max_per_min", "harvest_max_total"],
     harvest: ["auto_harvest", "gatewayTimeoutMs"],
     extract: ["inline_extract", "min_confidence"],
     inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"],
@@ -25,9 +25,9 @@
     "ncb_instance", "ncb_secret", "mcp_key",
     "r2_account_id", "r2_access_key_id", "r2_secret_access_key",
     "r2_bucket_name", "r2_public_url",
-    "extract_model", "classify_model", "audit_model", "rerank_model"
+    "extract_model", "classify_model", "audit_model", "dedup_time"
   ];
-  var SELECT = ["on_exist", "classify_endpoint", "audit_interval"];
+  var SELECT = ["on_exist", "classify_endpoint", "dedup_schedule", "dedup_weekday"];
   var NUM = {
     min_confidence: 0.6,
     max_inject_count: 5,
@@ -37,7 +37,9 @@
     max_principles: 2,
     gatewayTimeoutMs: 8000,
     harvest_max_per_min: 20,
-    harvest_max_total: 2000
+    harvest_max_total: 2000,
+    dedup_day: 1,
+    dedup_batch_size: 1000
   };
   var BOOL = [
     "auto_init",
@@ -182,6 +184,10 @@
     o = o || {};
     TEXT.forEach(function (k) {
       var el = $(k); if (!el) return;
+      if (k === "dedup_time" && !o[k]) {
+        el.value = "02:00";
+        return;
+      }
       el.value = o[k] == null ? "" : String(o[k]);
     });
     Object.keys(NUM).forEach(function (k) {
@@ -207,7 +213,15 @@
         el.value = "auto";
         return;
       }
-      if (typeof o[k] === "string") el.value = o[k];
+      if (k === "dedup_schedule" && !o[k]) {
+        el.value = o.audit_interval || "off";
+        return;
+      }
+      if (k === "dedup_weekday" && !o[k]) {
+        el.value = "1";
+        return;
+      }
+      if (typeof o[k] === "string" || typeof o[k] === "number") el.value = String(o[k]);
     });
   }
 
@@ -326,7 +340,7 @@
     if (s === "r2" || s === "storage_setup" || s === "r2_check" || s === "clean_probe") {
       return "r2";
     }
-    if (s === "model" || s === "model_check" || s === "memory_audit") {
+    if (s === "model" || s === "model_check" || s === "memory_audit" || s === "audit" || s === "dedup_undo") {
       return "model";
     }
     if (s === "gateway" || s === "harvest" || s === "harvest_gateway") {
@@ -477,6 +491,33 @@
       // 该卡片正在等待更新的结果 → 不用旧结果覆盖等待态
       if (pendingSince[key] && !(card.at >= pendingSince[key])) continue;
       renderStatusBlock(cid, card);
+    }
+
+    if (statusData.audit) {
+      var auditCard = statusData.audit;
+      if (!pendingSince.model || (auditCard.at >= pendingSince.model)) {
+        renderStatusBlock("model_action_status", auditCard);
+      }
+      var logBox = $("dedup_rolling_logs");
+      if (logBox && Array.isArray(auditCard.logs) && auditCard.logs.length > 0) {
+        var htmlLogs = auditCard.logs.map(function (line) {
+          return '<div class="log-line">' + escapeHtml(line) + '</div>';
+        }).join("");
+        logBox.innerHTML = htmlLogs;
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+      if (auditCard.at) {
+        var timeStr = new Date(auditCard.at).toLocaleString("zh-CN", { hour12: false });
+        var dedupCount = (auditCard.deduped && ((auditCard.deduped.memories || 0) + (auditCard.deduped.pitfalls || 0))) || 0;
+        var lastTextEl = $("last_audit_at_text");
+        if (lastTextEl) lastTextEl.textContent = timeStr;
+        var summaryEl = $("last_dedup_summary");
+        if (summaryEl) summaryEl.textContent = "上次去重：合并 " + dedupCount + " 条 · 时间 " + timeStr;
+        var undoInput = $("undo_before_time");
+        if (undoInput && !undoInput.value) {
+          undoInput.value = timeStr;
+        }
+      }
     }
   }
 
@@ -689,7 +730,8 @@
         r2_check: "检测 R2 密钥",
         clean_probe: "清理探针文件",
         model_check: "真实检测模型",
-        memory_audit: "立即执行记忆体检",
+        memory_audit: "全自动去重",
+        dedup_undo: "撤销上次去重",
         init: "初始化数据库",
         reset: "清空数据库",
         status: "检查结构状态",
@@ -710,7 +752,7 @@
     var ids = [
       "btn_db_provision", "btn_check_ncb", "btn_check_secret", "btn_db_storage_setup", "btn_db_status", "btn_db_reset",
       "btn_confirm_provision", "btn_confirm_reset",
-      "btn_check_r2", "btn_clean_probe", "btn_check_model", "btn_memory_audit",
+      "btn_check_r2", "btn_clean_probe", "btn_check_model", "btn_memory_audit", "btn_dedup_undo",
       "btn_harvest_gateway", "btn_sync_snapshot"
     ];
     ids.forEach(function (id) {
@@ -781,6 +823,10 @@
       } else if (op === "secret_check" || op === "clean_probe") {
         var sec = payload.ncb_secret || ($("ncb_secret") ? $("ncb_secret").value.trim() : "");
         if (sec) action.secret = sec;
+      } else if (op === "memory_audit") {
+        if (extra && extra.undo) action.undo = true;
+        if (extra && extra.undo_before) action.undo_before = extra.undo_before;
+        if (extra && extra.args) action.args = extra.args;
       }
 
       if (extra && extra.confirm) action.confirm = extra.confirm;
@@ -807,6 +853,8 @@
             msg = "已提交清理探针文件任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "model_check") {
             msg = "已提交真实检测模型任务（ID: " + action.id + "）。正在等待宿主执行…";
+          } else if (op === "memory_audit") {
+            msg = action.undo ? ("已提交撤销去重任务（ID: " + action.id + "）。正在等待宿主执行…") : ("已提交全自动去重任务（ID: " + action.id + "）。正在等待宿主执行…");
           } else if (op === "status") {
             msg = "已提交检查状态任务。正在等待宿主执行…";
           } else if (op === "reset") {
@@ -1190,11 +1238,20 @@
       });
     }
 
-    // 立即执行记忆体检
+    // 立即全量去重
     var memoryAuditBtn = $("btn_memory_audit");
     if (memoryAuditBtn) {
       memoryAuditBtn.addEventListener("click", function () {
-        submitAction("memory_audit");
+        submitAction("memory_audit", { args: { full: true } });
+      });
+    }
+
+    // 撤销上次去重
+    var dedupUndoBtn = $("btn_dedup_undo");
+    if (dedupUndoBtn) {
+      dedupUndoBtn.addEventListener("click", function () {
+        var undoTime = $("undo_before_time") ? $("undo_before_time").value.trim() : "";
+        submitAction("memory_audit", { undo: true, undo_before: undoTime || undefined });
       });
     }
 

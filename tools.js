@@ -109,15 +109,18 @@ function readOptions(options) {
     minConfidence: Number(o.min_confidence) || 0.6,
     maxInject: Number(o.max_inject_count) || 5,
     maxBudget: Number(o.max_budget_chars) || 2048,
-    // 在线模型配置（设置页自由指定，默认留空安全跳过）
+    // 在线模型配置（设置页自由指定，默认留空安全跳过；audit_model 同时服务去重与检索重排）
     extract_model: o.extract_model || o.harvest_model || "",
     classify_model: o.classify_model || "",
-    audit_model: o.audit_model || "",
-    rerank_model: o.rerank_model || "",
+    audit_model: o.audit_model || o.rerank_model || "",
+    dedup_schedule: o.dedup_schedule || o.audit_interval || o.auditInterval || "off",
+    dedup_time: o.dedup_time || "02:00",
+    dedup_weekday: Number(o.dedup_weekday) || 1,
+    dedup_day: Number(o.dedup_day) || 1,
+    dedup_batch_size: Math.max(50, Math.min(Number(o.dedup_batch_size || 1000), 1000)),
     classify_endpoint: o.classify_endpoint || "auto",
     search_rewrite: o.search_rewrite !== false,
     search_rerank: o.search_rerank !== false,
-    audit_interval: o.audit_interval || o.auditInterval || "off",
     gateway_url: o.gateway_url || o.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425",
     gateway_api_key: o.gateway_api_key || o.api_key || process.env.MAGPIE_API_KEY || "",
     // v6.20.0 调用预算与熔断（可配置，保守默认；见 model_budget.js）
@@ -1095,419 +1098,638 @@ async function memoryForget(client, cfg, args) {
     note: "已软失效（写 invalid_at），记录保留可追溯，中间件不再注入" });
 }
 
-/* 方案 B：定期「记忆体检」（只读建议卡片，人工批准才执行，软删除不物理删）
- * 规模化支持：增量游标 (last_audit_cursor)、时间窗口 (since_days) 与分批断点续跑，防范全量数万条扫描
+/* ================================================================== *
+ * 全自动去重与撤销回滚
+ * ================================================================== */
+
+/** 计算定时去重范围 (daily: -24h, weekly: -7d, monthly: -30d) */
+export function getDedupTimeWindow(schedule, now = new Date()) {
+  const sched = String(schedule || "").toLowerCase().trim();
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  if (sched === "daily") {
+    return new Date(nowMs - 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
+  }
+  if (sched === "weekly") {
+    return new Date(nowMs - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
+  }
+  if (sched === "monthly") {
+    return new Date(nowMs - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
+  }
+  return null;
+}
+
+/** 判定当前是否满足定时去重触发条件 (超期 / 设定时段到达) */
+export function isDedupDue({ schedule, time, weekday, day, lastDedupAt, now = new Date() }) {
+  const sched = String(schedule || "").toLowerCase().trim();
+  if (!sched || sched === "off" || sched === "none") return false;
+
+  const curDate = now instanceof Date ? now : new Date(now);
+  const nowTs = curDate.getTime();
+  const lastTs = lastDedupAt ? new Date(lastDedupAt).getTime() : 0;
+
+  let targetH = 2, targetM = 0;
+  if (time && typeof time === "string") {
+    const m = time.trim().match(/^(\d{1,2}):(\d{1,2})$/);
+    if (m) {
+      targetH = Math.min(23, Math.max(0, parseInt(m[1], 10)));
+      targetM = Math.min(59, Math.max(0, parseInt(m[2], 10)));
+    }
+  }
+
+  const todayTarget = new Date(curDate.getFullYear(), curDate.getMonth(), curDate.getDate(), targetH, targetM, 0).getTime();
+
+  if (sched === "daily") {
+    const over24h = (nowTs - lastTs) >= 24 * 60 * 60 * 1000;
+    const reachedToday = (nowTs >= todayTarget) && (lastTs < todayTarget);
+    return over24h || reachedToday;
+  }
+
+  if (sched === "weekly") {
+    const targetWeekday = Math.min(7, Math.max(1, parseInt(weekday, 10) || 1));
+    const curWeekday = curDate.getDay() === 0 ? 7 : curDate.getDay();
+    const over7d = (nowTs - lastTs) >= 7 * 24 * 60 * 60 * 1000;
+    const isTargetDay = curWeekday === targetWeekday;
+    const reachedTarget = isTargetDay && (nowTs >= todayTarget) && (lastTs < todayTarget);
+    return over7d || reachedTarget;
+  }
+
+  if (sched === "monthly") {
+    const targetDay = Math.min(28, Math.max(1, parseInt(day, 10) || 1));
+    const curDay = curDate.getDate();
+    const over30d = (nowTs - lastTs) >= 30 * 24 * 60 * 60 * 1000;
+    const isTargetDay = curDay === targetDay;
+    const reachedTarget = isTargetDay && (nowTs >= todayTarget) && (lastTs < todayTarget);
+    return over30d || reachedTarget;
+  }
+
+  return false;
+}
+
+/** 撤销去重：时间点回滚 / 撤销最近一次批次 */
+export async function memoryAuditUndo(client, cfg, args) {
+  const project = String(args.project || (cfg && cfg.project) || "global").trim();
+  const auditState = lookupAuditState();
+  let rollingLogs = Array.isArray(auditState.logs) ? [...auditState.logs] : [];
+
+  let cutoffTs = null;
+  if (args.undo_before) {
+    const s = String(args.undo_before).trim();
+    if (/^\d{10,13}$/.test(s)) {
+      cutoffTs = Number(s);
+    } else {
+      let iso = s.replace(" ", "T");
+      if (!iso.includes("Z") && !/[+-]\d{2}(?::?\d{2})?$/.test(iso)) {
+        iso += "Z";
+      }
+      const t = Date.parse(iso);
+      cutoffTs = isNaN(t) ? new Date(s).getTime() : t;
+    }
+  }
+
+  async function fetchInvalidCandidates(table) {
+    const candidates = [];
+    let lastId = 0;
+    while (true) {
+      const q = { project, since_id: lastId, limit: 1000, order_by: "id ASC" };
+      const res = await client.list(table, q);
+      const rows = rowsOf(res);
+      if (!rows.length) break;
+      for (const r of rows) {
+        lastId = r.id;
+        if (!r.invalid_at) continue;
+        const reason = String(r.invalid_reason || "");
+        const m = reason.match(/^dedup:(\d+):into:(\d+)$/);
+        if (m) {
+          candidates.push({
+            id: r.id,
+            table,
+            batchTs: Number(m[1]),
+            primaryId: Number(m[2]),
+            row: r,
+          });
+        }
+      }
+      if (rows.length < 1000) break;
+    }
+    return candidates;
+  }
+
+  const memCandidates = await fetchInvalidCandidates("memories");
+  const pitCandidates = await fetchInvalidCandidates("pitfalls");
+  const allCandidates = memCandidates.concat(pitCandidates);
+
+  let targetCandidates = [];
+  if (cutoffTs !== null) {
+    targetCandidates = allCandidates.filter((c) => c.batchTs >= cutoffTs);
+  } else {
+    let latestBatchTs = 0;
+    for (const c of allCandidates) {
+      if (c.batchTs > latestBatchTs) latestBatchTs = c.batchTs;
+    }
+    if (!latestBatchTs && auditState.last_dedup_batch_ts) {
+      latestBatchTs = Number(auditState.last_dedup_batch_ts);
+    }
+    if (latestBatchTs) {
+      targetCandidates = allCandidates.filter((c) => c.batchTs === latestBatchTs);
+    }
+  }
+
+  if (targetCandidates.length === 0) {
+    const note = "已恢复 0 条 · 撤销 recurrence 0 次 · 跳过 0 条（未找到符合条件的去重记录）";
+    return jsonOut({
+      action: "DEDUP_UNDONE",
+      success: true,
+      data_changed: false,
+      restored_records: 0,
+      undone_recurrence: 0,
+      skipped: 0,
+      note,
+      lines: [note, "状态: 已完成"],
+      logs: rollingLogs,
+    });
+  }
+
+  let restoredCount = 0;
+  let undoneRecurrence = 0;
+  let skippedCount = 0;
+  const now = nowSql();
+
+  const memPrimaryMap = new Map();
+  const pitPrimaryMap = new Map();
+
+  for (const c of targetCandidates) {
+    try {
+      if (c.table === "memories") {
+        await client.update("memories", c.id, {
+          invalid_at: null,
+          lifecycle_status: "active",
+          invalid_reason: null,
+          updated_at: now,
+        });
+        restoredCount++;
+        memPrimaryMap.set(c.primaryId, (memPrimaryMap.get(c.primaryId) || 0) + 1);
+      } else if (c.table === "pitfalls") {
+        await client.update("pitfalls", c.id, {
+          invalid_at: null,
+          invalid_reason: null,
+          updated_at: now,
+        });
+        restoredCount++;
+        pitPrimaryMap.set(c.primaryId, (pitPrimaryMap.get(c.primaryId) || 0) + 1);
+      }
+    } catch (_) {}
+  }
+
+  async function rollbackPrimaries(table, primaryMap) {
+    for (const [pId, dupCount] of primaryMap.entries()) {
+      try {
+        const rows = rowsOf(await client.list(table, { project, id: pId }));
+        const pRow = rows[0];
+        if (!pRow || pRow.invalid_at || pRow.lifecycle_status === "invalid" || pRow.lifecycle_status === "superseded") {
+          skippedCount += dupCount;
+          continue;
+        }
+        const curRec = Number(pRow.recurrence) || 1;
+        const newRec = Math.max(1, curRec - dupCount);
+        await client.update(table, pId, {
+          recurrence: newRec,
+          updated_at: now,
+        });
+        undoneRecurrence += (curRec - newRec);
+      } catch (_) {
+        skippedCount += dupCount;
+      }
+    }
+  }
+
+  await rollbackPrimaries("memories", memPrimaryMap);
+  await rollbackPrimaries("pitfalls", pitPrimaryMap);
+
+  const note = `已恢复 ${restoredCount} 条 · 撤销 recurrence ${undoneRecurrence} 次 · 跳过 ${skippedCount} 条`;
+  rollingLogs.push(`[${now}] 撤销去重完成：${note}`);
+  if (rollingLogs.length > 30) rollingLogs = rollingLogs.slice(-30);
+
+  rememberAuditState({
+    last_dedup_at: now,
+    last_undo_at: now,
+    logs: rollingLogs,
+  });
+
+  try {
+    writeCardStatus("audit", {
+      ok: true,
+      at: Date.now(),
+      op: "memory_audit",
+      title: "去重撤销已完成",
+      status: "已完成", // db-col-ok: 去重任务运行状态
+      lines: [note, "状态: 已完成"],
+      logs: rollingLogs,
+    });
+  } catch (_) {}
+
+  return jsonOut({
+    action: "DEDUP_UNDONE",
+    success: true,
+    data_changed: restoredCount > 0,
+    restored_records: restoredCount,
+    undone_recurrence: undoneRecurrence,
+    skipped: skippedCount,
+    note,
+    lines: [note, "状态: 已完成"],
+    logs: rollingLogs,
+  });
+}
+
+/**
+ * 全自动去重：单次模型调用判定并立即合并，分批支持全量与定时下推，绝不物理删
  */
 async function memoryAudit(client, cfg, args, ctx) {
-  const project = String(args.project || (cfg && cfg.project) || "global").trim();
-  const limit = Math.max(1, Math.min(Number(args.limit) || 50, 200));
-  const batchSize = Math.max(5, Math.min(Number(args.batch_size) || 25, 50));
-  const isApply = args.apply === true;
-  const approvedCards = Array.isArray(args.approved_cards) ? args.approved_cards : [];
-  const applyAll = args.apply_all === true;
+  if (args && (args.undo === true || args.undo_before)) {
+    return await memoryAuditUndo(client, cfg, args);
+  }
 
-  // 规模化增量游标解析
-  const isIncremental = args.incremental !== false && !isApply && args.full !== true;
-  let cursor = isIncremental ? getAuditCursor(project) : { last_id: Number(0), last_updated_at: "", reviewed_count: 0 };
+  const project = String(args.project || (cfg && cfg.project) || "global").trim();
+  const batchSize = Math.max(50, Math.min(Number(args.batch_size || cfg.dedup_batch_size || 1000), 1000));
+  const batchTs = Date.now();
+  const now = nowSql();
+
+  const isIncremental = args.incremental === true;
+  let cursor = isIncremental ? getAuditCursor(project) : { last_id: 0, last_updated_at: "", reviewed_count: 0 };
   if (args.since_id != null && Number(args.since_id) > 0) {
     cursor = { last_id: Number(args.since_id), last_updated_at: "", reviewed_count: 0 };
   }
   if (args.full === true) {
     clearAuditCursor(project);
-    cursor = { last_id: Number(0), last_updated_at: "", reviewed_count: 0 };
+    cursor = { last_id: 0, last_updated_at: "", reviewed_count: 0 };
   }
 
-  // 构建查询参数（支持断点续跑、时间窗与精简投影）
-  const memQueryParams = {
-    project,
-    lifecycle_status: "active",
-    limit,
-    columns: [
-      "id",
-      "project",
-      "category",
-      "scope_level",
-      "client",
-      "origin",
-      "title",
-      "content",
-      "full_text",
-      "tags",
-      "confidence_score",
-      "recurrence",
-      "content_fingerprint",
-      "updated_at",
-      "lifecycle_status",
-    ],
-  };
-
-  const pitQueryParams = {
-    project,
-    limit,
-  };
-
-  // 增量模式：若存在已审阅最大 ID 且非 apply 阶段，只查大于该游标的记录
-  if (isIncremental && cursor.last_id > 0 && !isApply) {
-    memQueryParams.since_id = cursor.last_id;
-    memQueryParams.order_by = "id ASC";
-    pitQueryParams.since_id = cursor.last_id;
-    pitQueryParams.order_by = "id ASC";
-  } else {
-    memQueryParams.order_by = "updated_at DESC";
-    pitQueryParams.order_by = "updated_at DESC";
-  }
-
-  // 时间窗下推：since_days 仅体检最近 N 天变动的记录
-  if (args.since_days && Number(args.since_days) > 0) {
+  let timeFilter = null;
+  if (args.updated_after && typeof args.updated_after === "string") {
+    timeFilter = args.updated_after.trim();
+  } else if (args.schedule) {
+    timeFilter = getDedupTimeWindow(args.schedule);
+  } else if (args.since_days && Number(args.since_days) > 0) {
     const d = new Date(Date.now() - Number(args.since_days) * 86400000);
-    const timeStr = d.toISOString().slice(0, 19).replace("T", " ");
-    memQueryParams.updated_after = timeStr;
-    pitQueryParams.updated_after = timeStr;
+    timeFilter = d.toISOString().slice(0, 19).replace("T", " ");
   }
 
-  // 1. 读取数据库活跃记忆与踩坑记录（只读！扫描阶段绝不修改数据库任何行）
-  const memories = rowsOf(await client.list("memories", memQueryParams))
-    .filter((r) => r.lifecycle_status === "active" && !r.invalid_at);
+  const auditState = lookupAuditState();
+  let rollingLogs = Array.isArray(auditState.logs) ? [...auditState.logs] : [];
 
-  const pitfalls = rowsOf(await client.list("pitfalls", pitQueryParams))
-    .filter((r) => !r.invalid_at);
+  let totalScannedMemories = 0;
+  let totalDedupedMemories = 0;
+  let totalScannedPitfalls = 0;
+  let totalDedupedPitfalls = 0;
 
-  const cards = [];
-  let cardSeq = 1;
+  const allDedupedMemIds = [];
+  const allDedupedPitIds = [];
 
-  // 2. 重复组检测（同指纹、同归一化标题或高语义相似度，含跨类别）
-  const visitedMem = new Set();
-  for (let i = 0; i < memories.length; i++) {
-    const a = memories[i];
-    if (visitedMem.has(a.id)) continue;
-    const group = [a];
-    for (let j = i + 1; j < memories.length; j++) {
-      const b = memories[j];
-      if (visitedMem.has(b.id)) continue;
+  // ==========================================
+  // 分批处理 memories
+  // ==========================================
+  let memLastId = isIncremental && cursor.last_id > 0 ? cursor.last_id : 0;
+  let memBatchNum = 0;
+  while (true) {
+    memBatchNum++;
+    const q = {
+      project,
+      lifecycle_status: "active",
+      limit: args.limit ? Math.min(Number(args.limit), batchSize) : batchSize,
+      order_by: "id ASC",
+      columns: [
+        "id", "project", "category", "scope_level", "client", "origin",
+        "title", "content", "full_text", "tags", "confidence_score",
+        "recurrence", "content_fingerprint", "updated_at", "lifecycle_status"
+      ],
+    };
+    if (memLastId > 0) q.since_id = memLastId;
+    if (timeFilter) q.updated_after = timeFilter;
 
-      const sameFp = a.content_fingerprint && b.content_fingerprint && a.content_fingerprint === b.content_fingerprint;
-      const sameTitle = normalizeSemanticText(a.title) === normalizeSemanticText(b.title);
-      const similar = isSemanticallySimilar(a.title, a.content || a.full_text, b.title, b.content || b.full_text);
+    const rows = rowsOf(await client.list("memories", q))
+      .filter((r) => r.lifecycle_status === "active" && !r.invalid_at);
+    if (!rows.length) break;
+    memLastId = rows[rows.length - 1].id;
+    totalScannedMemories += rows.length;
 
-      if (sameFp || sameTitle || similar) {
-        group.push(b);
-        visitedMem.add(b.id);
+    const batchDupIds = new Set();
+    const groups = [];
+    for (let i = 0; i < rows.length; i++) {
+      const a = rows[i];
+      if (batchDupIds.has(a.id)) continue;
+      const grp = [a];
+      for (let j = i + 1; j < rows.length; j++) {
+        const b = rows[j];
+        if (batchDupIds.has(b.id)) continue;
+        const sameFp = a.content_fingerprint && b.content_fingerprint && a.content_fingerprint === b.content_fingerprint;
+        const sameTitle = normalizeSemanticText(a.title) === normalizeSemanticText(b.title);
+        const similar = isSemanticallySimilar(a.title, a.content || a.full_text, b.title, b.content || b.full_text);
+        if (sameFp || sameTitle || similar) {
+          grp.push(b);
+          batchDupIds.add(b.id);
+        }
+      }
+      if (grp.length > 1) {
+        batchDupIds.add(a.id);
+        grp.sort((x, y) => (Number(y.recurrence) || 1) - (Number(x.recurrence) || 1) || (new Date(y.updated_at) - new Date(x.updated_at)));
+        groups.push({ primary: grp[0], duplicates: grp.slice(1) });
       }
     }
-    if (group.length > 1) {
-      visitedMem.add(a.id);
-      // 优选主记录（recurrence 最高或最新更新）
-      group.sort((x, y) => (Number(y.recurrence) || 1) - (Number(x.recurrence) || 1) || (new Date(y.updated_at) - new Date(x.updated_at)));
-      const primary = group[0];
-      const duplicates = group.slice(1);
-      cards.push({
-        card_id: `audit-card-${cardSeq++}`,
-        type: "duplicate_group",
-        title: `发现 ${group.length} 条重复/变体记忆：「${primary.title}」`,
-        description: `包含 ID [${group.map((g) => g.id).join(", ")}]，表达相同或高度相似事实。建议保留主记录并软删除多余副本。`,
-        primary_item: {
-          id: primary.id,
-          category: primary.category,
-          title: primary.title,
-          recurrence: primary.recurrence,
-          content: primary.content,
-        },
-        duplicate_items: duplicates.map((d) => ({
-          id: d.id,
-          category: d.category,
-          title: d.title,
-          recurrence: d.recurrence,
-          reason: d.category !== primary.category ? `跨类别重复 (原分类: ${d.category})` : "语义变体/重复记录",
-        })),
-        suggested_action: "MERGE_AND_SOFT_DELETE",
-        merge_target_id: primary.id,
-        soft_delete_ids: duplicates.map((d) => d.id),
-        approved: false,
-      });
-    }
-  }
 
-  // 3. 踩坑与记忆交叉重合检查（踩坑优先）
-  for (const p of pitfalls) {
-    const pSym = normalizeSemanticText(p.symptom);
-    const overlappingMems = memories.filter((m) => {
-      if (visitedMem.has(m.id)) return false;
-      const mTitle = normalizeSemanticText(m.title);
-      if (mTitle && (mTitle === pSym || mTitle.includes(pSym) || pSym.includes(mTitle))) return true;
-      return isSemanticallySimilar(m.title, m.content || m.full_text, p.symptom, p.solution || p.root_cause);
-    });
-    if (overlappingMems.length > 0) {
-      cards.push({
-        card_id: `audit-card-${cardSeq++}`,
-        type: "cross_table_overlap",
-        title: `踩坑优先建议：组件 [${p.component}] 的踩坑在记忆表中存在冗余副本`,
-        description: `踩坑记录 ID=${p.id} 包含现象/根因/解法三要素，比普通记忆更完整。建议以踩坑表为准，将记忆表中的 ${overlappingMems.length} 条冗余记录软失效。`,
-        primary_item: {
-          table: "pitfalls",
-          id: p.id,
-          component: p.component,
-          symptom: p.symptom,
-          solution: p.solution,
-        },
-        duplicate_items: overlappingMems.map((m) => ({
-          table: "memories",
-          id: m.id,
-          title: m.title,
-          category: m.category,
-        })),
-        suggested_action: "PREFER_PITFALL_SOFT_DELETE_MEMORIES",
-        soft_delete_memories_ids: overlappingMems.map((m) => m.id),
-        approved: false,
-      });
-    }
-  }
-
-  // 4. 高频踩坑提升准则 (High-Frequency Pitfalls -> Principle Promotion)
-  for (const p of pitfalls) {
-    const rec = Number(p.recurrence) || 1;
-    if (rec >= 3) {
-      cards.push({
-        card_id: `audit-card-${cardSeq++}`,
-        type: "principle_promotion",
-        title: `高频踩坑提升建议：[${p.component}] 已复发 ${rec} 次`,
-        description: `组件 ${p.component} 的问题「${p.symptom.slice(0, 50)}」累计发生 ${rec} 次，属于系统性高频痛点，建议提炼为全局行为准则 (principle) 置顶注入，防患于未然。`,
-        source_pitfall: {
-          id: p.id,
-          component: p.component,
-          symptom: p.symptom,
-          root_cause: p.root_cause,
-          solution: p.solution,
-          recurrence: rec,
-        },
-        suggested_principle: {
-          project,
-          category: "principle",
-          title: `禁止 ${p.component} 踩坑：${p.symptom.slice(0, 30)}`,
-          content: `【高频避坑准则】对于组件 ${p.component}，严禁引发「${p.symptom}」。根因分析：${p.root_cause}。标准解决方案：${p.solution}。`,
-          tags: p.tags ? `${p.tags}, principle, auto_promoted` : "principle, auto_promoted",
-        },
-        suggested_action: "PROMOTE_TO_PRINCIPLE",
-        approved: false,
-      });
-    }
-  }
-
-  // 4.5. 在线模型增强审阅（独立 audit_model 优先，留空回退 extract_model；使用 Memory 客户端标识）
-  let modelAuditResult = null;
-  const auditOptions = Object.assign({}, cfg, args);
-  try {
-    modelAuditResult = await auditMemoriesWithModel({
-      memories,
-      pitfalls,
-      options: auditOptions,
-    });
-    if (modelAuditResult && modelAuditResult.result) {
-      const mr = modelAuditResult.result;
-      if (Array.isArray(mr.duplicate_groups)) {
-        for (const dg of mr.duplicate_groups) {
-          const pId = Number(dg.primary_id);
-          const dupIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
-          const alreadyCovered = cards.some((c) => c.type === "duplicate_group" && (c.primary_item.id === pId || c.soft_delete_ids?.includes(pId)));
-          if (!alreadyCovered && pId && dupIds.length > 0) {
-            const pItem = memories.find((m) => m.id === pId);
-            const dItems = memories.filter((m) => dupIds.includes(m.id));
-            if (pItem && dItems.length > 0) {
-              cards.push({
-                card_id: `audit-card-${cardSeq++}`,
-                type: "duplicate_group",
-                title: `[模型审阅] ${dg.title || `发现重复记忆：「${pItem.title}」`}`,
-                description: dg.reason || `模型 (${modelAuditResult.modelUsed}) 判定 ID [${pId}, ${dupIds.join(", ")}] 表达相同事实，建议合并。`,
-                primary_item: {
-                  id: pItem.id,
-                  category: pItem.category,
-                  title: pItem.title,
-                  recurrence: pItem.recurrence,
-                  content: pItem.content,
-                },
-                duplicate_items: dItems.map((d) => ({
-                  id: d.id,
-                  category: d.category,
-                  title: d.title,
-                  recurrence: d.recurrence,
-                  reason: "模型语义判定重复",
-                })),
-                suggested_action: "MERGE_AND_SOFT_DELETE",
-                merge_target_id: pItem.id,
-                soft_delete_ids: dItems.map((d) => d.id),
-                approved: false,
-                source_model: modelAuditResult.modelUsed,
-              });
+    const auditOptions = Object.assign({}, cfg, args);
+    const auditModel = String(auditOptions.audit_model || auditOptions.extract_model || "").trim();
+    if (auditModel && auditModel !== "off" && auditModel !== "none") {
+      try {
+        const modelRes = await auditMemoriesWithModel({ memories: rows, pitfalls: [], options: auditOptions });
+        if (modelRes && modelRes.result) {
+          const mr = modelRes.result;
+          const mDups = Array.isArray(mr.memory_duplicates) ? mr.memory_duplicates : (Array.isArray(mr.duplicate_groups) ? mr.duplicate_groups : []);
+          for (const dg of mDups) {
+            const pId = Number(dg.primary_id);
+            const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
+            if (pId && dIds.length > 0) {
+              const pItem = rows.find((r) => r.id === pId);
+              const dItems = rows.filter((r) => dIds.includes(r.id) && !batchDupIds.has(r.id) && r.id !== pId);
+              if (pItem && dItems.length > 0) {
+                for (const d of dItems) batchDupIds.add(d.id);
+                groups.push({ primary: pItem, duplicates: dItems });
+              }
             }
           }
         }
+      } catch (err) {
+        rollingLogs.push(`[${nowSql()}] 模型不可用或超预算，安全跳过在线模型并使用规则查重: ${(err && err.message) || err}`);
       }
     }
-  } catch (_) {
-    // fail-open: 模型异常或超时不影响规则输出的卡片
-  }
 
-  // 5. 若传入了 apply/approved 且有人工批准：才执行软删除与合并（绝不物理删除）
-  if (isApply && (applyAll || approvedCards.length > 0)) {
-    const appliedCards = [];
-    const now = nowSql();
-    for (const card of cards) {
-      if (!applyAll && !approvedCards.includes(card.card_id)) continue;
-      if (card.type === "duplicate_group" && card.soft_delete_ids) {
-        for (const sid of card.soft_delete_ids) {
-          try {
-            await client.update("memories", sid, {
-              invalid_at: now,
-              lifecycle_status: "invalid",
-              invalid_reason: `audit_merge_into_${card.merge_target_id}`,
-              updated_at: now,
-            });
-          } catch (_) {}
-        }
-        if (card.merge_target_id) {
-          try {
-            const targetRow = memories.find((m) => m.id === card.merge_target_id);
-            const nextRec = (Number(targetRow?.recurrence) || 1) + card.soft_delete_ids.length;
-            await client.update("memories", card.merge_target_id, {
-              recurrence: nextRec,
-              updated_at: now,
-            });
-          } catch (_) {}
-        }
-        card.approved = true;
-        appliedCards.push(card.card_id);
-      } else if (card.type === "cross_table_overlap" && card.soft_delete_memories_ids) {
-        for (const sid of card.soft_delete_memories_ids) {
-          try {
-            await client.update("memories", sid, {
-              invalid_at: now,
-              lifecycle_status: "invalid",
-              invalid_reason: `superseded_by_pitfall_${card.primary_item.id}`,
-              updated_at: now,
-            });
-          } catch (_) {}
-        }
-        card.approved = true;
-        appliedCards.push(card.card_id);
-      } else if (card.type === "principle_promotion" && card.suggested_principle) {
+    for (const g of groups) {
+      const p = g.primary;
+      const dups = g.duplicates;
+      for (const d of dups) {
         try {
-          await client.create("memories", {
-            project: card.suggested_principle.project,
-            category: "principle",
-            scope_level: "project",
-            client: "audit",
-            origin: "tool",
-            title: card.suggested_principle.title,
-            content: card.suggested_principle.content,
-            full_text: card.suggested_principle.content,
-            tags: card.suggested_principle.tags,
-            content_fingerprint: semanticFingerprint(
-              card.suggested_principle.project,
-              "principle",
-              card.suggested_principle.title,
-              card.suggested_principle.content,
-              card.suggested_principle.tags
-            ),
-            confidence_score: 1.0,
-            lifecycle_status: "active",
-            superseded_by_id: null,
-            revision: 1,
-            recurrence: 1,
-            retrieval_count: 0,
-            invalid_at: null,
-            invalid_reason: "",
-            expires_at: null,
-            last_used_at: null,
-            created_at: now,
+          await client.update("memories", d.id, {
+            invalid_at: now,
+            lifecycle_status: "invalid",
+            invalid_reason: `dedup:${batchTs}:into:${p.id}`,
             updated_at: now,
           });
-          card.approved = true;
-          appliedCards.push(card.card_id);
+          totalDedupedMemories++;
+          allDedupedMemIds.push(d.id);
         } catch (_) {}
       }
+      try {
+        const nextRec = (Number(p.recurrence) || 1) + dups.length;
+        await client.update("memories", p.id, {
+          recurrence: nextRec,
+          updated_at: now,
+        });
+      } catch (_) {}
     }
-    return jsonOut({
-      action: "AUDIT_APPLIED",
-      project,
-      applied_cards: appliedCards,
-      applied_count: appliedCards.length,
-      data_changed: true,
-      note: `已成功执行 ${appliedCards.length} 项审阅建议，所有被清理项均已安全软失效（写 invalid_at），绝无物理删除。`,
-    });
-  }
 
-  const maxMemId = memories.reduce((max, r) => Math.max(max, Number(r.id) || 0), cursor.last_id || 0);
-  const maxPitId = pitfalls.reduce((max, r) => Math.max(max, Number(r.id) || 0), cursor.last_id || 0);
-  const newCursorId = Math.max(maxMemId, maxPitId);
-  if (isIncremental && newCursorId > (cursor.last_id || 0) && !isApply) {
+    const batchDedupCount = groups.reduce((acc, g) => acc + g.duplicates.length, 0);
+    rollingLogs.push(`[${nowSql()}] 记忆批次 ${memBatchNum} 完成：扫描 ${rows.length} 条，合并 ${batchDedupCount} 条`);
+    if (rollingLogs.length > 30) rollingLogs = rollingLogs.slice(-30);
+
     try {
-      saveAuditCursor(project, {
-        last_id: newCursorId,
-        last_updated_at: nowSql(),
-        reviewed_count: (cursor.reviewed_count || 0) + memories.length + pitfalls.length,
+      writeCardStatus("audit", {
+        ok: true,
+        at: Date.now(),
+        op: "memory_audit",
+        title: "全自动去重进行中...",
+        batch: `${memBatchNum}/-`,
+        status: "进行中", // db-col-ok: 去重任务运行状态
+        scanned: { memories: totalScannedMemories, pitfalls: totalScannedPitfalls },
+        deduped: { memories: totalDedupedMemories, pitfalls: totalDedupedPitfalls },
+        lines: [
+          `扫描记忆: ${totalScannedMemories} 条 · 去重合并: ${totalDedupedMemories} 条`,
+          `扫描踩坑: ${totalScannedPitfalls} 条 · 去重合并: ${totalDedupedPitfalls} 条`,
+          `批次: ${memBatchNum}/-  ·  状态: 进行中`
+        ],
+        logs: rollingLogs,
       });
     } catch (_) {}
+
+    if (rows.length < batchSize) break;
   }
 
-  const auditReport = {
-    action: "AUDIT_REPORT",
-    project,
-    incremental: isIncremental,
-    cursor: {
-      previous_last_id: cursor.last_id || 0,
-      current_last_id: newCursorId,
-      batch_size: batchSize,
-    },
-    scanned: {
-      memories: memories.length,
-      pitfalls: pitfalls.length,
-      batches: Math.ceil((memories.length + pitfalls.length) / batchSize),
-    },
-    summary: {
-      duplicate_groups: cards.filter((c) => c.type === "duplicate_group").length,
-      cross_table_overlaps: cards.filter((c) => c.type === "cross_table_overlap").length,
-      principle_promotions: cards.filter((c) => c.type === "principle_promotion").length,
-      total_cards: cards.length,
-    },
-    cards,
-    data_changed: false,
-    note: "记忆体检完成。已生成审阅建议卡片，未对数据库进行任何修改（数据0变动）。请核对建议卡片后人工批准执行。",
-  };
+  // ==========================================
+  // 分批处理 pitfalls
+  // ==========================================
+  let pitLastId = isIncremental && cursor.last_id > 0 ? cursor.last_id : 0;
+  let pitBatchNum = 0;
+  while (true) {
+    pitBatchNum++;
+    const q = {
+      project,
+      limit: args.limit ? Math.min(Number(args.limit), batchSize) : batchSize,
+      order_by: "id ASC",
+    };
+    if (pitLastId > 0) q.since_id = pitLastId;
+    if (timeFilter) q.updated_after = timeFilter;
+
+    const rows = rowsOf(await client.list("pitfalls", q)).filter((r) => !r.invalid_at);
+    if (!rows.length) break;
+    pitLastId = rows[rows.length - 1].id;
+    totalScannedPitfalls += rows.length;
+
+    const batchDupIds = new Set();
+    const groups = [];
+    for (let i = 0; i < rows.length; i++) {
+      const a = rows[i];
+      if (batchDupIds.has(a.id)) continue;
+      const grp = [a];
+      for (let j = i + 1; j < rows.length; j++) {
+        const b = rows[j];
+        if (batchDupIds.has(b.id)) continue;
+        const sameComp = normalizeSemanticText(a.component) === normalizeSemanticText(b.component);
+        const sameSym = normalizeSemanticText(a.symptom) === normalizeSemanticText(b.symptom);
+        const similar = isSemanticallySimilar(a.symptom, a.solution || a.root_cause, b.symptom, b.solution || b.root_cause);
+        if (sameComp && (sameSym || similar)) {
+          grp.push(b);
+          batchDupIds.add(b.id);
+        }
+      }
+      if (grp.length > 1) {
+        batchDupIds.add(a.id);
+        grp.sort((x, y) => (Number(y.recurrence) || 1) - (Number(x.recurrence) || 1) || (new Date(y.updated_at) - new Date(x.updated_at)));
+        groups.push({ primary: grp[0], duplicates: grp.slice(1) });
+      }
+    }
+
+    const auditOptions = Object.assign({}, cfg, args);
+    const auditModel = String(auditOptions.audit_model || auditOptions.extract_model || "").trim();
+    if (auditModel && auditModel !== "off" && auditModel !== "none") {
+      try {
+        const modelRes = await auditMemoriesWithModel({ memories: [], pitfalls: rows, options: auditOptions });
+        if (modelRes && modelRes.result) {
+          const mr = modelRes.result;
+          const pDups = Array.isArray(mr.pitfall_duplicates) ? mr.pitfall_duplicates : [];
+          for (const dg of pDups) {
+            const pId = Number(dg.primary_id);
+            const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
+            if (pId && dIds.length > 0) {
+              const pItem = rows.find((r) => r.id === pId);
+              const dItems = rows.filter((r) => dIds.includes(r.id) && !batchDupIds.has(r.id) && r.id !== pId);
+              if (pItem && dItems.length > 0) {
+                for (const d of dItems) batchDupIds.add(d.id);
+                groups.push({ primary: pItem, duplicates: dItems });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        rollingLogs.push(`[${nowSql()}] 模型不可用或超预算，安全跳过在线模型并使用规则查重: ${(err && err.message) || err}`);
+      }
+    }
+
+    for (const g of groups) {
+      const p = g.primary;
+      const dups = g.duplicates;
+      for (const d of dups) {
+        try {
+          await client.update("pitfalls", d.id, {
+            invalid_at: now,
+            invalid_reason: `dedup:${batchTs}:into:${p.id}`,
+            updated_at: now,
+          });
+          totalDedupedPitfalls++;
+          allDedupedPitIds.push(d.id);
+        } catch (_) {}
+      }
+      try {
+        const nextRec = (Number(p.recurrence) || 1) + dups.length;
+        await client.update("pitfalls", p.id, {
+          recurrence: nextRec,
+          updated_at: now,
+        });
+      } catch (_) {}
+    }
+
+    const batchDedupCount = groups.reduce((acc, g) => acc + g.duplicates.length, 0);
+    rollingLogs.push(`[${nowSql()}] 踩坑批次 ${pitBatchNum} 完成：扫描 ${rows.length} 条，合并 ${batchDedupCount} 条`);
+    if (rollingLogs.length > 30) rollingLogs = rollingLogs.slice(-30);
+
+    try {
+      writeCardStatus("audit", {
+        ok: true,
+        at: Date.now(),
+        op: "memory_audit",
+        title: "全自动去重进行中...",
+        batch: `${memBatchNum + pitBatchNum}/-`,
+        status: "进行中", // db-col-ok: 去重任务运行状态
+        scanned: { memories: totalScannedMemories, pitfalls: totalScannedPitfalls },
+        deduped: { memories: totalDedupedMemories, pitfalls: totalDedupedPitfalls },
+        lines: [
+          `扫描记忆: ${totalScannedMemories} 条 · 去重合并: ${totalDedupedMemories} 条`,
+          `扫描踩坑: ${totalScannedPitfalls} 条 · 去重合并: ${totalDedupedPitfalls} 条`,
+          `批次: ${memBatchNum + pitBatchNum}/-  ·  状态: 进行中`
+        ],
+        logs: rollingLogs,
+      });
+    } catch (_) {}
+
+    if (rows.length < batchSize) break;
+  }
+
+  const totalBatches = Math.max(1, memBatchNum + pitBatchNum);
+  const totalDeduped = totalDedupedMemories + totalDedupedPitfalls;
+
+  rollingLogs.push(`[${nowSql()}] 全自动去重已完成：记忆扫描 ${totalScannedMemories} 合并 ${totalDedupedMemories}，踩坑扫描 ${totalScannedPitfalls} 合并 ${totalDedupedPitfalls}`);
+  if (rollingLogs.length > 30) rollingLogs = rollingLogs.slice(-30);
+
+  rememberAuditState({
+    last_audit_at: nowSql(),
+    last_dedup_at: nowSql(),
+    last_dedup_batch_ts: batchTs,
+    last_dedup_count: totalDeduped,
+    last_dedup_ids: { memories: allDedupedMemIds, pitfalls: allDedupedPitIds },
+    scanned: { memories: totalScannedMemories, pitfalls: totalScannedPitfalls },
+    deduped: { memories: totalDedupedMemories, pitfalls: totalDedupedPitfalls },
+    logs: rollingLogs,
+  });
+
+  const finalLines = [
+    `扫描记忆: ${totalScannedMemories} 条 · 去重合并: ${totalDedupedMemories} 条`,
+    `扫描踩坑: ${totalScannedPitfalls} 条 · 去重合并: ${totalDedupedPitfalls} 条`,
+    `批次: ${totalBatches}/${totalBatches}  ·  状态: 已完成`
+  ];
 
   try {
-    rememberAuditState({
-      last_audit_at: nowSql(),
-      last_summary: auditReport.summary,
+    writeCardStatus("audit", {
+      ok: true,
+      at: Date.now(),
+      op: "memory_audit",
+      title: "全自动去重完成",
+      batch: `${totalBatches}/${totalBatches}`,
+      status: "已完成", // db-col-ok: 去重任务运行状态
+      scanned: { memories: totalScannedMemories, pitfalls: totalScannedPitfalls },
+      deduped: { memories: totalDedupedMemories, pitfalls: totalDedupedPitfalls },
+      lines: finalLines,
+      logs: rollingLogs,
     });
   } catch (_) {}
 
-  return jsonOut(auditReport);
-}
+  const maxIdSeen = Math.max(memLastId, pitLastId, cursor.last_id || 0);
+  if (isIncremental) {
+    saveAuditCursor(project, { last_id: maxIdSeen, last_updated_at: nowSql() });
+  }
 
-const AUDIT_INTERVAL_MS = {
-  daily: 24 * 60 * 60 * 1000,
-  weekly: 7 * 24 * 60 * 60 * 1000,
-  monthly: 30 * 24 * 60 * 60 * 1000,
-};
+  return jsonOut({
+    action: "DEDUP_REPORT",
+    success: true,
+    data_changed: totalDeduped > 0,
+    batch: `${totalBatches}/${totalBatches}`,
+    status: "已完成", // db-col-ok: 去重任务运行状态
+    incremental: isIncremental,
+    cursor: {
+      previous_last_id: cursor.last_id || 0,
+      current_last_id: maxIdSeen,
+      batch_size: batchSize,
+    },
+    scanned: {
+      memories: totalScannedMemories,
+      pitfalls: totalScannedPitfalls,
+    },
+    deduped: {
+      memories: totalDedupedMemories,
+      pitfalls: totalDedupedPitfalls,
+    },
+    lines: finalLines,
+    logs: rollingLogs,
+    note: `全自动去重完成。扫描记忆 ${totalScannedMemories} 条，合并 ${totalDedupedMemories} 条；扫描踩坑 ${totalScannedPitfalls} 条，合并 ${totalDedupedPitfalls} 条。`,
+  });
+}
 
 let _auditTimer = null;
 let _auditSchedulerStarted = false;
 
-async function checkScheduledAudit(client, cfg) {
-  const interval = (cfg && (cfg.audit_interval || cfg.auditInterval)) || "off";
-  const intervalMs = AUDIT_INTERVAL_MS[interval];
-  if (!intervalMs) return null;
+async function checkScheduledDedup(client, cfg) {
+  const schedule = (cfg && (cfg.dedup_schedule || cfg.audit_interval || cfg.auditInterval)) || "off";
+  if (schedule === "off" || schedule === "none") return null;
 
   const state = lookupAuditState();
-  const lastTime = state.last_audit_at ? new Date(state.last_audit_at).getTime() : 0;
-  if (Date.now() - lastTime < intervalMs) {
-    return { skipped: true, reason: "interval_not_reached", last_audit_at: state.last_audit_at };
+  const isDue = isDedupDue({
+    schedule,
+    time: cfg.dedup_time || "02:00",
+    weekday: cfg.dedup_weekday || 1,
+    day: cfg.dedup_day || 1,
+    lastDedupAt: state.last_dedup_at || state.last_audit_at,
+  });
+
+  if (!isDue) {
+    return { skipped: true, reason: "schedule_not_due", last_dedup_at: state.last_dedup_at || state.last_audit_at };
   }
 
   try {
-    const res = await memoryAudit(client, cfg, { project: cfg.project || "global", apply: false });
+    const updatedAfter = getDedupTimeWindow(schedule);
+    const res = await memoryAudit(client, cfg, {
+      project: cfg.project || "global",
+      schedule,
+      updated_after: updatedAfter,
+      batch_size: cfg.dedup_batch_size || 1000,
+    });
     return res;
   } catch (err) {
-    console.error("[memory-hub] checkScheduledAudit error:", (err && err.message) || err);
+    console.error("[memory-hub] checkScheduledDedup error:", (err && err.message) || err);
     return null;
   }
 }
@@ -1515,10 +1737,10 @@ async function checkScheduledAudit(client, cfg) {
 function ensureAuditScheduler(client, cfg) {
   if (_auditSchedulerStarted) return;
   _auditSchedulerStarted = true;
-  checkScheduledAudit(client, cfg).catch(() => {});
+  checkScheduledDedup(client, cfg).catch(() => {});
   _auditTimer = setInterval(() => {
-    checkScheduledAudit(client, cfg).catch(() => {});
-  }, 10 * 60 * 1000);
+    checkScheduledDedup(client, cfg).catch(() => {});
+  }, 5 * 60 * 1000);
   if (_auditTimer && _auditTimer.unref) _auditTimer.unref();
 }
 
@@ -1626,20 +1848,20 @@ const TOOLS = {
 
   memory_audit: {
     description:
-      "记忆体检：对库内活跃记忆与踩坑记录进行质量审阅与语义查重，输出审阅建议卡片（重复组、跨表踩坑优先、高频踩坑提升准则）。支持增量游标 (last_audit_cursor) 与时间窗分批断点续跑，防止上万条全量扫描；默认只出建议绝不动数据（数据0变动）；经人工批准后（apply=true）执行安全软删除（写 invalid_at），绝不物理删。",
+      "全自动去重与撤销：对库内记忆与踩坑进行分批全自动语义查重合并（只软失效写 invalid_at，绝不物理删）。单次模型调用同时完成判定与合并结果生成；支持定时去重调度、全量分批去重，以及时间点回滚/最近一次去重撤销。",
     args: {
       type: "object",
       properties: {
         project: { type: "string", description: "限定项目，默认 global" },
-        limit: { type: "integer", description: "审阅条数上限，默认 50，最大 200" },
-        batch_size: { type: "integer", description: "分批大小，默认 25" },
-        incremental: { type: "boolean", description: "是否使用增量游标扫描（默认 true，断点续跑避免扫描上万条已审记录）" },
-        since_days: { type: "integer", description: "仅体检最近 N 天有变动的记录（可选，下推至数据库索引过滤）" },
-        since_id: { type: "integer", description: "指定起始游标 ID（可选）" },
-        full: { type: "boolean", description: "是否强制从头全量扫描并重置游标（默认 false）" },
-        apply: { type: "boolean", description: "是否执行批准的卡片建议（默认 false 只出建议不动数据）" },
-        approved_cards: { type: "array", items: { type: "string" }, description: "人工批准执行的 card_id 列表" },
-        apply_all: { type: "boolean", description: "是否一键执行全部建议（需明确指定）" },
+        full: { type: "boolean", description: "是否全库扫描去重（默认 true）" },
+        batch_size: { type: "integer", description: "分批大小（50~1000，默认 1000）" },
+        schedule: { type: "string", enum: ["off", "daily", "weekly", "monthly"], description: "定时调度模式" },
+        updated_after: { type: "string", description: "仅去重指定时间戳之后变动的记录（如 daily/weekly/monthly 窗口）" },
+        undo: { type: "boolean", description: "是否执行去重撤销（默认撤销最近一次去重批次）" },
+        undo_before: { type: "string", description: "撤销指定时刻之后的所有去重（如 '2026-10-19 03:00'），还原至该时刻前状态" },
+        since_days: { type: "integer", description: "仅去重最近 N 天变动的记录" },
+        since_id: { type: "integer", description: "指定起始游标 ID" },
+        apply: { type: "boolean", description: "兼容参数（当前默认全自动执行去重）" },
       },
     },
     run: (args, ctx) => memoryAudit(ctx._client, ctx._cfg, args, ctx),
@@ -1914,11 +2136,11 @@ export const MagpieMemoryHub = async (input, options) => {
     });
   }
 
-  /* ---- audit_interval 定时自动体检 ----
-   * 宿主长驻进程定期检查上次体检时间是否达到设定间隔（daily / weekly / monthly）。
-   * 默认 off，关闭时不执行任何后台操作；开启时仅产出审阅卡片，绝不自动删改数据。 */
-  const auditInterval = cfg.audit_interval || cfg.auditInterval || (options && options.audit_interval) || "off";
-  if (auditInterval !== "off" && !isTestMode()) {
+  /* ---- dedup_schedule 定时自动去重 ----
+   * 宿主长驻进程定期检查上次去重时间是否超期（daily / weekly / monthly）。
+   * 默认 off，关闭时不执行任何后台操作；超期触发后立即分批执行去重，绝不产出冗余卡片。 */
+  const dedupSched = cfg.dedup_schedule || cfg.audit_interval || cfg.auditInterval || (options && (options.dedup_schedule || options.audit_interval)) || "off";
+  if (dedupSched !== "off" && !isTestMode()) {
     ensureAuditScheduler(client, cfg);
   }
 
