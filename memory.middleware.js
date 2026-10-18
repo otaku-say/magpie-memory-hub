@@ -42,6 +42,7 @@ function cleanText(text) {
   s = s.replace(/\[Persistent Memory Context\][\s\S]*?(?=\n\n|$)/gi, "");
   s = s.replace(/\[Memory Instruction\][\s\S]*?(?=\n\n|$)/gi, "");
   s = s.replace(/\[Memory Check[^\n\]]*\][\s\S]*?(?=\n\n|$)/gi, "");
+  s = s.replace(/\[Memory Agent Guide[^\n\]]*\][\s\S]*?(?=\n\n|$)/gi, "");
   return s.replace(/^\s+|\s+$/g, "");
 }
 
@@ -708,12 +709,14 @@ function onRequestInner(body, ctx) {
 
   /* --- ② 可选：内联提炼指令 ---
    *
-   * 两条通路（优先第一条）：
-   *   ① 【直调工具】让 agent 用 memory_save 存 → 数据经 MCP 直接进库，零外部进程
-   *   ② 【<memory> 块】agent 手里没这个工具时的兜底，中间件剥离并打 [MEMORY_HARVEST]
+   * 保存通路（按优先级）：
+   *   ① 【直调工具】让 agent 用 memory_save / pitfall_save 存 → 数据经 MCP 直接进库（推荐路径）。
+   *   ② 【网关自动采集】auto_harvest → Bun 宿主在对话结束后异步提炼入库（独立路径）。
    *
-   * 为什么把 ② 降级：它依赖「有人在跑 harvest.py」，而 Docker 里网关 stdout 是
-   * 容器管道、没有进程能读，模型就算乖乖输出了块也进不了库。① 没有这个外部依赖。
+   * 注意：v6.24.0 起引导里【不再】要求「在回复末尾追加 <memory> 块」。
+   * 实测该兜底诱发模型输出超大未闭合 <memory> 块，流式剥离扣留导致客户端只收到
+   * keepalive 直至超时取消（499）。历史遗留的块仍由 stripStream / stripMemoryBlock
+   * 做 fail-open 剥离（只剥闭合块，绝不吞正文），但不再主动引导模型产出块。
    *
    * ── 强度模式（照官方 middleware-system-prompt 的思路做成可配置）──
    * soft   ：现状语气「若产生了…」。被动，取决于模型是否意识到有东西值得存。
@@ -749,13 +752,13 @@ function onRequestInner(body, ctx) {
         injected +=
           "\n\n[Memory Agent Guide —— 检索与沉淀]\n" +
           "1. 主动检索：涉及项目背景、历史规范、关键配置或排查报错时，优先主动调用 `" + ctxTool + "`（上下文召回）、`" + searchTool + "`（关键词语义检索）或 `" + pitSearchTool + "`（避坑经验匹配）。\n" +
-          "2. 及时沉淀：结束本轮前检查是否产生了持久偏好、架构决策、环境事实或报错解法，若命中立即用 `" + saveTool + "` 存入（报错踩坑优先用 `" + pitfallTool + "`）；若工具不可用则回复末尾追加 <memory>JSON 数组</memory> 块。\n" +
+          "2. 及时沉淀：结束本轮前检查是否产生了持久偏好、架构决策、环境事实或报错解法，若命中立即用 `" + saveTool + "` 存入（报错踩坑优先用 `" + pitfallTool + "`）；无工具调用能力时跳过保存，绝不在回复里输出 <memory> 标签块。\n" +
           "无相关需求时忽略本提示，绝不为了凑数操作。";
       } else {
         injected +=
           "\n\n[Memory Agent Guide]\n" +
           "- 遇项目背景、历史规范或报错时，主动调用 `" + ctxTool + "`、`" + searchTool + "` 或 `" + pitSearchTool + "` 检索记忆与避坑经验；\n" +
-          "- 若产生了值得持久化的偏好/决策/事实/报错解法，调用 `" + saveTool + "`（或 `" + pitfallTool + "`）保存（无工具时回复末尾追加 <memory>JSON 数组</memory>）。无需求请忽略。";
+          "- 若产生了值得持久化的偏好/决策/事实/报错解法，调用 `" + saveTool + "`（或 `" + pitfallTool + "`）保存；无工具调用能力时跳过保存，绝不在回复里输出 <memory> 标签块。无需求请忽略。";
       }
     }
   }
@@ -928,13 +931,21 @@ function setEventText(obj, text) {
  * 状态机（存在 ctx.state 里，随请求共享）：
  *   hold=0 透传；见到 "<memory" 前缀即进入 hold=1 并开始吞
  *   hold=1 吞掉直到 "</memory>"；若超过 HOLD_MAX 仍未闭合则【原样吐出】(fail-open)
- *   hold=2 已剥完，后续透传
+ *   hold=-1 / memBypassed=true: 彻底禁用剥离，所有内容原样透传，绝不再扣留
  */
 var HOLD_MAX = 20000;
 var OPEN_TAG = "<memory";
 var CLOSE_TAG = "</memory>";
 
-function stripStream(piece, st) {
+function _stripStreamInner(piece, st) {
+  /* 若该流已因超限熔断或标记跳过，绝不再做任何扣留，所有内容逐字节直通 */
+  if (st.memBypassed || st.memHold === -1) {
+    var prefix = (st.memPending || "") + (st.memBuf || "");
+    st.memPending = "";
+    st.memBuf = "";
+    return prefix + (piece || "");
+  }
+
   /* 上一块扣住的半个标记必须先拼回来再判断，否则被切开的 "<mem"+"ory>"
    * 永远拼不完整，剥离直接失效（实测踩过）。 */
   if (st.memPending) {
@@ -943,6 +954,8 @@ function stripStream(piece, st) {
   }
   if (!piece) return piece;
   var hold = st.memHold || 0;
+
+  var holdLimit = (st && typeof st.holdMax === "number" && st.holdMax > 0) ? st.holdMax : HOLD_MAX;
 
   if (hold === 0) {
     var i = piece.indexOf(OPEN_TAG);
@@ -960,7 +973,7 @@ function stripStream(piece, st) {
      * 早先这里无条件进入扣留，于是模型只要在散文里【提到】这个标签
      * （例如「这个 <memory> 标签的作用是…」），后面的正文就全部被吞 ——
      * 用户界面上表现为回复在中途莫名其妙断掉（真实踩过两次）。
-     * 判据：标签之后跳过空白，必须紧跟 "["（JSON 数组）或 "{"（单个对象），
+     * 判据：标签之后跳过空白，必须紧跟 "["（数组）或 "{"（单个对象），
      * 这才是本插件约定的记忆块格式；否则按普通正文原样输出。 */
     var head = piece.slice(0, i);
     var rem = piece.slice(i);
@@ -1002,6 +1015,16 @@ function stripStream(piece, st) {
       st.memBuf = "";
       return st.memHead + (tail0 ? stripStream(tail0, st) : "");
     }
+    // 未闭合：检查单 chunk 扣留量是否就已超限
+    if (st.memBuf.length > holdLimit) {
+      /* 单 chunk 即超限：立即把扣留内容原样吐出，且本流彻底禁用扣留 (fail-open) */
+      var flush0 = st.memHead + st.memBuf;
+      st.memHold = -1;
+      st.memBypassed = true;
+      st.memBuf = "";
+      st.memPending = "";
+      return flush0;
+    }
     return st.memHead;
   }
 
@@ -1009,16 +1032,18 @@ function stripStream(piece, st) {
     st.memBuf += piece;
     var end = st.memBuf.indexOf(CLOSE_TAG);
     if (end !== -1) {
-      st.memHold = 0;
+      st.memHold = 0;   // 块闭合了，恢复正常透传
       var tail = st.memBuf.slice(end + CLOSE_TAG.length);
       st.memBuf = "";
       return tail ? stripStream(tail, st) : "";
     }
-    if (st.memBuf.length > HOLD_MAX) {
-      /* 迟迟不闭合：判定为模型没按格式输出，原样吐出，绝不吞掉用户内容 */
+    if (st.memBuf.length > holdLimit) {
+      /* 迟迟不闭合且扣留超限：判定为模型没按格式闭合，立即把扣留内容原样吐出，且不再继续扣 (fail-open) */
       var flush = st.memBuf;
-      st.memHold = 0;
+      st.memHold = -1;
+      st.memBypassed = true;
       st.memBuf = "";
+      st.memPending = "";
       return flush;
     }
     return "";
@@ -1027,6 +1052,20 @@ function stripStream(piece, st) {
   /* 兜底状态：重置后重走 */
   st.memHold = 0;
   return stripStream(piece, st);
+}
+
+function stripStream(piece, st) {
+  try {
+    return _stripStreamInner(piece, st);
+  } catch (err) {
+    /* 任何异常保命：释放全部已有扣留，原样拼接 piece，彻底禁用后续剥离 */
+    var toRelease = (st.memPending || "") + (st.memBuf || "");
+    st.memPending = "";
+    st.memBuf = "";
+    st.memHold = -1;
+    st.memBypassed = true;
+    return toRelease + (piece || "");
+  }
 }
 
 function stripMemoryBlock(text) {
@@ -1056,7 +1095,7 @@ function onEventInner(event, ctx) {
         toRelease += st.memPending;
         st.memPending = "";
       }
-      if (st.memHold === 1 && st.memBuf) {
+      if (st.memBuf) {
         toRelease += st.memBuf;
         st.memBuf = "";
         st.memHold = 0;
@@ -1151,7 +1190,23 @@ export function onRequest(body, ctx) {
 
 export function onEvent(event, ctx) {
   try { return onEventInner(event, ctx); }
-  catch (e) { return _mwFailOpen("onEvent", e, event); }
+  catch (e) {
+    /* 顶层异常保命：若 ctx.state 里有扣留内容，必须释放到当前 event，绝不能丢用户内容 */
+    if (ctx && ctx.state) {
+      try {
+        var toRelease = (ctx.state.memPending || "") + (ctx.state.memBuf || "");
+        ctx.state.memPending = "";
+        ctx.state.memBuf = "";
+        ctx.state.memHold = -1;
+        ctx.state.memBypassed = true;
+        if (toRelease) {
+          var curVis = pickText(event) || "";
+          setEventText(event, toRelease + curVis);
+        }
+      } catch (_) {}
+    }
+    return _mwFailOpen("onEvent", e, event);
+  }
 }
 
 export function onResponse(body, ctx) {

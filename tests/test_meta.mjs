@@ -156,8 +156,8 @@ export function runMetaCheck(options = {}) {
     }
   }
 
-  // 强断言：锁定当前活跃测试文件总数（包含 test_state_bloat_and_dead_letter.mjs 后为 37 个）
-  assert.strictEqual(testFiles.length, 37, `测试文件总数断言：期望 37 个，实际 ${testFiles.length} 个`);
+  // 强断言：锁定当前活跃测试文件总数（包含 test_stream_failopen.mjs 后为 38 个）
+  assert.strictEqual(testFiles.length, 38, `测试文件总数断言：期望 38 个，实际 ${testFiles.length} 个`);
 
   // 反证测试 1：验证门禁对写 global 恶意用例具备拦截能力
   const fakeSample = `
