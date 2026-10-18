@@ -7,8 +7,14 @@
  *   3. 加固三：__MEMHUB_PROBE__ 存活探针 418 响应、健康数据结构、严格全等匹配与防御性降级
  */
 
+import fs from "node:fs";
+import path from "node:path";
+import vm from "node:vm";
+import { fileURLToPath } from "node:url";
 import assert from "node:assert";
 import { onRequest, onEvent, onResponse } from "../memory.middleware.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 console.log("=================================================================");
 console.log("【加固三测试】__MEMHUB_PROBE__ 存活探针测试");
@@ -313,7 +319,7 @@ console.log("=================================================================")
   // 从真实 settings.js 提取并加载防抖逻辑
   const settingsSrc = fs.readFileSync(path.join(__dirname, "../settings.js"), "utf8");
   const vmCtx = {
-    window: { magpie: { options: { set: async (o) => { rawSetCalls++; lastPayload = o; return o; } } } },
+    window: { magpie: { options: { set: async (o) => { rawSetCalls++; lastPayloadWritten = JSON.parse(JSON.stringify(o)); return o; } } } },
     setTimeout,
     clearTimeout,
     Date,

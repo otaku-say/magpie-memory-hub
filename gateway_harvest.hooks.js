@@ -501,7 +501,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
         });
         try { modelBudgetRecord(); } catch (_) {}
       } catch (netErr) {
-        return { ok: false, status: 0, errText: String(netErr?.message || netErr), reason: "systemone_network_exception" };
+        return { ok: false, status: 0, errText: String(netErr?.message || netErr), reason: "systemone_network_exception" }; // db-col-ok: HTTP 状态码，非数据库列
       }
 
       if (!res.ok) {
@@ -552,7 +552,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
         });
         try { modelBudgetRecord(); } catch (_) {}
       } catch (netErr) {
-        return { ok: false, status: 0, errText: String(netErr?.message || netErr), reason: "chat_network_exception" };
+        return { ok: false, status: 0, errText: String(netErr?.message || netErr), reason: "chat_network_exception" }; // db-col-ok: HTTP 状态码，非数据库列
       }
 
       if (!res.ok) {
@@ -1025,13 +1025,6 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
  * 请求前置钩子：在路由前调用。
  * 绝不改动 body，只读提取元数据并绑定到 ctx.state。
  */
-/* 诊断：把静默吞掉的错误说出来（每类只打一次，不含对话内容） */
-var _diagLogged = {};
-function _diag(tag, msg) {
-  if (_diagLogged[tag]) return;
-  _diagLogged[tag] = 1;
-  try { console.log("[memory-hub][diag] " + tag + ": " + String(msg).slice(0, 300)); } catch (_) {}
-}
 
 /* 一次性探针：证明「钩子到底有没有被调用」。
  * 只在进程内打一次（零刷屏），且**不含任何对话内容**（隐私安全）。
