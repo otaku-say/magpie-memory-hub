@@ -1167,6 +1167,7 @@ export function isDedupDue({ schedule, time, weekday, day, lastDedupAt, now = ne
 
 /** 撤销去重：时间点回滚 / 撤销最近一次批次 */
 export async function memoryAuditUndo(client, cfg, args) {
+  args = args || {};
   const project = String(args.project || (cfg && cfg.project) || "global").trim();
   const auditState = lookupAuditState();
   let rollingLogs = Array.isArray(auditState.logs) ? [...auditState.logs] : [];
@@ -1344,6 +1345,7 @@ export async function memoryAuditUndo(client, cfg, args) {
  * 全自动去重：单次模型调用判定并立即合并，分批支持全量与定时下推，绝不物理删
  */
 async function memoryAudit(client, cfg, args, ctx) {
+  args = args || {};
   if (args && (args.undo === true || args.undo_before)) {
     return await memoryAuditUndo(client, cfg, args);
   }
