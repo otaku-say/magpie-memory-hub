@@ -1168,6 +1168,11 @@ export function isDedupDue({ schedule, time, weekday, day, lastDedupAt, now = ne
 /** 撤销去重：时间点回滚 / 撤销最近一次批次 */
 export async function memoryAuditUndo(client, cfg, args) {
   args = args || {};
+  if (!client || typeof client.list !== "function") {
+    return jsonOut({ action: "DEDUP_UNDONE", success: false, data_changed: false,
+      restored_records: 0, undone_recurrence: 0, skipped: 0,
+      note: "无可用数据库客户端，已跳过撤销（不影响插件加载）" });
+  }
   const project = String(args.project || (cfg && cfg.project) || "global").trim();
   const auditState = lookupAuditState();
   let rollingLogs = Array.isArray(auditState.logs) ? [...auditState.logs] : [];
@@ -1346,6 +1351,10 @@ export async function memoryAuditUndo(client, cfg, args) {
  */
 async function memoryAudit(client, cfg, args, ctx) {
   args = args || {};
+  if (!client || typeof client.list !== "function") {
+    return jsonOut({ action: "DEDUP_REPORT", success: false, data_changed: false,
+      batch: "0/0", status: "skipped", note: "无可用数据库客户端，已跳过去重（不影响插件加载）" });
+  }
   if (args && (args.undo === true || args.undo_before)) {
     return await memoryAuditUndo(client, cfg, args);
   }
@@ -1721,6 +1730,10 @@ async function checkScheduledDedup(client, cfg) {
     return { skipped: true, reason: "schedule_not_due", last_dedup_at: state.last_dedup_at || state.last_audit_at };
   }
 
+  if (!client || typeof client.list !== "function") {
+    return { skipped: true, reason: "client_not_ready" };
+  }
+
   try {
     const updatedAfter = getDedupTimeWindow(schedule);
     const res = await memoryAudit(client, cfg, {
@@ -1737,11 +1750,20 @@ async function checkScheduledDedup(client, cfg) {
 }
 
 function ensureAuditScheduler(client, cfg) {
+  /* 调度器自建 client：加载期传入的 client 可能尚未就绪 ✗ 绝不能因此抛错 ✓ */
+  function safeClient() {
+    if (client && typeof client.list === "function") return client;
+    try {
+      if (cfg && (cfg.mcpKey || cfg.mcp_key)) return makeClient(cfg);
+    } catch (_) {}
+    return null;
+  }
+  const _origCheck = checkScheduledDedup;
   if (_auditSchedulerStarted) return;
   _auditSchedulerStarted = true;
-  checkScheduledDedup(client, cfg).catch(() => {});
+  checkScheduledDedup(safeClient(), cfg).catch((e) => { console.error("[memory-hub] 启动去重检查跳过:", (e && e.message) || e); });
   _auditTimer = setInterval(() => {
-    checkScheduledDedup(client, cfg).catch(() => {});
+    checkScheduledDedup(safeClient(), cfg).catch((e) => { console.error("[memory-hub] 定时去重跳过:", (e && e.message) || e); });
   }, 5 * 60 * 1000);
   if (_auditTimer && _auditTimer.unref) _auditTimer.unref();
 }
