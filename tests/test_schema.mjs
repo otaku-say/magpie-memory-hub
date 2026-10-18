@@ -42,7 +42,7 @@ console.log("\n=== 2. 幂等：已初始化 → 零语句 ===");
   eq(buildStatements(d).length, 0, "重复点击 → 0 条语句（幂等）");
 }
 
-console.log("\n=== 3. 全新库 → 建齐三表 + 三索引 ===");
+console.log("\n=== 3. 全新库 → 建齐三表 + 七索引 ===");
 {
   // 模拟"库存在但没有任何插件表"：给一张无关表，保证 normalize 非空
   const cur = { tables: [{ name: "some_other_table", columns: [{ name: "id" }] }] };
@@ -52,7 +52,7 @@ console.log("\n=== 3. 全新库 → 建齐三表 + 三索引 ===");
   const s = buildStatements(d);
   const kinds = s.map((x) => x.kind);
   eq(kinds.filter((k) => k === "create_table").length, 3, "3 条建表");
-  eq(kinds.filter((k) => k === "create_index").length, 5, "5 条建索引");
+  eq(kinds.filter((k) => k === "create_index").length, 7, "7 条建索引");
   eq(kinds.filter((k) => k === "add_column").length, 0, "无加列（建表语句已含列）");
   eq(kinds.indexOf("create_table") < kinds.indexOf("create_index"), true, "顺序：先建表后建索引");
   ok(`语句数 ${s.length}`);
@@ -78,7 +78,7 @@ console.log("\n=== 5. 缺索引 → 补建（含唯一索引）===");
   const cur = fullSchema();
   cur.tables.forEach((t) => { t.indexes = []; });
   const d = detectDrift(cur);
-  eq(d.missingIndexes.length, 5, "检出 5 个缺索引");
+  eq(d.missingIndexes.length, 7, "检出 7 个缺索引");
   const s = buildStatements(d);
   const uniq = s.filter((x) => x.unique);
   eq(uniq.length, 3, "其中 3 个是唯一索引（含去重的最终保证）");

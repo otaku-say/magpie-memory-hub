@@ -347,3 +347,259 @@ export async function rewriteSearchQuery({
     clearTimeout(timer);
   }
 }
+
+/**
+ * 记忆体检与质量审阅 System Prompt
+ */
+export const AUDIT_SYSTEM_PROMPT = `你是一个专业的长期记忆中枢体检与质量审阅专家。
+你的任务是审阅给定的长期记忆列表与踩坑经验列表，输出质量与去重建议卡片。
+【审阅维度】：
+1. 重复组 (duplicate_groups)：
+   - 识别表达同一事实、同一决策或同一规则的变体记录；
+   - 建议保留主记录（优先保留内容更详尽、复发频次更高或更新的记录）；
+   - 建议软删除其余重复变体记录。
+2. 冲突/过时组 (conflicts)：
+   - 识别同主题但结论矛盾或已过时的记录，标明哪条已过时并建议软失效。
+3. 高频踩坑提升准则 (promotions)：
+   - 识别复发频次高（recurrence >= 3）或影响严重的工程踩坑，建议提升为全局准则 (principle) 置顶注入。
+
+【红线纪律】：
+1. 绝不删改数据：你只输出建议方案，绝不能直接修改或删除数据。
+2. 格式规范：输出合法的 JSON 对象，严禁包裹 markdown 代码块，格式如下：
+{
+  "duplicate_groups": [
+    {
+      "title": "重复组主题",
+      "primary_id": 1,
+      "duplicate_ids": [2],
+      "reason": "变体说明"
+    }
+  ],
+  "conflicts": [],
+  "promotions": []
+}`;
+
+/**
+ * 方案 B：使用在线模型进行记忆体检与语义查重
+ * - 独立模型配置：优先使用 audit_model，若留空回退到 extract_model
+ * - 客户端标识：统一使用 Memory 客户端头（面板清晰可辨）
+ * - 成本控制与 fail-open：模型异常或超时时无缝回退至规则判重
+ */
+export async function auditMemoriesWithModel({
+  memories = [],
+  pitfalls = [],
+  options = {},
+}) {
+  const model = String(options.audit_model || options.extract_model || options.harvest_model || "").trim();
+  if (!model || model === "off" || model === "none") {
+    return null;
+  }
+
+  const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
+  const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
+  const timeoutMs = Number(options.audit_timeout_ms) || 12000;
+  const doFetch = options._fetch || globalThis.fetch;
+
+  if (!modelBudgetCheck(options).allowed) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  // 必须使用 Memory 客户端标识（和提炼一致，面板可区分）
+  const headers = getInternalModelHeaders(apiKey);
+
+  const memSummary = memories.map((m) => ({
+    id: m.id,
+    category: m.category,
+    title: m.title,
+    content: m.content || m.full_text,
+    recurrence: m.recurrence,
+    tags: m.tags,
+  }));
+
+  const pitSummary = pitfalls.map((p) => ({
+    id: p.id,
+    component: p.component,
+    symptom: p.symptom,
+    root_cause: p.root_cause,
+    solution: p.solution,
+    recurrence: p.recurrence,
+  }));
+
+  const userContent = `【待体检记忆列表】：\n${JSON.stringify(memSummary, null, 2)}\n\n【待体检踩坑列表】：\n${JSON.stringify(pitSummary, null, 2)}\n\n请审阅上述内容，输出重复组、冲突组与高频踩坑提升准则建议（严格输出合法 JSON）。`;
+
+  try {
+    const url = `${baseUrl}/v1/chat/completions`;
+    const payload = {
+      model,
+      messages: [
+        { role: "system", content: AUDIT_SYSTEM_PROMPT },
+        { role: "user", content: userContent },
+      ],
+      temperature: 0.1,
+      response_format: { type: "json_object" },
+    };
+
+    const res = await doFetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    try { modelBudgetRecord(); } catch (_) {}
+
+    if (!res.ok) return null;
+
+    const json = await res.json();
+    const rawContent = json?.choices?.[0]?.message?.content || "";
+    const parsed = parseJsonObject(rawContent);
+    return {
+      modelUsed: model,
+      result: parsed,
+    };
+  } catch (_) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 检索增强与语义重排 System Prompt
+ */
+export const RERANK_SYSTEM_PROMPT = `你是一个专业的记忆中枢检索增强与语义重排专家。
+智能体根据用户的问题/任务，从知识库中粗筛召回了一组候选记忆/踩坑记录。
+你的任务是：根据与用户查询的「真实语义相关度」和「对解决问题的价值」，从候选列表中挑选最相关的条目并进行重排打分。
+
+【重排要求】：
+1. 深入理解用户真实意图（识别同义词、中英文术语与不同表述，例如「数据库密码」与「DB 凭据」）；
+2. 过滤仅有表面字面重合但实际毫不相关的噪音项；
+3. 输出每个候选的 relevance_score (0~10分，10为完全匹配并能解答，0为毫不相关) 与一句话简明理由；
+4. 严格输出合法 JSON 对象，严禁包裹 markdown 代码块，格式如下：
+{
+  "ranked": [
+    { "id": 12, "score": 9.5, "reason": "精准解答了该凭据与权限配置" }
+  ]
+}`;
+
+/**
+ * 检索增强：调用在线模型对粗筛召回的候选进行语义重排与挑选
+ *
+ * 核心设计：
+ * 1. 成本可控：默认开启，可通过 options.search_rerank === false 显式关闭；
+ * 2. 模型解析：优先使用 options.rerank_model，若留空回退到 extract_model / audit_model；
+ * 3. 严格 fail-open：模型不可用、超时（4.5s）或预算超限时返回 null，调用方原样回落为纯词面粗排排序；
+ * 4. 统一 headers：使用 Memory 客户端标识，网关清晰可辨。
+ */
+export async function rerankSearchResultsWithModel({
+  query,
+  candidates = [],
+  options = {},
+  maxTop = 5,
+}) {
+  const rawQuery = String(query || "").trim();
+  if (!rawQuery || !Array.isArray(candidates) || candidates.length === 0) {
+    return null;
+  }
+
+  // 开关检查：允许用户在设置中关闭检索增强
+  if (options.search_rerank === false) {
+    return null;
+  }
+
+  // 模型解析：rerank_model -> extract_model -> audit_model -> harvest_model
+  const model = String(options.rerank_model || options.extract_model || options.audit_model || options.harvest_model || "").trim();
+  if (!model || model === "off" || model === "none") {
+    return null;
+  }
+
+  const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
+  const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
+  const timeoutMs = Number(options.rerank_timeout_ms) || 4500;
+  const doFetch = options._fetch || globalThis.fetch;
+
+  // 调用预算熔断守卫
+  if (!modelBudgetCheck(options).allowed) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const headers = getInternalModelHeaders(apiKey);
+
+  // 提取轻量摘要（Lean Projection）：绝不把数万字全文送给重排模型
+  const candidateSummaries = candidates.slice(0, 25).map((c) => {
+    const title = String(c.title || (c.component ? `${c.component}: ${c.symptom}` : "")).trim();
+    const tags = String(c.tags || "").trim();
+    const textBody = String(c.content || c.solution || c.root_cause || "").trim();
+    const summary = textBody.length > 200 ? textBody.slice(0, 200) + "..." : textBody;
+    return {
+      id: c.id,
+      title,
+      tags: tags || undefined,
+      summary: summary || undefined,
+    };
+  });
+
+  const userContent = `【用户查询】：\n${rawQuery}\n\n【粗筛候选列表（共 ${candidateSummaries.length} 条）】：\n${JSON.stringify(candidateSummaries, null, 2)}\n\n请针对用户查询，从上述候选中挑选最相关、最具价值的条目并重排打分（最高返回 ${maxTop} 条），输出合法 JSON。`;
+
+  try {
+    const url = `${baseUrl}/v1/chat/completions`;
+    const payload = {
+      model,
+      messages: [
+        { role: "system", content: RERANK_SYSTEM_PROMPT },
+        { role: "user", content: userContent },
+      ],
+      temperature: 0.1,
+      response_format: { type: "json_object" },
+    };
+
+    const res = await doFetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    try { modelBudgetRecord(); } catch (_) {}
+
+    if (!res.ok) return null;
+
+    const json = await res.json();
+    const rawContent = json?.choices?.[0]?.message?.content || "";
+    const parsed = parseJsonObject(rawContent);
+    if (!parsed) return null;
+
+    let rankedList = Array.isArray(parsed.ranked)
+      ? parsed.ranked
+      : Array.isArray(parsed.ranked_ids)
+      ? parsed.ranked_ids
+      : Array.isArray(parsed.results)
+      ? parsed.results
+      : [];
+
+    const validRanked = rankedList
+      .filter((item) => item && item.id != null)
+      .map((item) => ({
+        id: Number(item.id),
+        score: typeof item.score === "number" ? item.score : 5,
+        reason: String(item.reason || "").trim(),
+      }))
+      .filter((item) => Number.isFinite(item.id) && item.score >= 2);
+
+    if (validRanked.length === 0) return null;
+
+    // 按得分降序排序
+    validRanked.sort((a, b) => b.score - a.score);
+
+    return {
+      modelUsed: model,
+      ranked: validRanked.slice(0, maxTop),
+    };
+  } catch (_) {
+    // 严格 fail-open：模型超时或异常返回 null，调用方原样回落
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+

@@ -522,7 +522,7 @@ export async function harvestGateway(args, context) {
         for (const item of facts.concat(decisions)) {
           if (signal && signal.aborted) { aborted = true; break; }
 
-          const mFp = semanticFingerprint(targetProject, item.category, item.title, item.content);
+          const mFp = semanticFingerprint(targetProject, item.category, item.title, item.content, item.tags);
           if (!isExplicit && minEvidenceMemory > 1) {
             const pendingRes = recordPendingEvidence(`m:${targetProject}:${mFp}`, {
               ...item,

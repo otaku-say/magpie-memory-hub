@@ -26,8 +26,8 @@ if (registeredTools.size === 0) {
   throw new Error("无法从 tools.js 加载注册工具！");
 }
 
-// 强断言：工具总数必须为 20 个（移除本地小模型 model_check / model_download 后）
-assert.strictEqual(registeredTools.size, 20, "真实注册工具总数必须为 20 个");
+// 强断言：工具总数必须为 21 个（新增 memory_audit 记忆体检工具）
+assert.strictEqual(registeredTools.size, 21, "真实注册工具总数必须为 21 个");
 
 // 非工具符号白名单（仅限配置选项名、DOM 元素 ID、模块文件名）
 const KNOWN_NON_TOOL_SYMBOLS = new Set([

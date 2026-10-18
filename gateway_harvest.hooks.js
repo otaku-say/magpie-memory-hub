@@ -890,7 +890,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     const content = String(item.content || "").trim();
     if (!title || !content) continue;
 
-    const fp = semanticFingerprint(project, item.category || "fact", title, content);
+    const fp = semanticFingerprint(project, item.category || "fact", title, content, item.tags);
     const memKey = `m:${project}:${fp}`;
     if (isRecent(memKey)) continue;
 

@@ -65,6 +65,7 @@ export function readState() {
       current: typeof o.current === "string" ? o.current : "",
       secrets: o.secrets && typeof o.secrets === "object" ? o.secrets : {},
       actions: o.actions && typeof o.actions === "object" ? o.actions : {},
+      audit: o.audit && typeof o.audit === "object" ? o.audit : {},
       gateway_harvest: o.gateway_harvest && typeof o.gateway_harvest === "object" ? o.gateway_harvest : {},
       pending_patterns: o.pending_patterns && typeof o.pending_patterns === "object" ? o.pending_patterns : {},
       r2_mounts: o.r2_mounts && typeof o.r2_mounts === "object" ? o.r2_mounts : {},
@@ -92,6 +93,7 @@ export function writeState(state) {
       lastDoneId: typeof state.lastDoneId === "string" ? state.lastDoneId : (state.actions?.lastDoneId || ""),
       secrets: state.secrets && typeof state.secrets === "object" ? state.secrets : {},
       actions: state.actions && typeof state.actions === "object" ? state.actions : {},
+      audit: state.audit && typeof state.audit === "object" ? state.audit : {},
       gateway_harvest: state.gateway_harvest && typeof state.gateway_harvest === "object" ? state.gateway_harvest : {},
       pending_patterns: state.pending_patterns && typeof state.pending_patterns === "object" ? state.pending_patterns : {},
       r2_mounts: state.r2_mounts && typeof state.r2_mounts === "object" ? state.r2_mounts : {},
@@ -204,6 +206,49 @@ export function rememberSecret(database, secret) {
   const st = readState();
   st.secrets[database] = { v: String(secret), at: Date.now() };
   return writeState(st);
+}
+
+/** 读回记忆体检调度状态 (last_audit_at, last_summary, etc.) */
+export function lookupAuditState() {
+  const st = readState();
+  return st.audit || {};
+}
+
+/** 记录记忆体检调度状态 */
+export function rememberAuditState(auditState) {
+  const st = readState();
+  st.audit = Object.assign({}, st.audit || {}, auditState || {});
+  writeState(st);
+  return st.audit;
+}
+
+/** 读回指定项目的记忆体检增量游标（断点续跑与避免上万条全量扫描） */
+export function getAuditCursor(project) {
+  const prj = String(project || "global").trim();
+  const st = readState();
+  const cursors = (st.audit && st.audit.cursors) || {};
+  return cursors[prj] || { last_id: 0, last_updated_at: "", reviewed_count: 0 };
+}
+
+/** 保存指定项目的记忆体检增量游标 */
+export function saveAuditCursor(project, cursorData) {
+  const prj = String(project || "global").trim();
+  const st = readState();
+  if (!st.audit) st.audit = {};
+  if (!st.audit.cursors) st.audit.cursors = {};
+  st.audit.cursors[prj] = Object.assign({}, st.audit.cursors[prj] || {}, cursorData, { at: Date.now() });
+  writeState(st);
+  return st.audit.cursors[prj];
+}
+
+/** 清理/重置指定项目的记忆体检游标（供全量体检使用） */
+export function clearAuditCursor(project) {
+  const prj = String(project || "global").trim();
+  const st = readState();
+  if (st.audit && st.audit.cursors && st.audit.cursors[prj]) {
+    delete st.audit.cursors[prj];
+    writeState(st);
+  }
 }
 
 /**

@@ -58,6 +58,7 @@ export const OPS = {
   r2_check: "检测 R2 凭据是否真的可用（真实上传探针，只读检测）",
   clean_probe: "扫描 R2 中残留的探针文件并自动删除（走 REST 接口）",
   model_check: "检测在线模型连通性与可用性（实际调用提炼与判定模型并校验返回）",
+  memory_audit: "记忆体检（扫描重复、冲突与高频踩坑，只出建议卡片不改数据）",
   harvest_gateway: "立即扫描网关对话录制并提炼记忆",
   sync_snapshot: "拉取最新活跃记忆快照供前端同步至中间件",
 };
@@ -300,6 +301,25 @@ async function execute(action, cfg, fs, sp, state, options) {
         memories,
       };
     }
+    else if (action.op === "memory_audit") {
+      const { MagpieMemoryHub } = await import("./tools.js");
+      const hub = await MagpieMemoryHub(options || {}, { client });
+      const auditResRaw = await hub.tool.memory_audit.execute(action.args || {}, {});
+      const auditRes = typeof auditResRaw === "string" ? JSON.parse(auditResRaw) : auditResRaw;
+      const ok = auditRes && auditRes.action === "AUDIT_REPORT";
+      const lines = [
+        `扫描记忆: ${auditRes?.scanned?.memories || 0} 条 · 踩坑: ${auditRes?.scanned?.pitfalls || 0} 条`,
+        `发现重复组: ${auditRes?.summary?.duplicate_groups || 0} · 跨表重合: ${auditRes?.summary?.cross_table_overlaps || 0} · 准则提升建议: ${auditRes?.summary?.principle_promotions || 0}`
+      ];
+      result = {
+        ok,
+        at: Date.now(),
+        op: "memory_audit",
+        title: ok ? "记忆体检完成（已生成审阅卡片）" : "记忆体检未完成",
+        lines,
+        detail: auditRes,
+      };
+    }
     else result = await dbStatus(cfg, args);
   } catch (e) {
     result = { ok: false, op: action.op, error: String(e && e.message || e) };
@@ -314,6 +334,7 @@ async function execute(action, cfg, fs, sp, state, options) {
       provision: "ncb", init: "ncb", reset: "ncb", status: "ncb", ncb_check: "ncb", secret_check: "ncb",  // db-col-ok: UI 操作对应的卡片映射表，非数据库列
       storage_setup: "r2", r2_check: "r2", clean_probe: "r2",
       model_check: "model",
+      memory_audit: "model",
       harvest_gateway: "gateway",
       sync_snapshot: "db",
     };

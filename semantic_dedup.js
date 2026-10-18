@@ -73,12 +73,43 @@ export function normalizeSemanticText(text) {
 }
 
 /**
- * 计算语义归一化指纹
+ * tags 排序归一化（Layer ① 增强）
+ * 1. 按逗号、分号、空格、顿号等分隔
+ * 2. 对每个 tag 执行语义归一化（小写、去除标点与修饰）
+ * 3. 过滤空值并去重
+ * 4. 字典序排序
+ * 5. 严格截取前 5 个（防模型输出噪音 tags 导致指纹发散）
+ * 6. 逗号拼接
  */
-export function semanticFingerprint(project, category, title, content) {
+export function normalizeTags(tags) {
+  if (!tags) return "";
+  let list = [];
+  if (Array.isArray(tags)) {
+    list = tags;
+  } else if (typeof tags === "string") {
+    list = tags.split(/[,;\s，；、|]+/);
+  } else {
+    return "";
+  }
+  const cleaned = list
+    .map((t) => normalizeSemanticText(t))
+    .filter((t) => t && t.length > 0);
+  const unique = Array.from(new Set(cleaned));
+  // 严格只取前 5 个最主要 tags，防模型输出后续过量噪音 tags
+  const top5 = unique.slice(0, 5);
+  top5.sort();
+  return top5.join(",");
+}
+
+/**
+ * 计算语义归一化指纹
+ * 支持可选 tags 参数：归一化排序并取前 5 个并入指纹，增强写时去重并防模型噪音 tags。
+ */
+export function semanticFingerprint(project, category, title, content, tags) {
   const normTitle = normalizeSemanticText(title);
   const normContent = normalizeSemanticText(content);
-  const text = `${project}:${category}:${normTitle}:${normContent}`;
+  const normTags = normalizeTags(tags);
+  const text = `${project}:${category}:${normTitle}:${normContent}${normTags ? `:${normTags}` : ""}`;
   return crypto.createHash("sha256").update(text).digest("hex").slice(0, 32);
 }
 

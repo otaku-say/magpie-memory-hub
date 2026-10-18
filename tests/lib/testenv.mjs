@@ -94,7 +94,7 @@ function ensureProcessHooks() {
  * 获取环境中的有效凭据
  */
 export function getCredentials(instance = "41694_agent_memory") {
-  const mcpKey = process.env.NOCODEBACKEND_API_KEY || "mock_test_mcp_key";
+  const mcpKey = process.env.NOCODEBACKEND_API_KEY || process.env.NOCODEBACKEND_MCP_KEY || "mock_test_mcp_key";
   let secret = lookupSecret(instance) || "";
   if (!secret) {
     try {
@@ -233,6 +233,8 @@ export async function createTestEnv(options = {}) {
         if (params.category) rows = rows.filter((r) => r.category === params.category);
         if (params.client) rows = rows.filter((r) => r.client === params.client);
         if (params.lifecycle_status) rows = rows.filter((r) => r.lifecycle_status === params.lifecycle_status);
+        if (params.since_id != null && params.since_id !== "") rows = rows.filter((r) => Number(r.id) > Number(params.since_id));
+        if (params.updated_after) rows = rows.filter((r) => String(r.updated_at || "") >= String(params.updated_after));
 
         const limit = Number(params.limit) || 200;
         const page = Number(params.page) || 1;
@@ -446,7 +448,7 @@ export async function createTestEnv(options = {}) {
  * 全局测试残留查询（静态工具）
  */
 export async function checkGlobalTestResidue(instance = "41694_agent_memory", mcpKey = "") {
-  const key = mcpKey || process.env.NOCODEBACKEND_API_KEY || "";
+  const key = mcpKey || process.env.NOCODEBACKEND_API_KEY || process.env.NOCODEBACKEND_MCP_KEY || "";
   if (!key) throw new Error("checkGlobalTestResidue 缺少 mcpKey");
   const mcp = new NcbMcp({ apiKey: key });
 

@@ -12,7 +12,7 @@ import { parseDatabases, inferAccount, logicalName, dbProvision } from "../db_to
 import { NcbMcp } from "../ncb_mcp.js";
 import { TABLES } from "../schema.js";
 
-const KEY = process.env.NOCODEBACKEND_API_KEY || "";
+const KEY = process.env.NOCODEBACKEND_API_KEY || process.env.NOCODEBACKEND_MCP_KEY || "";
 let fail = 0;
 const ok = (m) => console.log(`  ✓ ${m}`);
 const no = (m) => { fail++; console.log(`  ✗ ${m}`); };

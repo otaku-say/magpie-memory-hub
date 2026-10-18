@@ -11,7 +11,7 @@
  */
 
 /** 结构版本号。每次改动 TABLES 都要 +1，并在 MIGRATIONS 里补一条说明。 */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /** 各版本做了什么（给人看，也用于生成变更说明）。 */
 export const MIGRATIONS = {
@@ -20,6 +20,7 @@ export const MIGRATIONS = {
   3: "数据库表与字段语义重构：删除 dead fields (entities/hits/source)，重命名为语义明确字段 (scope_level, content_fingerprint, retrieval_count, related_entities, full_text, superseded_by_id, lifecycle_status, revision, last_used_at)，新增 origin 产生方式，改默认值 client='unknown'，重命名元数据表为 schema_meta",
   4: "新增来源可追溯性字段：memories 与 pitfalls 表增加 source_session (VARCHAR 128) 与 source_turn (INT)",
   5: "新增复发与去重计数机制：memories 表增加 recurrence (INT, default 1) 字段，对齐 pitfalls 表",
+  6: "规模化检索与增量扫描复合索引：memories 增加 idx_memories_lookup (project, lifecycle_status, updated_at)，pitfalls 增加 idx_pitfalls_lookup (project, updated_at)",
 };
 
 /**
@@ -76,6 +77,8 @@ export const TABLES = {
       // 去重的最终保证：NCB 有约 2 秒写后读延迟，靠「先读后写」会漏掉紧邻/并发重复
       { name: "idx_memories_uniq_fp", unique: true, columns: ["project", "content_fingerprint"] },
       { name: "idx_memories_scope", columns: ["project", "lifecycle_status"] },
+      // 规模化万条检索复合索引：按项目+状态下推，配合最新修改时间快速定位
+      { name: "idx_memories_lookup", columns: ["project", "lifecycle_status", "updated_at"] },
       // 供「清理已过期记忆」用
       { name: "idx_memories_expires", columns: ["expires_at"] },
     ],
@@ -107,6 +110,8 @@ export const TABLES = {
     ],
     indexes: [
       { name: "idx_pitfalls_uniq_fp", unique: true, columns: ["project", "content_fingerprint"] },
+      // 规模化增量扫描复合索引：按项目+最新更新时间快速定位
+      { name: "idx_pitfalls_lookup", columns: ["project", "updated_at"] },
     ],
   },
 

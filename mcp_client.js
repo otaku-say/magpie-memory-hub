@@ -81,16 +81,49 @@ function firstResult(out) {
   return rs[0] || {};
 }
 
-/** 构造 SELECT。params 只支持「已知列等值 + limit/offset/order_by」。 */
+/** 构造 SELECT。支持指定投影列 (columns)、等值匹配、游标 (since_id/id_in/updated_after) 及 limit/offset/order_by。 */
 export function buildSelect(table, params) {
   const t = safeIdent(table, "table");
   const p = params || {};
   const where = [];
+
+  // 1. 指定投影列（Lean Projection）：若传 columns 数组，只 SELECT 指定的安全列，大幅节省网络与内存
+  let selectCols = "*";
+  if (Array.isArray(p.columns) && p.columns.length > 0) {
+    selectCols = p.columns.map((col) => safeIdent(col, "column", table)).join(", ");
+  }
+
+  // 2. 普通已知列等值匹配（排除控制参数）
   for (const k of Object.keys(p)) {
-    if (k === "limit" || k === "page" || k === "offset" || k === "order_by") continue;
+    if (
+      k === "limit" ||
+      k === "page" ||
+      k === "offset" ||
+      k === "order_by" ||
+      k === "columns" ||
+      k === "since_id" ||
+      k === "id_in" ||
+      k === "updated_after" ||
+      k === "max_pages"
+    ) {
+      continue;
+    }
     where.push(safeIdent(k, "column", table) + " = " + sqlValue(p[k]));
   }
-  let sql = "SELECT * FROM " + t;
+
+  // 3. 规模化增量游标与批量下推过滤
+  if (p.since_id !== undefined && p.since_id !== null && p.since_id !== "") {
+    where.push(safeIdent("id", "column", table) + " > " + safeId(p.since_id));
+  }
+  if (Array.isArray(p.id_in) && p.id_in.length > 0) {
+    const validIds = p.id_in.map(safeId);
+    where.push(safeIdent("id", "column", table) + " IN (" + validIds.join(", ") + ")");
+  }
+  if (p.updated_after !== undefined && p.updated_after !== null && String(p.updated_after).trim() !== "") {
+    where.push(safeIdent("updated_at", "column", table) + " >= " + sqlValue(p.updated_after));
+  }
+
+  let sql = "SELECT " + selectCols + " FROM " + t;
   if (where.length) sql += " WHERE " + where.join(" AND ");
   if (p.order_by && typeof p.order_by === "string") {
     const obParts = p.order_by.trim().split(/\s+/);

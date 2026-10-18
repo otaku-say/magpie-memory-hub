@@ -14,7 +14,7 @@
   var CARD_FIELDS = {
     ncb: ["ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init"],
     r2: ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"],
-    model: ["extract_model", "classify_model", "classify_endpoint", "search_rewrite", "harvest_max_per_min", "harvest_max_total"],
+    model: ["extract_model", "classify_model", "audit_model", "rerank_model", "audit_interval", "classify_endpoint", "search_rewrite", "search_rerank", "harvest_max_per_min", "harvest_max_total"],
     harvest: ["auto_harvest", "gatewayTimeoutMs"],
     extract: ["inline_extract", "min_confidence"],
     inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"],
@@ -25,9 +25,9 @@
     "ncb_instance", "ncb_secret", "mcp_key",
     "r2_account_id", "r2_access_key_id", "r2_secret_access_key",
     "r2_bucket_name", "r2_public_url",
-    "extract_model", "classify_model"
+    "extract_model", "classify_model", "audit_model", "rerank_model"
   ];
-  var SELECT = ["on_exist", "classify_endpoint"];
+  var SELECT = ["on_exist", "classify_endpoint", "audit_interval"];
   var NUM = {
     min_confidence: 0.6,
     max_inject_count: 5,
@@ -48,7 +48,8 @@
     "cross_turn_dedup",
     "ccr_cards",
     "inject_principles",
-    "search_rewrite"
+    "search_rewrite",
+    "search_rerank"
   ];
 
   var current = {};
@@ -190,7 +191,7 @@
     });
     BOOL.forEach(function (k) {
       var el = $(k); if (!el) return;
-      if (k === "search_rewrite") {
+      if (k === "search_rewrite" || k === "search_rerank") {
         el.checked = o[k] !== false;
         return;
       }
@@ -325,7 +326,7 @@
     if (s === "r2" || s === "storage_setup" || s === "r2_check" || s === "clean_probe") {
       return "r2";
     }
-    if (s === "model" || s === "model_check") {
+    if (s === "model" || s === "model_check" || s === "memory_audit") {
       return "model";
     }
     if (s === "gateway" || s === "harvest" || s === "harvest_gateway") {
@@ -688,6 +689,7 @@
         r2_check: "检测 R2 密钥",
         clean_probe: "清理探针文件",
         model_check: "真实检测模型",
+        memory_audit: "立即执行记忆体检",
         init: "初始化数据库",
         reset: "清空数据库",
         status: "检查结构状态",
@@ -708,7 +710,7 @@
     var ids = [
       "btn_db_provision", "btn_check_ncb", "btn_check_secret", "btn_db_storage_setup", "btn_db_status", "btn_db_reset",
       "btn_confirm_provision", "btn_confirm_reset",
-      "btn_check_r2", "btn_clean_probe", "btn_check_model",
+      "btn_check_r2", "btn_clean_probe", "btn_check_model", "btn_memory_audit",
       "btn_harvest_gateway", "btn_sync_snapshot"
     ];
     ids.forEach(function (id) {
@@ -1185,6 +1187,14 @@
     if (checkModelBtn) {
       checkModelBtn.addEventListener("click", function () {
         submitAction("model_check");
+      });
+    }
+
+    // 立即执行记忆体检
+    var memoryAuditBtn = $("btn_memory_audit");
+    if (memoryAuditBtn) {
+      memoryAuditBtn.addEventListener("click", function () {
+        submitAction("memory_audit");
       });
     }
 

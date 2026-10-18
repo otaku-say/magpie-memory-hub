@@ -31,7 +31,7 @@ async function fetchDbCounts() {
   const sql = "SELECT (SELECT COUNT(*) FROM memories) AS m, (SELECT COUNT(*) FROM pitfalls) AS p;";
 
   // 通道 1：直接通过 NcbMcp（若有环境变量）
-  const key = process.env.NOCODEBACKEND_API_KEY || "";
+  const key = process.env.NOCODEBACKEND_API_KEY || process.env.NOCODEBACKEND_MCP_KEY || "";
   if (key) {
     try {
       const mcp = new NcbMcp({ apiKey: key });

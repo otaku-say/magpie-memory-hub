@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.26.0</span>
+    <span class="version-tag">v6.27.0</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、上下文压缩、R2 存储。</p>
 
@@ -290,6 +290,48 @@
 
       <div class="row">
         <div class="row-head">
+          <label for="audit_model">记忆体检与去重模型 (audit_model)</label>
+          <span class="badge">可选</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">用于定期「记忆体检」时执行深度去重、语义合并与准则提升。体检由用户手动触发，可指定更高级更强的模型，成本完全可控。</div>
+          <div class="hint-diff"><strong>留空</strong>：自动回退至提炼模型 (extract_model)；<strong>填写示例</strong>：<code>group/claude-3-7-sonnet</code>。单次体检约消耗 N/25 次模型调用。</div>
+        </div>
+        <div class="control">
+          <input type="text" id="audit_model" placeholder="例如：group/claude-3-7-sonnet（留空则回退至提炼模型）" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="audit_interval">自动体检频率 (audit_interval)</label>
+          <span class="badge rec">默认 关闭</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">定期自动对库内记忆进行语义查重、合并与质量审阅。体检只出建议卡片，绝不自动删改数据。</div>
+          <div class="hint-diff"><strong>关闭</strong>：仅允许手动触发；<strong>每天/每周/每月</strong>：宿主进程定时唤起审阅，需消耗模型额度。</div>
+        </div>
+        <div class="control">
+          <select id="audit_interval">
+            <option value="off" selected>关闭（推荐，手动按需触发）</option>
+            <option value="daily">每天自动体检一次</option>
+            <option value="weekly">每周自动体检一次</option>
+            <option value="monthly">每月自动体检一次</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label id="lbl_last_audit">上次体检时间</label>
+        </div>
+        <div class="hint">
+          <div class="hint-desc" id="last_audit_at_text">尚未执行过记忆体检（未记录）</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
           <label for="classify_endpoint">判定模型端点模式 (classify_endpoint)</label>
           <span class="badge rec">默认 auto</span>
         </div>
@@ -319,6 +361,36 @@
         </div>
         <div class="side">
           <label class="switch"><input type="checkbox" id="search_rewrite"><span></span></label>
+        </div>
+      </div>
+
+      <div class="row split">
+        <div class="main">
+          <div class="row-head">
+            <label for="search_rerank">检索增强与语义重排 (search_rerank)</label>
+            <span class="badge rec">推荐 开</span>
+          </div>
+          <div class="hint">
+            <div class="hint-desc">粗筛召回候选后，调用在线模型结合当前任务对候选记忆/踩坑记录执行语义相关度打分与重排，精准挑选最相关的条目，过滤噪音。</div>
+            <div class="hint-diff"><strong>开</strong>：双路保险，模型挑选与词面粗排融合，模型故障自动 fail-open；<strong>关</strong>：仅使用纯词面排序。</div>
+          </div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="search_rerank"><span></span></label>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="rerank_model">检索重排专属模型 (rerank_model)</label>
+          <span class="badge">可选</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">指定用于检索增强与相关度重排的模型。若留空则自动回退至提炼模型 (extract_model) 或体检模型 (audit_model)。</div>
+          <div class="hint-diff"><strong>留空</strong>：使用提炼模型；<strong>填写示例</strong>：<code>group/gemini-2.5-flash</code>。</div>
+        </div>
+        <div class="control">
+          <input type="text" id="rerank_model" placeholder="例如：group/gemini-2.5-flash（留空则回退至提炼模型）" spellcheck="false">
         </div>
       </div>
 
@@ -352,6 +424,7 @@
 
       <div class="btn-row">
         <button type="button" id="btn_check_model">真实检测模型</button>
+        <button type="button" id="btn_memory_audit">立即执行记忆体检</button>
       </div>
 
       <div class="action-status-box" id="model_action_status" style="display:none;"></div>

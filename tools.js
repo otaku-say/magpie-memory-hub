@@ -19,17 +19,21 @@ import {
   dbStatus, dbInit, dbProvision, dbReset, storageSetup, storageUpload, storageGuide, ncbCheck, RESET_CONFIRM,
 } from "./db_tools.js";
 import { r2Setup, r2Upload, r2List, r2Delete, r2Guide, r2Check } from "./r2.js";
-import { lookupSecret, lookupDatabase, lookupRealDatabase } from "./local_state.js";
+import { lookupSecret, lookupDatabase, lookupRealDatabase, lookupAuditState, rememberAuditState, getAuditCursor, saveAuditCursor, clearAuditCursor } from "./local_state.js";
 import { makeMcpClient } from "./mcp_client.js";
 import { runPendingAction, readAction, writeCardStatus, parseDbInfo } from "./page_actions.js";
 import { harvestGateway, isTestMode } from "./gateway_harvest.js";
 import { triggerBackgroundDrain } from "./gateway_harvest.hooks.js";
-import { rewriteSearchQuery } from "./online_models.js";
+import { rewriteSearchQuery, auditMemoriesWithModel, rerankSearchResultsWithModel } from "./online_models.js";
 import {
   normalizeSemanticText,
+  normalizeTags,
   semanticFingerprint,
   isSemanticallySimilar,
   findSemanticDuplicate,
+  tokenize,
+  overlapCoefficient,
+  jaccardSimilarity,
 } from "./semantic_dedup.js";
 
 const NCB_BASE = "https://api.nocodebackend.com";
@@ -108,8 +112,12 @@ function readOptions(options) {
     // 在线模型配置（设置页自由指定，默认留空安全跳过）
     extract_model: o.extract_model || o.harvest_model || "",
     classify_model: o.classify_model || "",
+    audit_model: o.audit_model || "",
+    rerank_model: o.rerank_model || "",
     classify_endpoint: o.classify_endpoint || "auto",
     search_rewrite: o.search_rewrite !== false,
+    search_rerank: o.search_rerank !== false,
+    audit_interval: o.audit_interval || o.auditInterval || "off",
     gateway_url: o.gateway_url || o.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425",
     gateway_api_key: o.gateway_api_key || o.api_key || process.env.MAGPIE_API_KEY || "",
     // v6.20.0 调用预算与熔断（可配置，保守默认；见 model_budget.js）
@@ -250,11 +258,14 @@ async function fetchAll(client, table, params) {
 /* ---------------- 检索打分 ---------------- */
 
 function termsOf(q) {
-  return String(q || "")
-    .toLowerCase()
-    .split(/[\s,，、;；]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length >= 2);
+  const raw = String(q || "").toLowerCase().trim();
+  if (!raw) return [];
+  const parts = raw.split(/[\s,，、;；]+/).map((s) => s.trim()).filter((s) => s.length >= 2);
+  const terms = new Set(parts);
+  // 提取英文/数字专有标识（如 r2, redis, mysql, v6, api 等）
+  const words = raw.match(/[a-z0-9_-]{2,}/g) || [];
+  for (const w of words) terms.add(w);
+  return [...terms];
 }
 
 /** 记忆：标题(5) 标签(3) 正文(1) */
@@ -374,18 +385,56 @@ async function saveMemory(client, cfg, m, ctx) {
   if (!content) throw new Error("content 不能为空");
 
   const initialRecurrence = typeof m.recurrence === "number" && m.recurrence >= 1 ? Math.floor(m.recurrence) : 1;
-  const fp = (m.content_fingerprint && String(m.content_fingerprint).trim()) || semanticFingerprint(project, category, title, content);
+  const fp = (m.content_fingerprint && String(m.content_fingerprint).trim()) || semanticFingerprint(project, category, title, content, tags);
 
   // 0) 进程内近期写入 → 挡掉写后读延迟窗口里的重复
   if (justWritten("m:" + fp)) {
     return { action: "NOOP", id: null, note: "刚刚写入过（写后读延迟窗口内），已忽略重复" };
   }
 
-  // 1) 候选集拉取（按 project + category + lifecycle_status='active' 过滤，按 updated_at DESC 排序）
+  // 0.5) A③ 踩坑优先：检查 pitfalls 表中是否已存在该工程问题
+  try {
+    const pitfallRows = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT }));
+    const normTitle = normalizeSemanticText(title);
+    const matchedPitfall = pitfallRows.find((p) => {
+      const pSym = normalizeSemanticText(p.symptom);
+      if (pSym && (pSym === normTitle || normTitle.includes(pSym) || pSym.includes(normTitle))) return true;
+      const tTok = tokenize(title);
+      const sTok = tokenize(p.symptom);
+      if (overlapCoefficient(tTok.tokens, sTok.tokens) >= 0.5 || jaccardSimilarity(tTok.tokens, sTok.tokens) >= 0.3) {
+        return true;
+      }
+      return isSemanticallySimilar(title, content, p.symptom, p.solution || p.root_cause);
+    });
+    if (matchedPitfall) {
+      const next = (Number(matchedPitfall.recurrence) || 1) + initialRecurrence;
+      const now = nowSql();
+      try {
+        await client.update("pitfalls", matchedPitfall.id, {
+          recurrence: next,
+          last_occurred_at: now,
+          updated_at: now,
+        });
+        markRecent("p:" + (matchedPitfall.content_fingerprint || fp));
+        return {
+          action: "NOOP",
+          id: matchedPitfall.id,
+          table: "pitfalls",
+          recurrence: next,
+          note: `踩坑优先：该问题在 pitfalls 表中已存在（id=${matchedPitfall.id}），以踩坑记录为准，累加踩坑复发计数，不重复写入 memories`,
+        };
+      } catch (e) {
+        if (!/404|not found/i.test(String(e.message))) throw e;
+      }
+    }
+  } catch (_) {
+    // fail-open
+  }
+
+  // 1) 候选集拉取（按 project + lifecycle_status='active' 过滤，按 updated_at DESC 排序）
   const queryParams = { project, lifecycle_status: "active", order_by: "updated_at DESC", limit: FETCH_LIMIT };
-  if (category) queryParams.category = category;
-  let categoryRows = rowsOf(await client.list("memories", queryParams));
-  if (category) categoryRows = categoryRows.filter((r) => r.category === category);
+  const allActiveRows = rowsOf(await client.list("memories", queryParams));
+  let categoryRows = allActiveRows.filter((r) => !category || r.category === category);
 
   // 2) Layer ① 语义指纹查重 + Layer ② 局部滑动窗口语义相似度比对
   const dup = findSemanticDuplicate(categoryRows, title, content, fp);
@@ -404,6 +453,41 @@ async function saveMemory(client, cfg, m, ctx) {
         recurrence: next,
         retrieval_count: Number(dup.retrieval_count) || 0,
         note: dup.content_fingerprint === fp ? "内容未变化，累加复发计数" : "语义相似去重命中，累加复发计数",
+      };
+    } catch (e) {
+      if (!/404|not found/i.test(String(e.message))) throw e;
+    }
+  }
+
+  // 2.1) A② 跨类别去重：同 project + 归一化 title + 不同 category
+  const normTitle = normalizeSemanticText(title);
+  const otherCategoryRows = allActiveRows.filter((r) => r.category !== category);
+  const crossDup = otherCategoryRows.find((r) => {
+    const rNormTitle = normalizeSemanticText(r.title);
+    if (rNormTitle && rNormTitle === normTitle) return true;
+    return isSemanticallySimilar(title, content, r.title, r.content || r.full_text);
+  });
+
+  if (crossDup) {
+    const next = (Number(crossDup.recurrence) || 1) + initialRecurrence;
+    const now = nowSql();
+    const existingTags = String(crossDup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+    const newTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+    const mergedTags = Array.from(new Set([...existingTags, ...newTags])).join(", ");
+    try {
+      await client.update("memories", crossDup.id, {
+        recurrence: next,
+        tags: mergedTags || crossDup.tags,
+        updated_at: now,
+      });
+      markRecent("m:" + (crossDup.content_fingerprint || fp));
+      return {
+        action: "NOOP",
+        id: crossDup.id,
+        category: crossDup.category,
+        recurrence: next,
+        retrieval_count: Number(crossDup.retrieval_count) || 0,
+        note: `跨类别去重命中（既有记录分类: ${crossDup.category}，传入分类: ${category}），已合并至既有记录并累加复发计数`,
       };
     } catch (e) {
       if (!/404|not found/i.test(String(e.message))) throw e;
@@ -515,7 +599,27 @@ async function memorySearch(client, cfg, args) {
   const rawQuery = String(args.query || "").trim();
   const origTerms = termsOf(rawQuery);
 
-  const fetchParams = { lifecycle_status: "active" };
+  const fetchParams = {
+    lifecycle_status: "active",
+    columns: [
+      "id",
+      "project",
+      "category",
+      "scope_level",
+      "client",
+      "origin",
+      "title",
+      "content",
+      "tags",
+      "related_entities",
+      "confidence_score",
+      "recurrence",
+      "retrieval_count",
+      "last_used_at",
+      "updated_at",
+      "lifecycle_status",
+    ],
+  };
   if (args.project) fetchParams.project = String(args.project).trim();
   if (args.category) fetchParams.category = String(args.category).trim();
   if (args.scope_level) fetchParams.scope_level = String(args.scope_level).trim();
@@ -582,6 +686,55 @@ async function memorySearch(client, cfg, args) {
     .filter((x) => x.hit > 0)
     .sort((a, b) => b.hit - a.hit || rankMemory(b.row) - rankMemory(a.row));
 
+  // 检索增强：模型语义重排与精准挑选（在配置了模型且开启 rerank 时）
+  let rerankUsed = false;
+  let rerankModel = null;
+  const shouldRerank = (args.search_rerank !== false) && (cfg.search_rerank !== false);
+  if (shouldRerank && rawQuery && scored.length >= 1) {
+    try {
+      // 扩大粗筛召回窗口（取 top 15~25 条候选），让重排模型从中挑选最相关的结果
+      const candidatePool = scored.slice(0, Math.max(limit * 2, 20));
+      const rerankRes = await rerankSearchResultsWithModel({
+        query: rawQuery,
+        candidates: candidatePool.map((x) => x.row),
+        options: cfg,
+        maxTop: limit,
+      });
+
+      if (rerankRes && Array.isArray(rerankRes.ranked) && rerankRes.ranked.length > 0) {
+        rerankUsed = true;
+        rerankModel = rerankRes.modelUsed;
+        const scoreMap = new Map();
+        for (const item of rerankRes.ranked) {
+          scoreMap.set(item.id, item);
+        }
+
+        // 重排胜出项置顶，其余候选按原粗排次序后置
+        const topRanked = [];
+        const restRanked = [];
+        for (const x of scored) {
+          if (scoreMap.has(x.row.id)) {
+            const rInfo = scoreMap.get(x.row.id);
+            topRanked.push(Object.assign({}, x, {
+              _rerank_score: rInfo.score,
+              _rerank_reason: rInfo.reason,
+            }));
+          } else {
+            restRanked.push(x);
+          }
+        }
+        topRanked.sort((a, b) => b._rerank_score - a._rerank_score);
+        // 红线保证：结果集永不比纯词面更少，无缝拼接
+        scored.length = 0;
+        scored.push(...topRanked, ...restRanked);
+      }
+    } catch (_) {
+      // fail-open：模型异常或超时，原样保留纯词面排序
+      rerankUsed = false;
+      rerankModel = null;
+    }
+  }
+
   const out = scored.slice(0, limit).map((x) => ({
     id: x.row.id,
     project: x.row.project,
@@ -598,6 +751,8 @@ async function memorySearch(client, cfg, args) {
     last_used_at: x.row.last_used_at || null,
     updated_at: x.row.updated_at,
     _hit: x.hit,
+    _rerank_score: x._rerank_score || null,
+    _rerank_reason: x._rerank_reason || null,
   }));
 
   return jsonOut({
@@ -606,6 +761,8 @@ async function memorySearch(client, cfg, args) {
     returned: out.length,
     query_rewritten: rewrittenInfo ? rewrittenInfo.rewrittenQuery : null,
     rewrite_used: Boolean(rewrittenInfo && rewrittenInfo.rewrittenQuery),
+    rerank_used: rerankUsed,
+    rerank_model: rerankModel,
     memories: out,
   });
 }
@@ -701,12 +858,41 @@ async function pitfallSave(client, cfg, args, ctx) {
   if (!rootCause) throw new Error("root_cause 不能为空");
   if (!solution) throw new Error("solution 不能为空");
 
-  const fp = (args.content_fingerprint && String(args.content_fingerprint).trim()) || fingerprint(`${project}:${component}:${symptom}`);
+  const normTags = normalizeTags(tags);
+  const fp = (args.content_fingerprint && String(args.content_fingerprint).trim()) || fingerprint(`${project}:${component}:${symptom}${normTags ? `:${normTags}` : ""}`);
   const initialRecurrence = typeof args.recurrence === "number" && args.recurrence >= 1 ? Math.floor(args.recurrence) : 1;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
 
   if (justWritten("p:" + fp)) {
     return jsonOut({ action: "NOOP", id: null, note: "刚刚写入过（写后读延迟窗口内），已忽略重复" });
+  }
+
+  // A③ 踩坑优先：若 memories 表中存在该问题的冗余记忆，软失效之（写 invalid_at，绝不物理删除）
+  try {
+    const memRows = rowsOf(await client.list("memories", { project, lifecycle_status: "active", limit: FETCH_LIMIT }));
+    const normSym = normalizeSemanticText(symptom);
+    const supersededMems = memRows.filter((m) => {
+      const mTitle = normalizeSemanticText(m.title);
+      if (mTitle && (mTitle === normSym || mTitle.includes(normSym) || normSym.includes(mTitle))) return true;
+      const tTok = tokenize(m.title);
+      const sTok = tokenize(symptom);
+      if (overlapCoefficient(tTok.tokens, sTok.tokens) >= 0.5 || jaccardSimilarity(tTok.tokens, sTok.tokens) >= 0.3) {
+        return true;
+      }
+      return isSemanticallySimilar(m.title, m.content || m.full_text, symptom, solution || rootCause);
+    });
+    for (const oldMem of supersededMems) {
+      try {
+        await client.update("memories", oldMem.id, {
+          lifecycle_status: "superseded",
+          invalid_at: now,
+          invalid_reason: "superseded_by_pitfall",
+          updated_at: now,
+        });
+      } catch (_) {}
+    }
+  } catch (_) {
+    // fail-open
   }
 
   const exist = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT })).filter(
@@ -773,8 +959,62 @@ async function pitfallSearch(client, cfg, args) {
     .filter((x) => x.hit > 0)
     .sort((a, b) => b.hit - a.hit || (Number(b.row.recurrence) || 0) - (Number(a.row.recurrence) || 0));
 
-  const out = scored.slice(0, limit).map((x) => Object.assign({}, x.row, { _hit: x.hit }));
-  return jsonOut({ total_pitfalls: all.length, matched: scored.length, returned: out.length, pitfalls: out });
+  // 检索增强：调用模型重排候选踩坑
+  let rerankUsed = false;
+  let rerankModel = null;
+  const shouldRerank = (args.search_rerank !== false) && (cfg.search_rerank !== false);
+  if (shouldRerank && args.query && scored.length >= 1) {
+    try {
+      const candidatePool = scored.slice(0, Math.max(limit * 2, 20));
+      const rerankRes = await rerankSearchResultsWithModel({
+        query: String(args.query),
+        candidates: candidatePool.map((x) => x.row),
+        options: cfg,
+        maxTop: limit,
+      });
+      if (rerankRes && Array.isArray(rerankRes.ranked) && rerankRes.ranked.length > 0) {
+        rerankUsed = true;
+        rerankModel = rerankRes.modelUsed;
+        const scoreMap = new Map();
+        for (const item of rerankRes.ranked) {
+          scoreMap.set(item.id, item);
+        }
+        const topRanked = [];
+        const restRanked = [];
+        for (const x of scored) {
+          if (scoreMap.has(x.row.id)) {
+            const rInfo = scoreMap.get(x.row.id);
+            topRanked.push(Object.assign({}, x, {
+              _rerank_score: rInfo.score,
+              _rerank_reason: rInfo.reason,
+            }));
+          } else {
+            restRanked.push(x);
+          }
+        }
+        topRanked.sort((a, b) => b._rerank_score - a._rerank_score);
+        scored.length = 0;
+        scored.push(...topRanked, ...restRanked);
+      }
+    } catch (_) {
+      rerankUsed = false;
+      rerankModel = null;
+    }
+  }
+
+  const out = scored.slice(0, limit).map((x) => Object.assign({}, x.row, {
+    _hit: x.hit,
+    _rerank_score: x._rerank_score || null,
+    _rerank_reason: x._rerank_reason || null,
+  }));
+  return jsonOut({
+    total_pitfalls: all.length,
+    matched: scored.length,
+    returned: out.length,
+    rerank_used: rerankUsed,
+    rerank_model: rerankModel,
+    pitfalls: out,
+  });
 }
 
 /* 单条读取（CCR 展开用） */
@@ -855,6 +1095,433 @@ async function memoryForget(client, cfg, args) {
     note: "已软失效（写 invalid_at），记录保留可追溯，中间件不再注入" });
 }
 
+/* 方案 B：定期「记忆体检」（只读建议卡片，人工批准才执行，软删除不物理删）
+ * 规模化支持：增量游标 (last_audit_cursor)、时间窗口 (since_days) 与分批断点续跑，防范全量数万条扫描
+ */
+async function memoryAudit(client, cfg, args, ctx) {
+  const project = String(args.project || (cfg && cfg.project) || "global").trim();
+  const limit = Math.max(1, Math.min(Number(args.limit) || 50, 200));
+  const batchSize = Math.max(5, Math.min(Number(args.batch_size) || 25, 50));
+  const isApply = args.apply === true;
+  const approvedCards = Array.isArray(args.approved_cards) ? args.approved_cards : [];
+  const applyAll = args.apply_all === true;
+
+  // 规模化增量游标解析
+  const isIncremental = args.incremental !== false && !isApply && args.full !== true;
+  let cursor = isIncremental ? getAuditCursor(project) : { last_id: Number(0), last_updated_at: "", reviewed_count: 0 };
+  if (args.since_id != null && Number(args.since_id) > 0) {
+    cursor = { last_id: Number(args.since_id), last_updated_at: "", reviewed_count: 0 };
+  }
+  if (args.full === true) {
+    clearAuditCursor(project);
+    cursor = { last_id: Number(0), last_updated_at: "", reviewed_count: 0 };
+  }
+
+  // 构建查询参数（支持断点续跑、时间窗与精简投影）
+  const memQueryParams = {
+    project,
+    lifecycle_status: "active",
+    limit,
+    columns: [
+      "id",
+      "project",
+      "category",
+      "scope_level",
+      "client",
+      "origin",
+      "title",
+      "content",
+      "full_text",
+      "tags",
+      "confidence_score",
+      "recurrence",
+      "content_fingerprint",
+      "updated_at",
+      "lifecycle_status",
+    ],
+  };
+
+  const pitQueryParams = {
+    project,
+    limit,
+  };
+
+  // 增量模式：若存在已审阅最大 ID 且非 apply 阶段，只查大于该游标的记录
+  if (isIncremental && cursor.last_id > 0 && !isApply) {
+    memQueryParams.since_id = cursor.last_id;
+    memQueryParams.order_by = "id ASC";
+    pitQueryParams.since_id = cursor.last_id;
+    pitQueryParams.order_by = "id ASC";
+  } else {
+    memQueryParams.order_by = "updated_at DESC";
+    pitQueryParams.order_by = "updated_at DESC";
+  }
+
+  // 时间窗下推：since_days 仅体检最近 N 天变动的记录
+  if (args.since_days && Number(args.since_days) > 0) {
+    const d = new Date(Date.now() - Number(args.since_days) * 86400000);
+    const timeStr = d.toISOString().slice(0, 19).replace("T", " ");
+    memQueryParams.updated_after = timeStr;
+    pitQueryParams.updated_after = timeStr;
+  }
+
+  // 1. 读取数据库活跃记忆与踩坑记录（只读！扫描阶段绝不修改数据库任何行）
+  const memories = rowsOf(await client.list("memories", memQueryParams))
+    .filter((r) => r.lifecycle_status === "active" && !r.invalid_at);
+
+  const pitfalls = rowsOf(await client.list("pitfalls", pitQueryParams))
+    .filter((r) => !r.invalid_at);
+
+  const cards = [];
+  let cardSeq = 1;
+
+  // 2. 重复组检测（同指纹、同归一化标题或高语义相似度，含跨类别）
+  const visitedMem = new Set();
+  for (let i = 0; i < memories.length; i++) {
+    const a = memories[i];
+    if (visitedMem.has(a.id)) continue;
+    const group = [a];
+    for (let j = i + 1; j < memories.length; j++) {
+      const b = memories[j];
+      if (visitedMem.has(b.id)) continue;
+
+      const sameFp = a.content_fingerprint && b.content_fingerprint && a.content_fingerprint === b.content_fingerprint;
+      const sameTitle = normalizeSemanticText(a.title) === normalizeSemanticText(b.title);
+      const similar = isSemanticallySimilar(a.title, a.content || a.full_text, b.title, b.content || b.full_text);
+
+      if (sameFp || sameTitle || similar) {
+        group.push(b);
+        visitedMem.add(b.id);
+      }
+    }
+    if (group.length > 1) {
+      visitedMem.add(a.id);
+      // 优选主记录（recurrence 最高或最新更新）
+      group.sort((x, y) => (Number(y.recurrence) || 1) - (Number(x.recurrence) || 1) || (new Date(y.updated_at) - new Date(x.updated_at)));
+      const primary = group[0];
+      const duplicates = group.slice(1);
+      cards.push({
+        card_id: `audit-card-${cardSeq++}`,
+        type: "duplicate_group",
+        title: `发现 ${group.length} 条重复/变体记忆：「${primary.title}」`,
+        description: `包含 ID [${group.map((g) => g.id).join(", ")}]，表达相同或高度相似事实。建议保留主记录并软删除多余副本。`,
+        primary_item: {
+          id: primary.id,
+          category: primary.category,
+          title: primary.title,
+          recurrence: primary.recurrence,
+          content: primary.content,
+        },
+        duplicate_items: duplicates.map((d) => ({
+          id: d.id,
+          category: d.category,
+          title: d.title,
+          recurrence: d.recurrence,
+          reason: d.category !== primary.category ? `跨类别重复 (原分类: ${d.category})` : "语义变体/重复记录",
+        })),
+        suggested_action: "MERGE_AND_SOFT_DELETE",
+        merge_target_id: primary.id,
+        soft_delete_ids: duplicates.map((d) => d.id),
+        approved: false,
+      });
+    }
+  }
+
+  // 3. 踩坑与记忆交叉重合检查（踩坑优先）
+  for (const p of pitfalls) {
+    const pSym = normalizeSemanticText(p.symptom);
+    const overlappingMems = memories.filter((m) => {
+      if (visitedMem.has(m.id)) return false;
+      const mTitle = normalizeSemanticText(m.title);
+      if (mTitle && (mTitle === pSym || mTitle.includes(pSym) || pSym.includes(mTitle))) return true;
+      return isSemanticallySimilar(m.title, m.content || m.full_text, p.symptom, p.solution || p.root_cause);
+    });
+    if (overlappingMems.length > 0) {
+      cards.push({
+        card_id: `audit-card-${cardSeq++}`,
+        type: "cross_table_overlap",
+        title: `踩坑优先建议：组件 [${p.component}] 的踩坑在记忆表中存在冗余副本`,
+        description: `踩坑记录 ID=${p.id} 包含现象/根因/解法三要素，比普通记忆更完整。建议以踩坑表为准，将记忆表中的 ${overlappingMems.length} 条冗余记录软失效。`,
+        primary_item: {
+          table: "pitfalls",
+          id: p.id,
+          component: p.component,
+          symptom: p.symptom,
+          solution: p.solution,
+        },
+        duplicate_items: overlappingMems.map((m) => ({
+          table: "memories",
+          id: m.id,
+          title: m.title,
+          category: m.category,
+        })),
+        suggested_action: "PREFER_PITFALL_SOFT_DELETE_MEMORIES",
+        soft_delete_memories_ids: overlappingMems.map((m) => m.id),
+        approved: false,
+      });
+    }
+  }
+
+  // 4. 高频踩坑提升准则 (High-Frequency Pitfalls -> Principle Promotion)
+  for (const p of pitfalls) {
+    const rec = Number(p.recurrence) || 1;
+    if (rec >= 3) {
+      cards.push({
+        card_id: `audit-card-${cardSeq++}`,
+        type: "principle_promotion",
+        title: `高频踩坑提升建议：[${p.component}] 已复发 ${rec} 次`,
+        description: `组件 ${p.component} 的问题「${p.symptom.slice(0, 50)}」累计发生 ${rec} 次，属于系统性高频痛点，建议提炼为全局行为准则 (principle) 置顶注入，防患于未然。`,
+        source_pitfall: {
+          id: p.id,
+          component: p.component,
+          symptom: p.symptom,
+          root_cause: p.root_cause,
+          solution: p.solution,
+          recurrence: rec,
+        },
+        suggested_principle: {
+          project,
+          category: "principle",
+          title: `禁止 ${p.component} 踩坑：${p.symptom.slice(0, 30)}`,
+          content: `【高频避坑准则】对于组件 ${p.component}，严禁引发「${p.symptom}」。根因分析：${p.root_cause}。标准解决方案：${p.solution}。`,
+          tags: p.tags ? `${p.tags}, principle, auto_promoted` : "principle, auto_promoted",
+        },
+        suggested_action: "PROMOTE_TO_PRINCIPLE",
+        approved: false,
+      });
+    }
+  }
+
+  // 4.5. 在线模型增强审阅（独立 audit_model 优先，留空回退 extract_model；使用 Memory 客户端标识）
+  let modelAuditResult = null;
+  const auditOptions = Object.assign({}, cfg, args);
+  try {
+    modelAuditResult = await auditMemoriesWithModel({
+      memories,
+      pitfalls,
+      options: auditOptions,
+    });
+    if (modelAuditResult && modelAuditResult.result) {
+      const mr = modelAuditResult.result;
+      if (Array.isArray(mr.duplicate_groups)) {
+        for (const dg of mr.duplicate_groups) {
+          const pId = Number(dg.primary_id);
+          const dupIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
+          const alreadyCovered = cards.some((c) => c.type === "duplicate_group" && (c.primary_item.id === pId || c.soft_delete_ids?.includes(pId)));
+          if (!alreadyCovered && pId && dupIds.length > 0) {
+            const pItem = memories.find((m) => m.id === pId);
+            const dItems = memories.filter((m) => dupIds.includes(m.id));
+            if (pItem && dItems.length > 0) {
+              cards.push({
+                card_id: `audit-card-${cardSeq++}`,
+                type: "duplicate_group",
+                title: `[模型审阅] ${dg.title || `发现重复记忆：「${pItem.title}」`}`,
+                description: dg.reason || `模型 (${modelAuditResult.modelUsed}) 判定 ID [${pId}, ${dupIds.join(", ")}] 表达相同事实，建议合并。`,
+                primary_item: {
+                  id: pItem.id,
+                  category: pItem.category,
+                  title: pItem.title,
+                  recurrence: pItem.recurrence,
+                  content: pItem.content,
+                },
+                duplicate_items: dItems.map((d) => ({
+                  id: d.id,
+                  category: d.category,
+                  title: d.title,
+                  recurrence: d.recurrence,
+                  reason: "模型语义判定重复",
+                })),
+                suggested_action: "MERGE_AND_SOFT_DELETE",
+                merge_target_id: pItem.id,
+                soft_delete_ids: dItems.map((d) => d.id),
+                approved: false,
+                source_model: modelAuditResult.modelUsed,
+              });
+            }
+          }
+        }
+      }
+    }
+  } catch (_) {
+    // fail-open: 模型异常或超时不影响规则输出的卡片
+  }
+
+  // 5. 若传入了 apply/approved 且有人工批准：才执行软删除与合并（绝不物理删除）
+  if (isApply && (applyAll || approvedCards.length > 0)) {
+    const appliedCards = [];
+    const now = nowSql();
+    for (const card of cards) {
+      if (!applyAll && !approvedCards.includes(card.card_id)) continue;
+      if (card.type === "duplicate_group" && card.soft_delete_ids) {
+        for (const sid of card.soft_delete_ids) {
+          try {
+            await client.update("memories", sid, {
+              invalid_at: now,
+              lifecycle_status: "invalid",
+              invalid_reason: `audit_merge_into_${card.merge_target_id}`,
+              updated_at: now,
+            });
+          } catch (_) {}
+        }
+        if (card.merge_target_id) {
+          try {
+            const targetRow = memories.find((m) => m.id === card.merge_target_id);
+            const nextRec = (Number(targetRow?.recurrence) || 1) + card.soft_delete_ids.length;
+            await client.update("memories", card.merge_target_id, {
+              recurrence: nextRec,
+              updated_at: now,
+            });
+          } catch (_) {}
+        }
+        card.approved = true;
+        appliedCards.push(card.card_id);
+      } else if (card.type === "cross_table_overlap" && card.soft_delete_memories_ids) {
+        for (const sid of card.soft_delete_memories_ids) {
+          try {
+            await client.update("memories", sid, {
+              invalid_at: now,
+              lifecycle_status: "invalid",
+              invalid_reason: `superseded_by_pitfall_${card.primary_item.id}`,
+              updated_at: now,
+            });
+          } catch (_) {}
+        }
+        card.approved = true;
+        appliedCards.push(card.card_id);
+      } else if (card.type === "principle_promotion" && card.suggested_principle) {
+        try {
+          await client.create("memories", {
+            project: card.suggested_principle.project,
+            category: "principle",
+            scope_level: "project",
+            client: "audit",
+            origin: "tool",
+            title: card.suggested_principle.title,
+            content: card.suggested_principle.content,
+            full_text: card.suggested_principle.content,
+            tags: card.suggested_principle.tags,
+            content_fingerprint: semanticFingerprint(
+              card.suggested_principle.project,
+              "principle",
+              card.suggested_principle.title,
+              card.suggested_principle.content,
+              card.suggested_principle.tags
+            ),
+            confidence_score: 1.0,
+            lifecycle_status: "active",
+            superseded_by_id: null,
+            revision: 1,
+            recurrence: 1,
+            retrieval_count: 0,
+            invalid_at: null,
+            invalid_reason: "",
+            expires_at: null,
+            last_used_at: null,
+            created_at: now,
+            updated_at: now,
+          });
+          card.approved = true;
+          appliedCards.push(card.card_id);
+        } catch (_) {}
+      }
+    }
+    return jsonOut({
+      action: "AUDIT_APPLIED",
+      project,
+      applied_cards: appliedCards,
+      applied_count: appliedCards.length,
+      data_changed: true,
+      note: `已成功执行 ${appliedCards.length} 项审阅建议，所有被清理项均已安全软失效（写 invalid_at），绝无物理删除。`,
+    });
+  }
+
+  const maxMemId = memories.reduce((max, r) => Math.max(max, Number(r.id) || 0), cursor.last_id || 0);
+  const maxPitId = pitfalls.reduce((max, r) => Math.max(max, Number(r.id) || 0), cursor.last_id || 0);
+  const newCursorId = Math.max(maxMemId, maxPitId);
+  if (isIncremental && newCursorId > (cursor.last_id || 0) && !isApply) {
+    try {
+      saveAuditCursor(project, {
+        last_id: newCursorId,
+        last_updated_at: nowSql(),
+        reviewed_count: (cursor.reviewed_count || 0) + memories.length + pitfalls.length,
+      });
+    } catch (_) {}
+  }
+
+  const auditReport = {
+    action: "AUDIT_REPORT",
+    project,
+    incremental: isIncremental,
+    cursor: {
+      previous_last_id: cursor.last_id || 0,
+      current_last_id: newCursorId,
+      batch_size: batchSize,
+    },
+    scanned: {
+      memories: memories.length,
+      pitfalls: pitfalls.length,
+      batches: Math.ceil((memories.length + pitfalls.length) / batchSize),
+    },
+    summary: {
+      duplicate_groups: cards.filter((c) => c.type === "duplicate_group").length,
+      cross_table_overlaps: cards.filter((c) => c.type === "cross_table_overlap").length,
+      principle_promotions: cards.filter((c) => c.type === "principle_promotion").length,
+      total_cards: cards.length,
+    },
+    cards,
+    data_changed: false,
+    note: "记忆体检完成。已生成审阅建议卡片，未对数据库进行任何修改（数据0变动）。请核对建议卡片后人工批准执行。",
+  };
+
+  try {
+    rememberAuditState({
+      last_audit_at: nowSql(),
+      last_summary: auditReport.summary,
+    });
+  } catch (_) {}
+
+  return jsonOut(auditReport);
+}
+
+const AUDIT_INTERVAL_MS = {
+  daily: 24 * 60 * 60 * 1000,
+  weekly: 7 * 24 * 60 * 60 * 1000,
+  monthly: 30 * 24 * 60 * 60 * 1000,
+};
+
+let _auditTimer = null;
+let _auditSchedulerStarted = false;
+
+async function checkScheduledAudit(client, cfg) {
+  const interval = (cfg && (cfg.audit_interval || cfg.auditInterval)) || "off";
+  const intervalMs = AUDIT_INTERVAL_MS[interval];
+  if (!intervalMs) return null;
+
+  const state = lookupAuditState();
+  const lastTime = state.last_audit_at ? new Date(state.last_audit_at).getTime() : 0;
+  if (Date.now() - lastTime < intervalMs) {
+    return { skipped: true, reason: "interval_not_reached", last_audit_at: state.last_audit_at };
+  }
+
+  try {
+    const res = await memoryAudit(client, cfg, { project: cfg.project || "global", apply: false });
+    return res;
+  } catch (err) {
+    console.error("[memory-hub] checkScheduledAudit error:", (err && err.message) || err);
+    return null;
+  }
+}
+
+function ensureAuditScheduler(client, cfg) {
+  if (_auditSchedulerStarted) return;
+  _auditSchedulerStarted = true;
+  checkScheduledAudit(client, cfg).catch(() => {});
+  _auditTimer = setInterval(() => {
+    checkScheduledAudit(client, cfg).catch(() => {});
+  }, 10 * 60 * 1000);
+  if (_auditTimer && _auditTimer.unref) _auditTimer.unref();
+}
+
 /* ================================================================== *
  * 工具清单（MCP 名 = magpie-memory-hub_<name>）
  * ================================================================== */
@@ -889,7 +1556,7 @@ const TOOLS = {
 
   memory_search: {
     description:
-      "搜索长期记忆。关键词命中：标题(5)/标签(3)/正文(1)，再按置信度·访问热度·新鲜度排序。回答历史相关问题前先调用它。",
+      "搜索长期记忆。支持关键词粗排（标题5/标签3/正文1）+ 在线模型语义增强重排(rerank)，按置信度·访问热度·新鲜度综合排序。回答历史相关问题前先调用它。",
     args: {
       type: "object",
       properties: {
@@ -901,6 +1568,7 @@ const TOOLS = {
         origin: { type: "string", enum: ["tool", "inline", "harvest"], description: "限定产生方式" },
         include_history: { type: "boolean", description: "是否包含已被 superseded 的历史版本" },
         limit: { type: "integer", description: "返回条数，默认 10，最大 50" },
+        search_rerank: { type: "boolean", description: "是否使用在线模型进行语义相关度重排与挑选（默认 true，遇到故障 fail-open 回退纯词面）" },
       },
     },
     run: (args, ctx) => memorySearch(ctx._client, ctx._cfg, args),
@@ -956,6 +1624,27 @@ const TOOLS = {
     run: (args, ctx) => memoryForget(ctx._client, ctx._cfg, args),
   },
 
+  memory_audit: {
+    description:
+      "记忆体检：对库内活跃记忆与踩坑记录进行质量审阅与语义查重，输出审阅建议卡片（重复组、跨表踩坑优先、高频踩坑提升准则）。支持增量游标 (last_audit_cursor) 与时间窗分批断点续跑，防止上万条全量扫描；默认只出建议绝不动数据（数据0变动）；经人工批准后（apply=true）执行安全软删除（写 invalid_at），绝不物理删。",
+    args: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "限定项目，默认 global" },
+        limit: { type: "integer", description: "审阅条数上限，默认 50，最大 200" },
+        batch_size: { type: "integer", description: "分批大小，默认 25" },
+        incremental: { type: "boolean", description: "是否使用增量游标扫描（默认 true，断点续跑避免扫描上万条已审记录）" },
+        since_days: { type: "integer", description: "仅体检最近 N 天有变动的记录（可选，下推至数据库索引过滤）" },
+        since_id: { type: "integer", description: "指定起始游标 ID（可选）" },
+        full: { type: "boolean", description: "是否强制从头全量扫描并重置游标（默认 false）" },
+        apply: { type: "boolean", description: "是否执行批准的卡片建议（默认 false 只出建议不动数据）" },
+        approved_cards: { type: "array", items: { type: "string" }, description: "人工批准执行的 card_id 列表" },
+        apply_all: { type: "boolean", description: "是否一键执行全部建议（需明确指定）" },
+      },
+    },
+    run: (args, ctx) => memoryAudit(ctx._client, ctx._cfg, args, ctx),
+  },
+
   pitfall_save: {
     description: "记录工程踩坑（现象/根因/解法）。相同指纹→复发次数+1，不重复入库。",
     args: {
@@ -979,7 +1668,7 @@ const TOOLS = {
   },
 
   pitfall_search: {
-    description: "检索已记录的工程踩坑，避免重复踩同一个坑。",
+    description: "检索已记录的工程踩坑，避免重复踩同一个坑。支持在线模型语义增强重排(rerank)。",
     args: {
       type: "object",
       properties: {
@@ -988,6 +1677,7 @@ const TOOLS = {
         client: { type: "string", description: "限定客户端来源" },
         component: { type: "string", description: "限定组件" },
         limit: { type: "integer", description: "返回条数，默认 10" },
+        search_rerank: { type: "boolean", description: "是否使用在线模型进行语义重排（默认 true）" },
       },
     },
     run: (args, ctx) => pitfallSearch(ctx._client, ctx._cfg, args),
@@ -1166,8 +1856,9 @@ const TOOLS = {
  * ================================================================== */
 
 export const MagpieMemoryHub = async (input, options) => {
-  const cfg = readOptions(options);
-  const client = (options && (options._client || options.client)) || makeClient(cfg);
+  const mergedOpts = Object.assign({}, input && typeof input === "object" ? input : {}, options && typeof options === "object" ? options : {});
+  const cfg = readOptions(mergedOpts);
+  const client = (mergedOpts && (mergedOpts._client || mergedOpts.client)) || makeClient(cfg);
 
   // 同步将当前库的前缀解析状态写入 _status.js，供设置页即时只读展示真实库名
   try {
@@ -1221,6 +1912,14 @@ export const MagpieMemoryHub = async (input, options) => {
     }).catch((e) => {
       console.error("[memory-hub] auto_harvest 失败：" + String((e && e.message) || e));
     });
+  }
+
+  /* ---- audit_interval 定时自动体检 ----
+   * 宿主长驻进程定期检查上次体检时间是否达到设定间隔（daily / weekly / monthly）。
+   * 默认 off，关闭时不执行任何后台操作；开启时仅产出审阅卡片，绝不自动删改数据。 */
+  const auditInterval = cfg.audit_interval || cfg.auditInterval || (options && options.audit_interval) || "off";
+  if (auditInterval !== "off" && !isTestMode()) {
+    ensureAuditScheduler(client, cfg);
   }
 
   const tool = {};
