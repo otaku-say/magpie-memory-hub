@@ -736,11 +736,11 @@ export function r2Guide() {
     ok: true,
     endpoint: "Cloudflare R2（由 NoCodeBackend 代管，S3 兼容，零出网费）",
     capabilities: {
-      setup: "r2_setup —— 创建 bucket 并配置 CORS；**会用真实上传验证**，不采信 NCB 的返回值",
-      setup_storage: "storage_setup —— 同上（别名）",
-      upload: "r2_upload —— 文本/二进制都可；有 Secret Key 时走 REST multipart，更省",
-      list: "r2_list —— 列出桶内对象（走 Secret Key 的 REST；MCP 没有这个接口）",
-      delete: 'r2_delete —— 删除对象，需 confirm="DELETE"（走 Secret Key 的 REST）',
+      setup: "storage_setup —— 创建 bucket 并配置 CORS；**会用真实上传验证**，不采信 NCB 的返回值",
+      check: "r2_check —— 检测已配置或已挂载 R2 存储通道与凭据真实可用性（只读探针测试）",
+      upload: "storage_upload —— 文本/二进制都可；有 Secret Key 时走 REST multipart 更省，亦可走 MCP",
+      list: "storage_list —— 列出桶内对象（走 Secret Key 的 REST；需数据库 Secret Key）",
+      delete: 'storage_delete —— 删除对象，需 confirm="DELETE"（走 Secret Key 的 REST）',
       read: "拿到 url 后直接 GET（bucket 需开启公开访问或绑定自定义域名）",
     },
     not_available: [
@@ -752,7 +752,7 @@ export function r2Guide() {
       "若数据库由本插件创建，Secret Key 会随创建自动取得并保存，无需手填。",
     troubleshooting: {
       "bucket_created: false 但 ok: true":
-        "NoCodeBackend 会在实际失败时也返回 ok:true。以 r2_setup 返回的 verdict/probe 为准，不要看 ncb_reported。",
+        "NoCodeBackend 会在实际失败时也返回 ok:true。以 storage_setup 返回的 verdict/probe 为准，不要看 ncb_reported。",
       "sslv3 alert handshake failure":
         "NCB 手里的 Cloudflare 凭据已失效（多半是密钥在 CF 轮换过）。" +
         "必须去 NCB 控制台的 R2 Storage 页面更新该库的连接——插件改不了账号层保存的凭据。",

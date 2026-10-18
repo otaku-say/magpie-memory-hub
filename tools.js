@@ -1078,20 +1078,21 @@ const TOOLS = {
   },
 
   storage_guide: {
-    description: "说明 R2 存储的可用能力与**不可用**能力（本平台未提供列举对象、删除对象、下载用 presigned URL），以及推荐的「上传 + 存入记忆」工作流。不确定怎么用 R2 时先调这个。",
+    description: "说明 R2 存储的可用能力（上传 storage_upload、列举 storage_list、删除 storage_delete、公网读取）与不可用能力（平台未提供服务端生成下载用 presigned URL、无法修改 NCB 账号层凭据），以及推荐的「上传 + 存入记忆」工作流。不确定怎么用 R2 时先调这个。",
     args: { type: "object", properties: {} },
     run: (args, ctx) => storageGuide(ctx._cfg),
   },
 
   harvest_gateway: {
-    description: "增量扫描 Magpie 网关录制的对话落盘（GatewayConversations），提炼环境事实、架构决策与故障规避经验存入记忆库。数据源于本地磁盘，可在 Magpie 设置中开启或关闭 GatewayConversations 录制。",
+    description: "增量扫描 Magpie 网关录制的对话落盘（GatewayConversations），使用在线大模型提炼环境事实、架构决策与故障规避经验存入记忆库。⚠️ 关键前置条件：必须在插件设置中配置在线提炼模型（extract_model）或在参数中指定 extract_model；未配置时将安全跳过提炼，不会产出记忆。可在 Magpie 设置中开启或关闭 GatewayConversations 录制。",
     args: {
       type: "object",
       properties: {
         dir: { type: "string", description: "自定义对话落盘目录路径（可选，默认自动探测）" },
         force_rescan: { type: "boolean", description: "是否强制重新扫描所有文件（忽略增量状态，默认 false）" },
         project: { type: "string", description: "项目命名空间（可选，默认 global）" },
-        min_evidence: { type: "number", description: "证据累计门禁阈值（默认 3；规则首次观察时不落盘，累计达到该次数才入库）" },
+        extract_model: { type: "string", description: "指定的在线提炼模型 ID（如 gpt-4o-mini、claude-3-5-sonnet，默认取插件设置页配置；未配置时安全跳过）" },
+        min_evidence: { type: "number", description: "证据累计门禁阈值（默认 3；首次观察时不落盘，累计达到该次数才入库）" },
       },
     },
     run: (args, ctx) => harvestGateway(args, {

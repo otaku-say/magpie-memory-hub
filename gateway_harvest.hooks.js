@@ -1228,15 +1228,16 @@ export async function testExtractionModel(options = {}) {
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.timeout_ms) || 12000;
+  // 弃用通用 timeout_ms，采用专名；检测为手动触发，默认放宽至 30 秒 (30000ms)
+  const timeoutMs = Number(options.model_check_timeout_ms || options.extract_timeout_ms) || 30000;
   const doFetch = options._fetch || globalThis.fetch;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   const start = Date.now();
+  const url = `${baseUrl}/v1/chat/completions`;
   try {
-    const url = `${baseUrl}/v1/chat/completions`;
     const res = await doFetch(url, {
       method: "POST",
       headers: {
@@ -1250,6 +1251,7 @@ export async function testExtractionModel(options = {}) {
           { role: "user", content: "[user]: 这个项目统一使用 pnpm 管理依赖。\n[assistant]: 好的，已记录项目环境规范。" },
         ],
         temperature: 0.1,
+        stream: false, // 显式禁用流式传输，提升响应速度并杜绝 chunk 挂起
       }),
       signal: controller.signal,
     });
@@ -1261,9 +1263,11 @@ export async function testExtractionModel(options = {}) {
         ok: false,
         model,
         endpoint: "/v1/chat/completions",
-        status: res.status,
+        usedUrl: url,
+        timeoutMs,
         latencyMs,
-        error: `网关返回 HTTP ${res.status}: ${errText.slice(0, 200)}`,
+        status: res.status,
+        error: `网关返回 HTTP ${res.status}: ${errText.slice(0, 200)} (URL: ${url}, 耗时: ${latencyMs}ms)`,
       };
     }
 
@@ -1275,6 +1279,8 @@ export async function testExtractionModel(options = {}) {
       ok: true,
       model,
       endpoint: "/v1/chat/completions",
+      usedUrl: url,
+      timeoutMs,
       latencyMs,
       itemCount: items.length,
       sampleResult: items,
@@ -1282,12 +1288,23 @@ export async function testExtractionModel(options = {}) {
     };
   } catch (err) {
     const latencyMs = Date.now() - start;
+    const isAborted = (err && (err.name === "AbortError" || /aborted/i.test(err.message))) || controller.signal.aborted;
+    const errorType = isAborted ? (latencyMs >= timeoutMs - 500 ? "TIMEOUT" : "ABORTED") : "REQUEST_ERROR";
+    const detailMsg = isAborted
+      ? (latencyMs >= timeoutMs - 500
+          ? `调用超时 (${latencyMs}ms > 限制 ${timeoutMs}ms)`
+          : `请求被中断 (${(err && err.message) || "Aborted"}, 耗时: ${latencyMs}ms)`)
+      : ((err && err.message) || String(err));
+
     return {
       ok: false,
       model,
       endpoint: "/v1/chat/completions",
+      usedUrl: url,
+      timeoutMs,
       latencyMs,
-      error: `请求异常: ${(err && err.message) || String(err)}`,
+      errorType,
+      error: `请求异常: ${detailMsg} (URL: ${url})`,
     };
   } finally {
     clearTimeout(timer);
@@ -1307,12 +1324,14 @@ export async function testClassificationModel(options = {}) {
   const endpoint = String(options.classify_endpoint || "auto").trim().toLowerCase();
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.timeout_ms) || 8000;
+  // 弃用通用 timeout_ms，采用专名；默认放宽至 15 秒 (15000ms)
+  const timeoutMs = Number(options.model_check_timeout_ms || options.classify_timeout_ms) || 15000;
   const doFetch = options._fetch || globalThis.fetch;
 
   const testDialogue = "[user]: 我们已决定在生产环境采用 PostgreSQL 替代 MySQL。\n[assistant]: 好的，已记录技术选型。";
 
   const start = Date.now();
+  const url = endpoint === "systemone" ? `${baseUrl}/v1/systemone` : `${baseUrl}/v1/chat/completions`;
   try {
     const res = await classifyDialogueWithOnlineModel(testDialogue, {
       classify_model: model,
@@ -1329,8 +1348,10 @@ export async function testClassificationModel(options = {}) {
         ok: false,
         model,
         endpoint,
+        usedUrl: url,
+        timeoutMs,
         latencyMs,
-        error: `分类器调用异常: ${res.reason}`,
+        error: `分类器调用异常: ${res.reason} (URL: ${url}, 耗时: ${latencyMs}ms)`,
       };
     }
 
@@ -1339,8 +1360,10 @@ export async function testClassificationModel(options = {}) {
         ok: false,
         model,
         endpoint,
+        usedUrl: url,
+        timeoutMs,
         latencyMs,
-        error: `网关返回 HTTP 错误: ${res.reason}`,
+        error: `网关返回 HTTP 错误: ${res.reason} (URL: ${url}, 耗时: ${latencyMs}ms)`,
       };
     }
 
@@ -1348,6 +1371,8 @@ export async function testClassificationModel(options = {}) {
       ok: true,
       model,
       effectiveEndpoint: res.endpoint || endpoint,
+      usedUrl: url,
+      timeoutMs,
       latencyMs,
       score: res.score,
       shouldHarvest: res.shouldHarvest,
@@ -1355,12 +1380,16 @@ export async function testClassificationModel(options = {}) {
     };
   } catch (err) {
     const latencyMs = Date.now() - start;
+    const isAborted = (err && (err.name === "AbortError" || /aborted/i.test(err.message)));
+    const detailMsg = isAborted ? `调用超时 (${latencyMs}ms > 限制 ${timeoutMs}ms)` : ((err && err.message) || String(err));
     return {
       ok: false,
       model,
       endpoint,
+      usedUrl: url,
+      timeoutMs,
       latencyMs,
-      error: `检测过程异常: ${(err && err.message) || String(err)}`,
+      error: `检测过程异常: ${detailMsg} (URL: ${url})`,
     };
   }
 }

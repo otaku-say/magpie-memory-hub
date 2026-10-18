@@ -31,7 +31,7 @@ Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记�
                     │ ③ 写入 NoCodeBackend（memories / pitfalls）         │
                     └───────────────────────────────────────────────────┘
 
-   Agent ◄──MCP── /mcp/magpie/tools （Magpie 内置，聚合本插件 22 个工具）
+   Agent ◄──MCP── /mcp/magpie/tools （Magpie 内置，聚合本插件 20 个工具）
 ```
 
 **自动记忆机制说明**：
@@ -126,7 +126,7 @@ CREATE UNIQUE INDEX idx_schema_meta_k ON schema_meta(k);
 
 > **为什么唯一索引是必须的**：NoCodeBackend 的读接口有约 2 秒的写后可见延迟，只靠「先读后写」判重，会漏掉紧邻或并发的重复写入（实测出现过指纹相同却都 active 的两行）。插件在收到 `Duplicate entry` 时会按 NOOP 处理。
 
-## MCP 工具（22 个）
+## MCP 工具（20 个）
 
 | 工具 | 说明 |
 |------|------|
@@ -149,7 +149,7 @@ CREATE UNIQUE INDEX idx_schema_meta_k ON schema_meta(k);
 | `storage_list` | 列出 R2 bucket 中的文件（需 Secret Key） |
 | `storage_delete` | 删除 R2 bucket 中的文件（需 confirm: "DELETE"） |
 | `storage_guide` | 说明 R2 存储的可用能力与推荐工作流 |
-| `harvest_gateway` | 增量扫描 Magpie 网关录制的对话落盘（GatewayConversations），提炼经验存入记忆库 |
+| `harvest_gateway` | 增量扫描 Magpie 网关录制的对话落盘（GatewayConversations），使用在线模型提炼经验存入记忆库（需配置 extract_model） |
 
 ## 离线管线
 
