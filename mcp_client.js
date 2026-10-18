@@ -81,17 +81,25 @@ function firstResult(out) {
   return rs[0] || {};
 }
 
-/** 构造 SELECT。params 只支持「已知列等值 + limit/offset」。 */
+/** 构造 SELECT。params 只支持「已知列等值 + limit/offset/order_by」。 */
 export function buildSelect(table, params) {
   const t = safeIdent(table, "table");
   const p = params || {};
   const where = [];
   for (const k of Object.keys(p)) {
-    if (k === "limit" || k === "page" || k === "offset") continue;
+    if (k === "limit" || k === "page" || k === "offset" || k === "order_by") continue;
     where.push(safeIdent(k, "column", table) + " = " + sqlValue(p[k]));
   }
   let sql = "SELECT * FROM " + t;
   if (where.length) sql += " WHERE " + where.join(" AND ");
+  if (p.order_by && typeof p.order_by === "string") {
+    const obParts = p.order_by.trim().split(/\s+/);
+    if (obParts.length >= 1) {
+      const col = safeIdent(obParts[0], "column", table);
+      const dir = obParts[1] && /^desc$/i.test(obParts[1]) ? "DESC" : "ASC";
+      sql += " ORDER BY " + col + " " + dir;
+    }
+  }
   const limRaw = String(p.limit == null ? "" : p.limit).trim();
   const limit = /^\d+$/.test(limRaw) && Number(limRaw) > 0 ? Math.floor(Number(limRaw)) : 200;
   sql += " LIMIT " + Math.min(limit, 1000);

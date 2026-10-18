@@ -33,7 +33,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { dbInit, dbReset, dbStatus, dbProvision, storageSetup, ncbCheck, secretCheck, RESET_CONFIRM } from "./db_tools.js";
 import { r2Setup, r2Check, cleanProbes } from "./r2.js";
-import { lookupRealDatabase } from "./local_state.js";
+import { lookupRealDatabase, lookupActionState, rememberActionState } from "./local_state.js";
 import { harvestGateway } from "./gateway_harvest.js";
 
 /** 插件目录下的状态文件路径（供 iframe 内设置页通过 script 标签加载）。 */
@@ -59,50 +59,24 @@ export const OPS = {
   clean_probe: "扫描 R2 中残留的探针文件并自动删除（走 REST 接口）",
   model_check: "检测在线模型连通性与可用性（实际调用提炼与判定模型并校验返回）",
   harvest_gateway: "立即扫描网关对话录制并提炼记忆",
+  sync_snapshot: "拉取最新活跃记忆快照供前端同步至中间件",
 };
 
 function statePath(fs, os, path) {
+  // 单一状态源：收敛至 ~/.magpie-memory-hub/state.json
   try {
-    return path.join(os.homedir(), STATE_DIR, STATE_FILE);
+    return path.join(os.homedir(), STATE_DIR, "state.json");
   } catch (e) {
     return null;
   }
 }
 
 function loadState(fs, p) {
-  // 返回 { ok, lastDoneId, history }；ok=false 表示读不到/读坏了
-  try {
-    if (!p || !fs.existsSync(p)) return { ok: true, lastDoneId: "", pendingId: "", history: [], missing: true };
-    const raw = fs.readFileSync(p, "utf8");
-    const o = JSON.parse(raw);
-    return {
-      ok: true,
-      lastDoneId: String(o.lastDoneId || ""),
-      // pendingId：已开始执行但结局未知（进程中途死掉）的 id
-      pendingId: String(o.pendingId || ""),
-      history: Array.isArray(o.history) ? o.history : [],
-    };
-  } catch (e) {
-    return { ok: false, lastDoneId: "", pendingId: "", history: [], err: String(e && e.message || e) };
-  }
+  return lookupActionState();
 }
 
 function saveState(fs, p, state) {
-  let tmp = null;
-  try {
-    const dir = path.dirname(p);
-    fs.mkdirSync(dir, { recursive: true });
-    // 只留最近 50 条历史，避免无限增长
-    const hist = (state.history || []).slice(-50);
-    const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
-    tmp = `${p}.tmp.${nonce}`;
-    fs.writeFileSync(tmp, JSON.stringify({ lastDoneId: state.lastDoneId, pendingId: state.pendingId || "", history: hist }, null, 2));
-    fs.renameSync(tmp, p);      // 原子替换
-    return true;
-  } catch (e) {
-    try { if (tmp && fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
-    return false;
-  }
+  return rememberActionState(state);
 }
 
 /** 读取 options 里的信标；没有或格式非法则返回 null。 */
@@ -304,9 +278,31 @@ async function execute(action, cfg, fs, sp, state, options) {
         detail: res,
       };
     }
+    else if (action.op === "sync_snapshot") {
+      let memories = [];
+      try {
+        const client = cfg && cfg.client ? cfg.client : (await import("./mcp_client.js")).makeMcpClient(cfg);
+        const resList = await client.list("memories", {
+          lifecycle_status: "active",
+          order_by: "updated_at DESC",
+          limit: 50,
+        });
+        memories = Array.isArray(resList?.data) ? resList.data : (Array.isArray(resList) ? resList : []);
+      } catch (err) {
+        memories = [];
+      }
+      result = {
+        ok: true,
+        at: Date.now(),
+        op: "sync_snapshot",
+        title: "记忆快照拉取就绪",
+        lines: [`成功拉取 ${memories.length} 条活跃记忆快照供前端同步`],
+        memories,
+      };
+    }
     else result = await dbStatus(cfg, args);
   } catch (e) {
-    result = { ok: false, error: String(e && e.message || e) };
+    result = { ok: false, op: action.op, error: String(e && e.message || e) };
   }
 
   // 写入卡片状态文件（供设置页读取）
@@ -319,6 +315,7 @@ async function execute(action, cfg, fs, sp, state, options) {
       storage_setup: "r2", r2_check: "r2", clean_probe: "r2",
       model_check: "model",
       harvest_gateway: "gateway",
+      sync_snapshot: "db",
     };
     const cardKey = CARD_OF_OP[action.op] || "ncb";
     writeCardStatus(cardKey, result, action.op);
@@ -343,6 +340,17 @@ async function execute(action, cfg, fs, sp, state, options) {
     history: (state.history || []).concat([{ id: action.id, op: action.op, at: Date.now(), ok: !!(result && result.ok) }]),
   });
   return { ran: true, op: action.op, id: action.id, executed: true, result };
+}
+
+/** 直接执行信标动作（供测试或内部直接调用） */
+export async function executeAction(action, cfg, targetDb, customStatusPath) {
+  const fsMod = await import("node:fs");
+  const osMod = await import("node:os");
+  const pathMod = await import("node:path");
+  const sp = statePath(fsMod, osMod, pathMod);
+  const state = loadState(fsMod, sp);
+  const opts = cfg && (cfg.options || cfg);
+  return await execute(action, cfg, fsMod, sp, state, opts);
 }
 
 /* ================================================================== *

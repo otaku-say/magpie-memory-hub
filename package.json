@@ -21,7 +21,6 @@
     "db_tools.js",
     "gateway_harvest.hooks.js",
     "gateway_harvest.js",
-    "harvest.py",
     "icon.svg",
     "local_state.js",
     "mcp_client.js",

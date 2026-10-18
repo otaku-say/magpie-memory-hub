@@ -23,8 +23,6 @@ import { fileURLToPath } from "node:url";
 import { lookupSecret, forgetSecret, lookupRealDatabase, rememberDatabase, rememberR2Mount, lookupR2Mount, forgetR2Mount } from "./local_state.js";
 import { explainUnknownErrorWithModel, attachAiDiagnosis } from "./online_models.js";
 
-const STATUS_JSON_PATH = fileURLToPath(new URL("./_status.json", import.meta.url));
-
 const REST_BASE = "https://api.nocodebackend.com";
 
 /* ------------------------------------------------------------------ *
@@ -346,9 +344,9 @@ export function deriveLegalBucketName(raw) {
 /**
  * 判断指定数据库实例是否已成功挂载 R2 存储通道。
  * 判据：
- *   1. 本地持久化记录（local_state.r2_mounts）：经 r2Setup 真实探针验证通过才写入；
- *   2. 平滑兼容 _status.json（若升级前曾成功挂载过）；
- *   3. 若无成功记录，无论凭据是否填写，均判定为尚未挂载（未挂载时调 upload/probe 必然报 TLS 40）。
+ *   1. 本地单一状态真相源（local_state.r2_mounts）：经 r2Setup 真实探针验证通过才写入；
+ *   2. 若无成功记录，无论凭据是否填写，均判定为尚未挂载（未挂载时调 upload/probe 必然报 TLS 40）。
+ *   注：后端逻辑严格禁止从 _status.json 视图文件反向恢复状态，彻底杜绝僵尸状态复活。
  */
 export function isR2Mounted(cfg, database, args) {
   const rawDb = String(database || (args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
@@ -359,28 +357,6 @@ export function isR2Mounted(cfg, database, args) {
   if (localRecord && localRecord.mounted === true) {
     return { mounted: true, record: localRecord, reason: "LOCAL_STATE" };
   }
-
-  // 2. 检查 _status.json（平滑兼容历史状态）
-  try {
-    const p = STATUS_JSON_PATH;
-    if (fs.existsSync(p)) {
-      const o = JSON.parse(fs.readFileSync(p, "utf8"));
-      if (o && o.r2 && o.r2.ok === true && (o.r2.op === "storage_setup" || o.r2.op === "r2_check")) {
-        const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
-        if (o.r2.database && db && norm(o.r2.database) !== norm(db)) {
-          return { mounted: false, record: null, reason: "NOT_MOUNTED" };
-        }
-        if (db) {
-          rememberR2Mount(db, {
-            bucket: o.r2.bucket_name || "",
-            public_url: o.r2.public_url || "",
-            at: o.r2.at || Date.now(),
-          });
-        }
-        return { mounted: true, record: o.r2, reason: "STATUS_JSON" };
-      }
-    }
-  } catch (_) {}
 
   return { mounted: false, record: null, reason: "NOT_MOUNTED" };
 }

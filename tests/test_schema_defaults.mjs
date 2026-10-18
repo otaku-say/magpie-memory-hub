@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (f) => readFileSync(join(ROOT, f), "utf8");
 
-const FILES = ["tools.js", "harvest.py", "schema.js", "db_tools.js", "gateway_harvest.hooks.js"];
+const FILES = ["tools.js", "gateway_harvest.js", "schema.js", "db_tools.js", "gateway_harvest.hooks.js"];
 const SRC = Object.fromEntries(FILES.map((f) => [f, read(f)]));
 
 let failed = 0;
@@ -53,10 +53,7 @@ function findFkSentinel(src, file) {
     if (t.startsWith("//") || t.startsWith("#") || t.startsWith("*")) continue;
     // JS 对象字面量： foo_id: 0      /   "foo_id": 0      /   foo_id = 0
     const js = /(?:^|[^.\w])["']?([A-Za-z_]\w*_id)["']?\s*[:=]\s*0\s*[,;)\n}]/.exec(L);
-    // Python 字典：  "foo_id": 0,
-    const py = /["']([A-Za-z_]\w*_id)["']\s*:\s*0\s*[,)/\n}]/.exec(L);
-    const m = js || py;
-    if (m && m[1] !== "id") hits.push(`${file}:${i + 1}  ${m[1]} = 0   ${t.slice(0, 70)}`);
+    if (js && js[1] !== "id") hits.push(`${file}:${i + 1}  ${js[1]} = 0   ${t.slice(0, 70)}`);
   }
   return hits;
 }
@@ -72,10 +69,10 @@ if (fkHits.length) {
 // 正向确认：该列确实是以 NULL 写的（防止「删掉了赋值」被当成通过）
 {
   const js = /superseded_by_id:\s*(null|newId|id|\w+)/.test(SRC["tools.js"]);
-  const py = /"superseded_by_id":\s*(None|new_id)/.test(SRC["harvest.py"]);
-  js && py
-    ? ok("superseded_by_id 在 tools.js 与 harvest.py 中都写 NULL/真实 id")
-    : bad(`superseded_by_id 写入方式异常（tools.js ${js ? "ok" : "缺失"} / harvest.py ${py ? "ok" : "缺失"}）`);
+  const hook = /superseded_by_id:\s*(null|newId|id|\w+)/.test(SRC["gateway_harvest.hooks.js"]);
+  js && hook
+    ? ok("superseded_by_id 在 tools.js 与 gateway_harvest.hooks.js 中都写 NULL/真实 id")
+    : bad(`superseded_by_id 写入方式异常（tools.js ${js ? "ok" : "缺失"} / hooks ${hook ? "ok" : "缺失"}）`);
 }
 
 /* ------------------------------------------------------------------ *

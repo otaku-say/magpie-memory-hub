@@ -142,7 +142,7 @@ const LEGIT_CTX = [
   /\bversion\s*[:=]\s*(?:["']|SCHEMA_|String\()/,              // 版本号常量
 ];
 const CODE_FILES = ["tools.js", "db_tools.js", "gateway_harvest.js", "gateway_harvest.hooks.js", "page_actions.js",
-                    "memory.middleware.js", "harvest.py", "schema.js"];
+                    "memory.middleware.js", "schema.js"];
 /* 反证：确认「豁免机制」不会把真 bug 一起放行（见文件末尾断言） */
 console.log("\n【旧列名残留校验（查询侧）】");
 let staleHits = [];

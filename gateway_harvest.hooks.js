@@ -38,6 +38,7 @@ import { makeMcpClient, buildSelect, buildInsert, sqlValue } from "./mcp_client.
 import {
   lookupSecret,
   lookupDatabase,
+  lookupRealDatabase,
   recordPendingEvidence,
   DEFAULT_MIN_EVIDENCE,
   enqueueHarvestItems,
@@ -403,7 +404,7 @@ export const HARVEST_SYSTEM_PROMPT = `你是一个专业的长期记忆与踩坑
     "category": "fact" | "preference" | "decision" | "pitfall",
     "title": "简明标题（20字以内，点明核心实体与动作）",
     "content": "核心事实或踩坑解法详情（必须具体，包含关键参数或报错与解法）",
-    "tags": "逗号分隔的标签（如：Magpie,CORS,config.toml）",
+    "tags": "3~5个逗号分隔的同义检索词/别名/关键词（必须包含不同表述的检索同义词，如关于数据库密码必须包含：数据库,密码,凭据,db,credential,password 等，确保用户用不同同义词搜索时均可精准命中）",
     "confidence": 0.8到1.0之间的置信度数值
   }
 - 严禁包裹 \`\`\`json 代码块，严禁输出任何 markdown 格式或额外说明文字，仅输出原始 JSON 数组。`;
@@ -506,7 +507,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
-        return { ok: false, status: res.status, errText, reason: `systemone_http_${res.status}` };
+        return { ok: false, status: res.status, errText, reason: `systemone_http_${res.status}` }; // db-col-ok: HTTP 状态码，非数据库列
       }
 
       const json = await res.json().catch(() => null);
@@ -514,7 +515,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
       if (typeof noul === "number") {
         return { ok: true, score: noul, reason: "systemone" };
       }
-      return { ok: false, status: 200, errText: "返回缺少有效 noul 打分", reason: "systemone_missing_noul" };
+      return { ok: false, status: 200, errText: "返回缺少有效 noul 打分", reason: "systemone_missing_noul" }; // db-col-ok: HTTP 状态码，非数据库列
     } finally {
       clearTimeout(timer);
     }
@@ -557,7 +558,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
-        return { ok: false, status: res.status, errText, reason: `chat_http_${res.status}` };
+        return { ok: false, status: res.status, errText, reason: `chat_http_${res.status}` }; // db-col-ok: HTTP 状态码，非数据库列
       }
 
       const json = await res.json().catch(() => null);
@@ -570,7 +571,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
       if (hasNo && !hasYes) {
         return { ok: true, score: 0.0, reason: "chat_classifier" };
       }
-      return { ok: false, status: 200, errText: "非预期判定输出: " + content.slice(0, 40), reason: "chat_invalid_output" };
+      return { ok: false, status: 200, errText: "非预期判定输出: " + content.slice(0, 40), reason: "chat_invalid_output" }; // db-col-ok: HTTP 状态码，非数据库列
     } finally {
       clearTimeout(timer);
     }
@@ -1183,11 +1184,12 @@ export async function triggerBackgroundDrain(client, options = {}) {
             const title = item.data?.title || "";
             const content = item.data?.content || item.data?.full_text || "";
 
-            // Layer ① 语义指纹查重 + Layer ② 滑动窗口语义相似度比对 (上限提升至 200)
+            // Layer ① 语义指纹查重 + Layer ② 滑动窗口语义相似度比对 (上限提升至 200，并按修改时间倒序)
             const existing = await client.list("memories", {
               project,
               category,
               lifecycle_status: "active",
+              order_by: "updated_at DESC",
               limit: 200,
             });
             const rows = Array.isArray(existing?.data) ? existing.data : (Array.isArray(existing) ? existing : []);

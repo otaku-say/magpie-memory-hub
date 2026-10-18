@@ -63,6 +63,7 @@ export function writeState(state) {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     const out = Object.assign({}, state, {
       current: typeof state.current === "string" ? state.current : "",
+      lastDoneId: typeof state.lastDoneId === "string" ? state.lastDoneId : (state.actions?.lastDoneId || ""),
       secrets: state.secrets && typeof state.secrets === "object" ? state.secrets : {},
       actions: state.actions && typeof state.actions === "object" ? state.actions : {},
       gateway_harvest: state.gateway_harvest && typeof state.gateway_harvest === "object" ? state.gateway_harvest : {},
@@ -97,6 +98,33 @@ export function lookupGatewayHarvest() {
 export function rememberGatewayHarvest(harvestState) {
   const st = readState();
   st.gateway_harvest = Object.assign({}, st.gateway_harvest || {}, harvestState || {});
+  return writeState(st);
+}
+
+/** 读回信标动作状态（单一状态源 state.json 维护） */
+export function lookupActionState() {
+  const st = readState();
+  const act = (st.actions && typeof st.actions === "object") ? st.actions : {};
+  return {
+    ok: st._ok !== false,
+    lastDoneId: String(act.lastDoneId || ""),
+    pendingId: String(act.pendingId || ""),
+    history: Array.isArray(act.history) ? act.history : [],
+    missing: !!st._missing,
+  };
+}
+
+/** 保存信标动作状态（单一状态源 state.json 维护） */
+export function rememberActionState(actionState) {
+  const st = readState();
+  const hist = (actionState && Array.isArray(actionState.history) ? actionState.history : []).slice(-50);
+  const doneId = String(actionState?.lastDoneId || "");
+  st.lastDoneId = doneId;
+  st.actions = {
+    lastDoneId: doneId,
+    pendingId: String(actionState?.pendingId || ""),
+    history: hist,
+  };
   return writeState(st);
 }
 
@@ -240,10 +268,7 @@ export function lookupRealDatabase(database) {
   // ② 从 st.current 比对
   if (st.current && norm(st.current) === target) return st.current;
 
-  // ③ 唯一真实库兜底
-  if (names.length === 1 && /^\d+_/.test(names[0])) return names[0];
-  if (st.current && /^\d+_/.test(st.current)) return st.current;
-
+  // 绝不盲目跨库篡改：如果明确指定了库名且不匹配，原样返回 want
   return want;
 }
 

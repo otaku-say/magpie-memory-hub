@@ -19,20 +19,25 @@ Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记�
 ```
                     ┌──────────────── Magpie 网关（Go 进程）────────────────┐
    Agent ──请求──▶  │ moejs 中间件（memory.middleware.js）                │
-                    │   ① 压缩历史工具输出（compress.js，纯 JS 规则）      │
-                    │   ② 检索记忆，注入上下文（按关键词+热度+新鲜度）    │
+                    │   ① 静态准则置顶与快照检索（零 I/O 兜底）           │
+                    │   ② 尾消息双向引导（主动检索+及时沉淀，保 KV-Cache） │
                     │   ③ 剥离模型回复里的 <memory> 块（改善前端呈现）   │
                     └───────────────────────┬───────────────────────────┘
                                             │ 本地录制 / 异步网关钩子
                                             ▼
                     ┌────────── 宿主提炼层（Bun 宿主 / MCP）───────────────┐
-                    │ ① 网关录制增量提炼（harvest_gateway，零模型规则）   │
+                    │ ① 网关录制增量提炼（harvest_gateway）               │
                     │ ② 异步请求钩子（gateway_harvest.hooks.js，非阻塞）   │
                     │ ③ 写入 NoCodeBackend（memories / pitfalls）         │
                     └───────────────────────────────────────────────────┘
 
-   Agent ◄──MCP── /mcp/magpie/tools （Magpie 内置，聚合本插件 20 个工具）
+   Agent ◄──MCP── /mcp/magpie/tools （Magpie 内置，聚合本插件 20 个工具，实现全量实时检索）
 ```
+
+> **读链路闭环设计说明**：
+> Magpie 生产环境出于高稳定性与安全设计，运行时对 `options` 的修改必然会触发宿主退役重启，因此系统坚决不在数据写入热路径中自动回写 `options.memories`。
+> - **主读链路（实时）**：中间件在每轮用户消息末尾轻量注入引导，智能体按需主动调用 MCP 工具（`memory_context`、`memory_search`、`pitfall_search`）直连数据库执行实时检索；
+> - **辅助读链路（快照）**：在设置页点击「刷新记忆快照」，由前端受控调用宿主桥接 API 将最新 Top 活跃记忆与准则同步至 `options.memories` 供中间件离线兜底注入。
 
 **自动记忆机制说明**：
 - **用户体验保全**：中间件负责在流式 `onEvent` 与非流式 `onResponse` 中无损剥离 `<memory>` 标签，确保模型可能产出的提炼标记不泄露至终端呈现。
@@ -152,20 +157,13 @@ CREATE UNIQUE INDEX idx_schema_meta_k ON schema_meta(k);
 | `storage_guide` | 说明 R2 存储的可用能力与推荐工作流 |
 | `harvest_gateway` | 增量扫描 Magpie 网关录制的对话落盘（GatewayConversations），使用在线模型提炼经验存入记忆库（需配置 extract_model） |
 
-## 离线管线
+## 对话录制扫描与记忆提炼管线
 
-```bash
-# 跟随网关日志（常驻）
-python3 harvest.py --log ~/.magpie/magpie.log
+网关对话录制扫描由插件内置的 `harvest_gateway` 原生实现（零外部 Python 依赖）：
 
-# 一次性处理（配计划任务）
-python3 harvest.py --file harvest.jsonl --push-once
-
-# 只看会提炼出什么，不写库
-python3 harvest.py --file harvest.jsonl --dry-run
-```
-
-配置优先级：**命令行 > 环境变量 > 配置文件 > 插件 options**。用真实 magpie 时它会自动读插件配置，所以**设置页填一次即可**。
+- **实时捕获（推荐）**：在 Magpie 网关中启用本插件，开启 `auto_harvest: true` 并配置 `extract_model`，网关在每一轮对话结束后自动异步提炼高价值经验并安全去重入库。
+- **离线增量扫描**：在设置页点击「立即扫描对话录制」按钮，或由智能体调用 `harvest_gateway` MCP 工具，对落盘的历史会话录制（`GatewayConversations`）进行增量提炼与入库。
+- **快照与检索分层**：中间件 `options.memories` 为静态启动快照（支持置顶准则与兜底召回，可在设置页点击「刷新记忆快照」按需更新）；智能体在复杂场景下通过调用内置 MCP 工具（`memory_context`、`memory_search`、`pitfall_search`）直连 NCB 数据库实现**全量实时语义检索**。
 
 ## 凭据模型（先看这一节，能省很多困惑）
 

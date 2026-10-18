@@ -596,6 +596,11 @@
             return;
           }
           // 拿到比提交时间更新且已完成的结果 → 停止一切计时
+          if (card.op === "sync_snapshot" && Array.isArray(card.memories) && window.magpie && window.magpie.options) {
+            try {
+              window.magpie.options.set({ memories: card.memories });
+            } catch (_) {}
+          }
           clearInterval(pollingTimer); pollingTimer = null;
           if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
           return;
@@ -693,7 +698,7 @@
       "btn_db_provision", "btn_check_ncb", "btn_check_secret", "btn_db_storage_setup", "btn_db_status", "btn_db_reset",
       "btn_confirm_provision", "btn_confirm_reset",
       "btn_check_r2", "btn_clean_probe", "btn_check_model",
-      "btn_harvest_gateway"
+      "btn_harvest_gateway", "btn_sync_snapshot"
     ];
     ids.forEach(function (id) {
       var el = $(id);
@@ -1177,6 +1182,14 @@
     if (harvestGatewayBtn) {
       harvestGatewayBtn.addEventListener("click", function () {
         submitAction("harvest_gateway");
+      });
+    }
+
+    // 刷新记忆快照
+    var syncSnapshotBtn = $("btn_sync_snapshot");
+    if (syncSnapshotBtn) {
+      syncSnapshotBtn.addEventListener("click", function () {
+        submitAction("sync_snapshot");
       });
     }
 

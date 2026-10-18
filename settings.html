@@ -580,6 +580,13 @@
         </div>
       </div>
 
+      <div class="btn-row" style="margin-top: 10px;">
+        <button type="button" id="btn_sync_snapshot">刷新记忆快照到中间件</button>
+      </div>
+      <div class="hint-desc" style="margin-top: 6px; font-size: 12px; color: var(--magpie-text-muted, #888);">
+        中间件依赖离线快照实现准则置顶与离线兜底注入（低频受控单次刷新）；智能体实时检索由内置 MCP 工具直连数据库执行。
+      </div>
+
       <div class="card-save-row">
         <button type="button" class="btn-card-save" id="btn_save_card_inject">保存本卡片</button>
         <span class="status" id="status_card_inject" role="status" aria-live="polite"></span>

@@ -19,8 +19,6 @@
  *   - Headroom   ：CCR 摘要卡，只下发摘要与 ID，长文按需展开
  */
 
-import { compressBody } from "./compress.js";
-
 /* 插件自己的包名 —— Magpie 把插件工具注册成 <包名>_<工具名>，
  * 所以这里要写全名，否则模型按 memory_save 去调会找不到工具。 */
 var PLUGIN_NAME = "magpie-memory-hub";
@@ -178,6 +176,8 @@ function buildIndex(memories, now, version) {
       for (var t = 0; t < tags.length; t++) {
         var tag = tags[t].replace(/^\s+|\s+$/g, "");
         if (tag.length >= 2) keys[tag] = 1;
+        var tagWords = tokenize(tag);
+        for (var twi = 0; twi < tagWords.length; twi++) keys[tagWords[twi]] = 1;
       }
     }
     if (m.title) {
@@ -489,7 +489,7 @@ function lexicalScore(m, tokens) {
     var t = tokens[i];
     if (title.indexOf(t) !== -1) score += 5;   // 标题
     if (ents.indexOf(t) !== -1) score += 3;    // 实体
-    if (tags.indexOf(t) !== -1) score += 3;    // 标签
+    if (tags.indexOf(t) !== -1) score += 6;    // 标签/同义检索词加权
     if (body.indexOf(t) !== -1) score += 1;    // 正文
   }
   return score;
@@ -589,24 +589,6 @@ function onRequestInner(body, ctx) {
 
   var injected = "";
   var now = Date.now ? Date.now() : 0;
-
-  /* --- ⓪ 上下文压缩（Headroom 思路的纯 JS 实现） ---
-   * 只压历史里的工具输出与超长文本块，绝不动 system prompt 与最后一条用户消息。
-   * 默认关闭：保 KV-Cache 核心不变量，避免原地改写历史消息导致前缀缓存击穿。
-   * 仅在用户显式开启 compress === true 时运行。
-   * 压缩模块内部有兜底：压完不比原文小就原样返回，且失败一律 fail-open。 */
-  if (opts.compress === true) {
-    try {
-      var cr = compressBody(body, {
-        max_chars: parseInt(opts.compress_max_chars, 10) || 3000,
-        min_chars: parseInt(opts.compress_min_chars, 10) || 1200
-      });
-      ctx.state.compressSaved = cr.saved;
-      ctx.state.compressBefore = cr.before;
-    } catch (e) {
-      /* 压缩出任何问题都不能影响主流程 */
-    }
-  }
 
   /* --- ① 检索与注入 --- */
   if (prompt && opts.memories && opts.memories.length) {
@@ -758,32 +740,22 @@ function onRequestInner(body, ctx) {
     if (interval > 1 && (turnNo % interval) !== 0) wantExtract = false;
 
     if (wantExtract) {
-      var toolName = PLUGIN_NAME + "_memory_save";
+      var saveTool = PLUGIN_NAME + "_memory_save";
+      var pitfallTool = PLUGIN_NAME + "_pitfall_save";
+      var ctxTool = PLUGIN_NAME + "_memory_context";
+      var searchTool = PLUGIN_NAME + "_memory_search";
+      var pitSearchTool = PLUGIN_NAME + "_pitfall_search";
       if (strength === "strict") {
         injected +=
-          "\n\n[Memory Check —— 结束本轮回复前必做一次]\n" +
-          "逐项检查本轮是否产生了下面任一类内容：\n" +
-          "1) 【偏好/约定】用户表达的偏好、习惯、要求（如「不要用 X」「统一用 Y」）\n" +
-          "2) 【决策】已拍板的技术选型、替代方案、架构约定\n" +
-          "3) 【事实/环境】项目路径、可用的命令、版本、配置项、环境变量\n" +
-          "4) 【踩坑】遇到的报错及其解决办法（现象→根因→解法）\n" +
-          "5) 【洞察】可跨会话复用的结论或方法论\n" +
-          "若有任何一项命中：**立即**用 `" + toolName + "` 存下（一条内容一次调用，不要合并成一条）。" +
-          "踩坑类优先用 `" + PLUGIN_NAME + "_pitfall_save" + "`。\n" +
-          "若你的工具列表里没有这些工具：改为在回复最后追加一个 " +
-          "<memory>JSON 数组</memory> 块，元素形如 " +
-          '{"category":"fact|preference|context|entity|decision|insight","title":"...","content":"...","tags":"a,b","confidence":0.9}。' +
-          "\n若五项都没有命中：忽略本提示即可，不要为了凑数而保存。";
+          "\n\n[Memory Agent Guide —— 检索与沉淀]\n" +
+          "1. 主动检索：涉及项目背景、历史规范、关键配置或排查报错时，优先主动调用 `" + ctxTool + "`（上下文召回）、`" + searchTool + "`（关键词语义检索）或 `" + pitSearchTool + "`（避坑经验匹配）。\n" +
+          "2. 及时沉淀：结束本轮前检查是否产生了持久偏好、架构决策、环境事实或报错解法，若命中立即用 `" + saveTool + "` 存入（报错踩坑优先用 `" + pitfallTool + "`）；若工具不可用则回复末尾追加 <memory>JSON 数组</memory> 块。\n" +
+          "无相关需求时忽略本提示，绝不为了凑数操作。";
       } else {
         injected +=
-          "\n\n[Memory Instruction]\n" +
-          "若本轮产生了值得跨会话复用的持久事实（偏好/事实/决策/实体/洞察），" +
-          "用 `" + toolName + "` 工具把它存下来" +
-          "（参数：category、title、content、tags、confidence）。" +
-          "\n若你的工具列表里没有它，则改为在回复的最后追加一个 " +
-          "<memory>JSON 数组</memory> 块，元素形如 " +
-          '{"category":"fact|preference|context|entity|decision|insight","title":"...","content":"...","tags":"a,b","confidence":0.9}。' +
-          "\n没有值得长期留存的内容时，两条都不要做（不要为了凑数而保存）。";
+          "\n\n[Memory Agent Guide]\n" +
+          "- 遇项目背景、历史规范或报错时，主动调用 `" + ctxTool + "`、`" + searchTool + "` 或 `" + pitSearchTool + "` 检索记忆与避坑经验；\n" +
+          "- 若产生了值得持久化的偏好/决策/事实/报错解法，调用 `" + saveTool + "`（或 `" + pitfallTool + "`）保存（无工具时回复末尾追加 <memory>JSON 数组</memory>）。无需求请忽略。";
       }
     }
   }

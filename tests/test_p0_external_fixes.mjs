@@ -57,6 +57,11 @@ console.log("▶ [P0 - #2] 验证不传 compress 时历史消息逐字节未改 
 // -------------------------------------------------------------
 console.log("\n▶ [P0 - #3] 验证 lookupR2Mount 跨库查询不再抛 ReferenceError 且不串扰...");
 {
+  const stBackup = (await import("../local_state.js")).readState();
+  const origMounts = stBackup.r2_mounts || {};
+  const writeState = (await import("../local_state.js")).writeState;
+  writeState({ ...stBackup, r2_mounts: {} });
+
   rememberR2Mount("41694_db_alpha", {
     bucket: "bucket-alpha",
     public_url: "https://alpha.example.com",
@@ -83,6 +88,7 @@ console.log("\n▶ [P0 - #3] 验证 lookupR2Mount 跨库查询不再抛 Referenc
     console.log("  ✓ 作用域与跨库隔离验证通过：不抛 ReferenceError，跨库安全隔离");
   } finally {
     forgetR2Mount("41694_db_alpha");
+    writeState({ ...(await import("../local_state.js")).readState(), r2_mounts: origMounts });
   }
 }
 

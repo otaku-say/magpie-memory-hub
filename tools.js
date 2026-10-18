@@ -381,9 +381,11 @@ async function saveMemory(client, cfg, m, ctx) {
     return { action: "NOOP", id: null, note: "刚刚写入过（写后读延迟窗口内），已忽略重复" };
   }
 
-  // 1) 候选集拉取（同项目、同分类活跃记忆）
-  const projectRows = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT }));
-  const categoryRows = projectRows.filter((r) => r.category === category);
+  // 1) 候选集拉取（按 project + category + lifecycle_status='active' 过滤，按 updated_at DESC 排序）
+  const queryParams = { project, lifecycle_status: "active", order_by: "updated_at DESC", limit: FETCH_LIMIT };
+  if (category) queryParams.category = category;
+  let categoryRows = rowsOf(await client.list("memories", queryParams));
+  if (category) categoryRows = categoryRows.filter((r) => r.category === category);
 
   // 2) Layer ① 语义指纹查重 + Layer ② 局部滑动窗口语义相似度比对
   const dup = findSemanticDuplicate(categoryRows, title, content, fp);
