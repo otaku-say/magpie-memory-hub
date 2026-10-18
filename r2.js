@@ -20,6 +20,7 @@ import { NcbMcp } from "./ncb_mcp.js";
 import fs from "node:fs";
 import path from "node:path";
 import { lookupSecret, lookupRealDatabase, rememberDatabase, rememberR2Mount, lookupR2Mount, forgetR2Mount } from "./local_state.js";
+import { explainUnknownErrorWithModel, attachAiDiagnosis } from "./online_models.js";
 
 const REST_BASE = "https://api.nocodebackend.com";
 
@@ -452,7 +453,7 @@ export async function r2Setup(cfg, args) {
     forgetR2Mount(db);
   }
 
-  return {
+  const res = {
     ok: probe.ok,
     verdict: probe.ok ? "VERIFIED" : "FAILED_VERIFY",
     database: db,
@@ -477,6 +478,20 @@ export async function r2Setup(cfg, args) {
         (explained ? "原因：" + explained.title : ""),
     raw: out,
   };
+
+  if (!probe.ok && explained && explained.kind === "UNKNOWN") {
+    try {
+      const aiDiag = await explainUnknownErrorWithModel({
+        error: probe.error,
+        component: "storage_setup",
+        database: db,
+        options: cfg,
+      });
+      if (aiDiag) attachAiDiagnosis(res, aiDiag);
+    } catch (_) {}
+  }
+
+  return res;
 }
 
 /**
@@ -550,7 +565,7 @@ export async function r2Check(cfg, args) {
     forgetR2Mount(db);
   }
 
-  return {
+  const res = {
     ok,
     verdict: ok ? "VERIFIED" : "FAILED",
     database: db,
@@ -581,6 +596,20 @@ export async function r2Check(cfg, args) {
             : " ⚠️ " + (probe.clean_note || "探针文件未能删除，可能残留在 R2 里。"))
       : "R2 凭据验证失败：无法完成探针文件写入。" + (explained ? " 原因：" + explained.title : ""),
   };
+
+  if (!ok && explained && explained.kind === "UNKNOWN") {
+    try {
+      const aiDiag = await explainUnknownErrorWithModel({
+        error: probe.error,
+        component: "r2_check",
+        database: db,
+        options: cfg,
+      });
+      if (aiDiag) attachAiDiagnosis(res, aiDiag);
+    } catch (_) {}
+  }
+
+  return res;
 }
 
 /* ------------------------------------------------------------------ *

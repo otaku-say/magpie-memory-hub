@@ -20,16 +20,47 @@ import {
   extractTextFromReply,
   processDialogueAndHarvest,
   triggerBackgroundDrain,
+  harvestWithOnlineModel,
 } from "../gateway_harvest.hooks.js";
 import {
   readHarvestQueue,
   clearHarvestQueue,
 } from "../local_state.js";
-import {
-  mineEnvironmentFacts,
-  mineArchitecturalDecisions,
-  mineFailures,
-} from "../gateway_harvest.js";
+
+function makeMockHarvestOptions(memories = [], pitfalls = [], extra = {}) {
+  const items = [
+    ...memories.map((m) => ({
+      category: m.category || "fact",
+      title: m.title || "事实",
+      content: m.content || "",
+      tags: m.tags || "test",
+      confidence: 0.95,
+    })),
+    ...pitfalls.map((p) => ({
+      category: "pitfall",
+      title: p.title || p.symptom || "报错",
+      content: p.content || p.solution || "",
+      tags: p.tags || "test",
+      confidence: 0.9,
+    })),
+  ];
+  return {
+    extract_model: "mock-model",
+    _fetch: async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify(items),
+            },
+          },
+        ],
+      }),
+    }),
+    ...extra,
+  };
+}
 
 console.log("=================================================================");
 console.log("【测试开始】异步网关请求钩子 (gateway_harvest.hooks.js) 严谨性验证");
@@ -179,10 +210,10 @@ console.log("=================================================================\n
 }
 
 // -----------------------------------------------------------------------------
-// 4. 采集正确性与规则覆盖 (Extraction Accuracy & Harvest Parity)
+// 4. 在线提炼管道正确性与覆盖 (Online Model Extraction & Harvest Pipeline)
 // -----------------------------------------------------------------------------
 {
-  console.log("▶ [Test 4] 采集正确性测试（用户偏好、环境事实、架构决策、踩坑）...");
+  console.log("▶ [Test 4] 在线提炼管道测试（用户偏好、环境事实、架构决策、踩坑）...");
 
   const richDialogue = `
 [user]: 请帮我配置运行环境并修复报错。
@@ -199,9 +230,32 @@ ModuleNotFoundError: No module named 'yaml'
 Starting server on port 8080... OK done!
 `.trim();
 
-  const facts = mineEnvironmentFacts(richDialogue);
-  const decisions = mineArchitecturalDecisions(richDialogue);
-  const failures = mineFailures(richDialogue);
+  const mockExtraction = [
+    { category: "fact", title: "Python 虚拟环境激活", content: "source /opt/project_env/bin/activate", tags: "python,venv", confidence: 0.95 },
+    { category: "fact", title: "工具规范: pnpm 代替 npm", content: "建议使用 pnpm 代替 npm 来跑前端构建", tags: "pnpm,npm", confidence: 0.9 },
+    { category: "decision", title: "API 网关选型", content: "技术选型决定采用 fastify 替代 express", tags: "fastify,express", confidence: 0.95 },
+    { category: "pitfall", title: "缺少 pyyaml 依赖", content: "ModuleNotFoundError: No module named 'yaml' -> pip install pyyaml", tags: "pip,yaml", confidence: 0.9 }
+  ];
+
+  const onlineRes = await harvestWithOnlineModel(richDialogue, makeMockHarvestOptions([], [], {
+    _fetch: async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify(mockExtraction),
+            },
+          },
+        ],
+      }),
+    }),
+  }));
+
+  assert.ok(onlineRes, "在线提炼模型调用解析成功");
+  const facts = onlineRes.memories.filter((m) => m.category === "fact");
+  const decisions = onlineRes.memories.filter((m) => m.category === "decision");
+  const failures = onlineRes.pitfalls;
 
   assert.ok(facts.length >= 2, `提取环境事实至少 2 条，实得: ${facts.length}`);
   const hasVenv = facts.some((f) => f.content.includes("activate"));
@@ -214,10 +268,10 @@ Starting server on port 8080... OK done!
   assert.ok(hasTechChoice, "成功提取技术选型替换决策");
 
   assert.ok(failures.length >= 1, `提取故障踩坑解法至少 1 条，实得: ${failures.length}`);
-  const hasFailure = failures.some((f) => f.component === "missing_dependency" || f.symptom.includes("ModuleNotFoundError"));
+  const hasFailure = failures.some((f) => f.component === "pip" || f.symptom.includes("yaml") || f.solution.includes("pyyaml"));
   assert.ok(hasFailure, "成功提取缺失依赖踩坑与奏效解法配对");
 
-  console.log(`  ✓ 规则提炼覆盖完整：事实 ${facts.length} 条、决策 ${decisions.length} 条、踩坑 ${failures.length} 条\n`);
+  console.log(`  ✓ 在线提炼管道覆盖完整：事实 ${facts.length} 条、决策 ${decisions.length} 条、踩坑 ${failures.length} 条\n`);
 }
 
 // -----------------------------------------------------------------------------
@@ -298,11 +352,19 @@ Starting server on port 8080... OK done!
 运行出现 command not found: pytest，改用 python -m unittest 执行测试。
 `.trim();
 
+  const mockOpts = makeMockHarvestOptions([
+    { category: "fact", title: "虚拟环境激活", content: "执行 source /home/test_proj/venv/bin/activate 激活 Python 环境。" },
+    { category: "decision", title: "构建工具选型", content: "技术选型统一采用 vite 替代 webpack 构建前端。" },
+  ], [
+    { title: "pytest 未找到", content: "运行出现 command not found: pytest，改用 python -m unittest 执行测试。" }
+  ]);
+
   // 第一次提炼写入
   const res1 = await processDialogueAndHarvest(
     testDialogue,
     { project: testProject, agent: "test-agent" },
-    mockDbClient
+    mockDbClient,
+    mockOpts
   );
   assert.ok(res1.memoriesSaved > 0, `首次写入 memories 成功: ${res1.memoriesSaved}`);
 
@@ -310,7 +372,8 @@ Starting server on port 8080... OK done!
   const res2 = await processDialogueAndHarvest(
     testDialogue,
     { project: testProject, agent: "test-agent" },
-    mockDbClient
+    mockDbClient,
+    mockOpts
   );
   assert.strictEqual(res2.memoriesSaved, 0, "重复对话提炼入库应被指纹完全去重 (0 新增)");
   assert.strictEqual(res2.pitfallsSaved, 0, "重复踩坑提炼入库应被指纹完全去重 (0 新增)");
@@ -378,117 +441,7 @@ Starting server on port 8080... OK done!
     },
   };
 
-  // 7.1 原有高价值产出回归断言
-  console.log("  --> 验证 3 条高价值产出持续保留...");
-  // 高价值 1：Python 虚拟环境激活
-  const venvDialogue = `
-[user]: 请问如何运行当前项目里的测试？
-[assistant]: 请使用 Python 虚拟环境：source /root/.venv/activate 来激活环境，然后再运行测试。
-`.trim();
-  const venvFacts = mineEnvironmentFacts(venvDialogue);
-  assert.ok(
-    venvFacts.some((f) => f.title.includes("Python 虚拟环境激活") && f.content.includes("source /root/.venv/activate")),
-    "高价值产出 1 断言通过：'Python 虚拟环境激活' 依然被成功提炼"
-  );
-
-  // 高价值 2：选型决策: 采用 mcp_client 替换 db_tools
-  const depDialogue = `
-[user]: 数据层客户端该怎么设计？
-[assistant]: 架构选型决策：统一决定采用 mcp_client 替代 db_tools 作为数据持久层客户端。
-`.trim();
-  const depDecisions = mineArchitecturalDecisions(depDialogue);
-  assert.ok(
-    depDecisions.some((d) => d.title.includes("选型决策: 采用 mcp_client 替换 db_tools")),
-    "高价值产出 2 断言通过：'选型决策: 采用 mcp_client 替换 db_tools' 依然被成功提炼"
-  );
-
-  // 高价值 3：工具规范: npm 代替 pnpm
-  const toolNormDialogue = `
-[user]: 项目使用哪个包管理器构建？
-[assistant]: 环境工具规范要求：建议使用 npm 代替 pnpm 执行构建命令。
-`.trim();
-  const toolFacts = mineEnvironmentFacts(toolNormDialogue);
-  assert.ok(
-    toolFacts.some((f) => f.title.includes("工具规范: npm 代替 pnpm")),
-    "高价值产出 3 断言通过：'工具规范: npm 代替 pnpm' 依然被成功提炼"
-  );
-  console.log("  ✓ 3 条高价值产出全部被准确提炼保留");
-
-  // 7.2 真实噪音样本彻底过滤断言（必须产出 0 条伪记忆/伪踩坑）
-  console.log("  --> 验证真实库中发现的 5 种噪音样本被彻底过滤...");
-
-  // 噪音 1：代码块内的正则定义被当做 symptom，okLine 变量当做 solution
-  const noiseRegexDialogue = `
-[user]: 帮我看下这段正则提取逻辑：
-[assistant]: \`\`\`javascript
-const FAIL_PATTERNS = [
-  /\\b(?:ERROR|FATAL|FAILED|FAIL|Error:)\\b[^\\n]{0,120}/i,
-];
-const solution = sig(okLine);
-\`\`\`
-这段正则写得不错。
-`.trim();
-  const noise1Failures = mineFailures(noiseRegexDialogue);
-  assert.strictEqual(noise1Failures.length, 0, "噪音 1 拦截成功：代码块内的正则与属性不会被当成故障与解法 (0 条)");
-
-  // 噪音 2：Zig 源码中的 fail(error.AccessDenied) 与 diff 中的 - var done: bool = false;
-  const noiseZigDialogue = `
-[user]: 请审查这段认证处理代码：
-[assistant]: \`\`\`zig
-if (!hasPerm) {
-    return fail(error.AccessDenied);
-}
-- var done: bool = false;
-+ var done: bool = true;
-\`\`\`
-`.trim();
-  const noise2Failures = mineFailures(noiseZigDialogue);
-  assert.strictEqual(noise2Failures.length, 0, "噪音 2 拦截成功：Zig 源码函数调用与 diff 绝不入库为踩坑 (0 条)");
-
-  // 噪音 3：JSON 回显与属性行
-  const noiseJsonDialogue = `
-[user]: 之前采集的数据是什么格式？
-[assistant]: \`\`\`json
-{
-  "symptom": "ModuleNotFoundError: No module named requests，后续通过调整成功解决",
-  "solution": "ok: true"
-}
-\`\`\`
-`.trim();
-  const noise3Failures = mineFailures(noiseJsonDialogue);
-  assert.strictEqual(noise3Failures.length, 0, "噪音 3 拦截成功：JSON 代码块回显绝不入库为踩坑 (0 条)");
-
-  // 噪音 4：路径正则匹配 JS 对象链式属性 (Object.prototype.hasOwnProperty.call)
-  const noisePathDialogue = `
-[user]: GLOBAL.md 路径报错了
-[assistant]: 文件 GLOBAL.md 不存在，正确路径为 Object.prototype.hasOwnProperty.call。
-`.trim();
-  const noise4Facts = mineEnvironmentFacts(noisePathDialogue);
-  assert.strictEqual(noise4Facts.length, 0, "噪音 4 拦截成功：JS 对象链式属性绝不被误判为文件路径 (0 条)");
-
-  // 噪音 5：行内代码函数调用与无处置动作
-  const noiseInlineCodeDialogue = `
-[user]: 报错原因分析
-[assistant]: 我们在第 12 行调用了 \`fail(error.AccessDenied)\` 抛出错误，后续没有执行任何命令。
-`.trim();
-  const noise5Failures = mineFailures(noiseInlineCodeDialogue);
-  assert.strictEqual(noise5Failures.length, 0, "噪音 5 拦截成功：行内代码函数调用且无处置动作绝不入库 (0 条)");
-  console.log("  ✓ 5 类真实噪音样本全部被彻底拦截（产出均为 0）");
-
-  // 7.3 反证测试：故意喂入真故障 + 真实处置动作，断言必定能被提炼
-  console.log("  --> 反证测试：输入真故障 + 真实处置动作，断言必定提炼成功...");
-  const realFixDialogue = `
-[user]: 执行测试遇到了依赖缺失报错：
-ModuleNotFoundError: No module named 'requests'
-[assistant]: 检测到环境中缺少 requests 库。处置方案：请执行 pip install requests 安装依赖包，后续运行测试已全部通过 (success)。
-`.trim();
-  const realFailures = mineFailures(realFixDialogue);
-  assert.strictEqual(realFailures.length, 1, "反证通过：真实故障与真实命令解法成功提炼 1 条踩坑记录");
-  assert.strictEqual(realFailures[0].component, "missing_dependency", "反证通过：错误类型准确识别为 missing_dependency");
-  assert.ok(realFailures[0].solution.includes("pip install requests"), "反证通过：解法准确包含处置命令 pip install requests");
-  console.log("  ✓ 反证测试通过：真故障与真解法准确提炼，证明功能正常有效运转");
-
-  // 7.4 只提炼本轮增量验证（buildDialogueText 仅取最后一轮用户输入 + 本次回复）
+  // 7.1 只提炼本轮增量验证（buildDialogueText 仅取最后一轮用户输入 + 本次回复）
   console.log("  --> 验证只提炼本轮增量（不扫描历史回合）...");
   const multiTurnBody = {
     messages: [
@@ -512,12 +465,20 @@ ModuleNotFoundError: No module named 'requests'
   assert.ok(incrementalDialogue.includes("source /var/minis/workspace/.venv/activate"), "增量验证通过：包含本次助手回复");
   console.log("  ✓ 只提炼本轮增量验证通过：完全杜绝全量历史反复重扫");
 
-  // 7.5 入库全流程与时间戳校验
+  // 7.2 入库全流程与时间戳校验
   console.log("  --> 验证提炼入库流程与时间戳显式写入...");
+  const mockQualityOpts = makeMockHarvestOptions([
+    {
+      category: "fact",
+      title: "Python 虚拟环境激活",
+      content: "请执行 source /var/minis/workspace/.venv/activate 激活 Python 环境。",
+    },
+  ]);
   const harvestResult = await processDialogueAndHarvest(
     incrementalDialogue,
     { project: testProject, agent: "quality-agent" },
-    mockDbClient
+    mockDbClient,
+    mockQualityOpts
   );
   assert.ok(harvestResult.memoriesSaved > 0, `成功写入记忆: ${harvestResult.memoriesSaved}`);
 
@@ -615,6 +576,10 @@ ModuleNotFoundError: No module named 'requests'
     project: testProject,
     _client: mockDbClient,
     _force_test: true,
+    ...makeMockHarvestOptions([
+      { category: "fact", title: "Python 虚拟环境激活", content: "source /opt/production_venv/bin/activate 激活 Python 虚拟环境" },
+      { category: "fact", title: "工具规范", content: "项目代码构建规范要求使用 pnpm 构建" },
+    ]),
   };
   assert.strictEqual(testOptions.gatewayTimeoutMs, undefined, "断言验证：options 中绝不包含 gatewayTimeoutMs");
 
@@ -720,7 +685,10 @@ ModuleNotFoundError: No module named 'requests'
   const harvestRes = await processDialogueAndHarvest(
     testDialogue,
     { project: testProject },
-    null // client 为 null
+    null, // client 为 null
+    makeMockHarvestOptions([
+      { category: "fact", title: "Python 虚拟环境激活", content: "source /opt/production_venv/bin/activate 激活 Python 虚拟环境" }
+    ])
   );
 
   assert.strictEqual(harvestRes.memoriesSaved, 1, "即使 client 为 null，提炼产物也必须正确识别并计划入库");
@@ -794,7 +762,14 @@ ModuleNotFoundError: No module named 'requests'
 `.trim();
 
   // 1) 仅入队不立即阻塞写库
-  await processDialogueAndHarvest(testDialogue, { project: testProject }, null);
+  await processDialogueAndHarvest(
+    testDialogue,
+    { project: testProject },
+    null,
+    makeMockHarvestOptions([
+      { category: "decision", title: "数据层设计决策", content: "架构选型决策：统一决定采用 mcp_client 替代 db_tools 作为数据持久层客户端。" }
+    ])
+  );
   assert.ok(readHarvestQueue().length > 0, "已安全入队");
 
   // 2) 故意并发调用两次消费（模拟后台消费尚未完成时工具调用再次触发消费）
@@ -847,7 +822,14 @@ ModuleNotFoundError: No module named 'requests'
 `.trim();
 
   // 1) 入队
-  await processDialogueAndHarvest(testDialogue, { project: testProject }, null);
+  await processDialogueAndHarvest(
+    testDialogue,
+    { project: testProject },
+    null,
+    makeMockHarvestOptions([
+      { category: "fact", title: "激活环境", content: "source /test_venv/bin/activate 激活环境" }
+    ])
+  );
   assert.ok(readHarvestQueue().length > 0, "数据已入队");
 
   // 2) 消费时触发 ER_DUP_ENTRY

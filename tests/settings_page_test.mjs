@@ -237,6 +237,10 @@ async function runTests() {
     ccr_cards: false,
     max_principles: 2,
     disabled: false,
+    extract_model: "group/gemini-3.5-flash-lite",
+    classify_model: "group/clef",
+    classify_endpoint: "auto",
+    search_rewrite: true,
     // 关键外部保留字段：
     custom_external_field: "do_not_lose_me",
     memories: [{ id: 101, title: "important memory" }]
@@ -257,7 +261,12 @@ async function runTests() {
   assert.strictEqual(env.elements.on_exist.value, "reuse");
   assert.strictEqual(env.elements.ncb_secret.value, "");
   assert.strictEqual(env.elements.auto_init.checked, false);
-  console.log("PASS: 表单字段 fill() 初始填充正确（ncb_secret 留空，mcp_key 已填）");
+  assert.strictEqual(env.elements.extract_model.value, "group/gemini-3.5-flash-lite");
+  assert.strictEqual(env.elements.classify_model.value, "group/clef");
+  assert.strictEqual(env.elements.classify_endpoint.value, "auto");
+  assert.strictEqual(env.elements.search_rewrite.checked, true);
+  assert.strictEqual(env.elements.btn_download_model, undefined, "本地小模型下载按钮已彻底移除");
+  console.log("PASS: 表单字段 fill() 初始填充正确（包含在线模型配置项，且旧下载按钮已删除）");
 
   // ==========================================
   // 测试 2: 「一键创建数据库」提交信标 op: "provision"
@@ -427,27 +436,27 @@ async function runTests() {
   assert.strictEqual(env.setCalls.length, 6, "options.set 应被调用第 6 次");
   const modelCheckPayload = env.setCalls[5];
   assert.strictEqual(modelCheckPayload._action.op, "model_check", "op 必须为 model_check");
-  console.log("PASS: 点击「检测本地小模型」提交信标 op='model_check'");
+  console.log("PASS: 点击「真实检测模型」提交信标 op='model_check'");
 
   // 卡片串台隔离验证（Task C 验收）：
-  // 触发 model_check 后，#db_action_status 绝对不应包含小模型检测字样，#model_action_status 应包含！
+  // 触发 model_check 后，#db_action_status 绝对不应包含模型检测字样，#model_action_status 应包含！
   const dbStatusHtml = env.elements.db_action_status.innerHTML;
   const modelStatusHtml = env.elements.model_action_status.innerHTML;
   assert.ok(
-    modelStatusHtml.includes("检测本地小模型") || modelStatusHtml.includes("model_check"),
-    "#model_action_status 必须包含检测本地小模型任务提示信息"
+    modelStatusHtml.includes("真实检测模型") || modelStatusHtml.includes("model_check"),
+    "#model_action_status 必须包含真实检测模型任务提示信息"
   );
   assert.ok(
-    !dbStatusHtml.includes("检测本地小模型") && !dbStatusHtml.includes("model_check"),
-    "隔离断言：#db_action_status 绝对不应包含小模型检测字样（严禁卡片串台！）"
+    !dbStatusHtml.includes("真实检测模型") && !dbStatusHtml.includes("model_check"),
+    "隔离断言：#db_action_status 绝对不应包含模型检测字样（严禁卡片串台！）"
   );
 
   // 反证测试：若故意将 model_check 写入 db_action_status，断言必失败拦截
-  const fakeLeakedDbHtml = "<div class='db-status-detail'>当前任务：<strong>检测本地小模型</strong>（op: <code>model_check</code>）</div>";
+  const fakeLeakedDbHtml = "<div class='db-status-detail'>当前任务：<strong>真实检测模型</strong>（op: <code>model_check</code>）</div>";
   let counterAssertionCaught = false;
   try {
     assert.ok(
-      !fakeLeakedDbHtml.includes("检测本地小模型") && !fakeLeakedDbHtml.includes("model_check"),
+      !fakeLeakedDbHtml.includes("真实检测模型") && !fakeLeakedDbHtml.includes("model_check"),
       "反证故意失败"
     );
   } catch (err) {
@@ -500,8 +509,8 @@ async function runTests() {
     },
     model: {
       at: Date.now(), op: "model_check", ok: true,
-      title: "本地模型就绪",
-      lines: ["模型路径：models/multilingual.onnx", "大小：48MB"]
+      title: "在线模型连通就绪",
+      lines: ["提炼模型 [group/gemini-3.5-flash-lite]: 验证成功 (120ms)", "判定模型 [group/clef]: 验证成功 (45ms)"]
     },
     gateway: {
       at: Date.now(), op: "harvest_gateway", ok: true,
@@ -536,9 +545,9 @@ async function runTests() {
   assert.ok(r2Text.includes("请到 NCB 控制台更新 Cloudflare 连接"), "r2_action_status 包含 r2 line 2");
 
   const modelText = env.elements.model_action_status.innerText;
-  assert.ok(modelText.includes("本地模型就绪"), "model_action_status 包含 model.title");
-  assert.ok(modelText.includes("models/multilingual.onnx"), "model_action_status 包含 model line 1");
-  assert.ok(modelText.includes("48MB"), "model_action_status 包含 model line 2");
+  assert.ok(modelText.includes("在线模型连通就绪"), "model_action_status 包含 model.title");
+  assert.ok(modelText.includes("提炼模型"), "model_action_status 包含 model line 1");
+  assert.ok(modelText.includes("判定模型"), "model_action_status 包含 model line 2");
 
   const gatewayText = env.elements.harvest_action_status.innerText;
   assert.ok(gatewayText.includes("对话提炼完成"), "harvest_action_status 包含 gateway.title");
@@ -623,6 +632,29 @@ async function runTests() {
   assert.deepStrictEqual(cardSavePayload.memories, [{ id: 101, title: "important memory" }], "memories 快照逐字段不变");
   assert.ok(!cardSavePayload._action, "保存卡片不应触发任何 _action 信标");
   console.log("PASS: 点击本卡片「保存本卡片」时，其它卡片字段与 memories 快照逐字段不变！");
+
+  // ==========================================
+  // 测试 12.2: 独立卡片保存「保存本卡片」（在线模型卡片）
+  // ==========================================
+  console.log("\n--- 测试 12.2: 在线大模型卡片独立保存 ---");
+  await new Promise((r) => setTimeout(r, 1100)); // 避开频控
+  assert.ok(env.elements.btn_save_card_model, "存在 btn_save_card_model 按钮");
+  env.elements.extract_model.value = "group/gemini-2.5-flash";
+  env.elements.classify_model.value = "group/fast-clef";
+  env.elements.classify_endpoint.value = "chat";
+  env.elements.search_rewrite.checked = false;
+  const callsBeforeModelSave = env.setCalls.length;
+  env.elements.btn_save_card_model.click();
+  await new Promise((r) => setTimeout(r, 60));
+  assert.strictEqual(env.setCalls.length, callsBeforeModelSave + 1, "options.set 应被调用");
+  const modelSavePayload = env.setCalls[env.setCalls.length - 1];
+  assert.strictEqual(modelSavePayload.extract_model, "group/gemini-2.5-flash");
+  assert.strictEqual(modelSavePayload.classify_model, "group/fast-clef");
+  assert.strictEqual(modelSavePayload.classify_endpoint, "chat");
+  assert.strictEqual(modelSavePayload.search_rewrite, false);
+  assert.strictEqual(modelSavePayload.ncb_instance, "agent_memory", "其它卡片配置项保持不变");
+  assert.deepStrictEqual(modelSavePayload.memories, [{ id: 101, title: "important memory" }], "memories 数组保持不变");
+  console.log("PASS: 在线大模型配置卡片独立保存测试通过，所有在线模型字段均正确保存！");
 
   // ==========================================
   // 测试 13: 反证测试 —— 故意去掉「先 get 再合并」，断言测试必定失败

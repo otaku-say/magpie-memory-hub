@@ -14,6 +14,7 @@
   var CARD_FIELDS = {
     ncb: ["ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init"],
     r2: ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"],
+    model: ["extract_model", "classify_model", "classify_endpoint", "search_rewrite"],
     harvest: ["auto_harvest", "gatewayTimeoutMs"],
     extract: ["inline_extract", "min_confidence"],
     inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"],
@@ -23,9 +24,10 @@
   var TEXT = [
     "ncb_instance", "ncb_secret", "mcp_key",
     "r2_account_id", "r2_access_key_id", "r2_secret_access_key",
-    "r2_bucket_name", "r2_public_url"
+    "r2_bucket_name", "r2_public_url",
+    "extract_model", "classify_model"
   ];
-  var SELECT = ["on_exist"];
+  var SELECT = ["on_exist", "classify_endpoint"];
   var NUM = {
     min_confidence: 0.6,
     max_inject_count: 5,
@@ -43,7 +45,8 @@
     "compress",
     "cross_turn_dedup",
     "ccr_cards",
-    "inject_principles"
+    "inject_principles",
+    "search_rewrite"
   ];
 
   var current = {};
@@ -185,12 +188,20 @@
     });
     BOOL.forEach(function (k) {
       var el = $(k); if (!el) return;
+      if (k === "search_rewrite") {
+        el.checked = o[k] !== false;
+        return;
+      }
       el.checked = !!o[k];
     });
     SELECT.forEach(function (k) {
       var el = $(k); if (!el) return;
       if (k === "on_exist" && !o[k]) {
         el.value = "reuse";
+        return;
+      }
+      if (k === "classify_endpoint" && !o[k]) {
+        el.value = "auto";
         return;
       }
       if (typeof o[k] === "string") el.value = o[k];
@@ -299,7 +310,7 @@
    * 通过 op 或 cardKey 推导归属卡片 key（统一纯函数派生）：
    * - ncb: provision, ncb_check, secret_check, init, reset, status
    * - r2: storage_setup, r2_check, clean_probe
-   * - model: model_check, model_download
+   * - model: model_check
    * - gateway: harvest_gateway
    */
   function cardOfOp(op) {
@@ -308,7 +319,7 @@
     if (s === "r2" || s === "storage_setup" || s === "r2_check" || s === "clean_probe") {
       return "r2";
     }
-    if (s === "model" || s === "model_check" || s === "model_download") {
+    if (s === "model" || s === "model_check") {
       return "model";
     }
     if (s === "gateway" || s === "harvest" || s === "harvest_gateway") {
@@ -332,51 +343,10 @@
   }
 
   /* ---------------- 状态展示与结果回传渲染 ---------------- */
-  function updateModelButtonState(statusObj) {
-    var btn = $("btn_download_model");
-    if (!btn) return;
-    if (!statusObj) {
-      btn.textContent = "一键下载模型";
-      btn.disabled = false;
-      btn.style.display = "";
-      return;
-    }
-    var prog = statusObj.progress;
-    var isDownloading = prog && (prog.status === "downloading" || prog.status === "verifying" || prog.status === "starting");
-    if (isDownloading) {
-      btn.textContent = "正在下载…";
-      btn.disabled = true;
-      btn.style.display = "";
-      return;
-    }
-    var isUpdate = statusObj.verdict === "UPDATE_AVAILABLE" ||
-      (statusObj.title && (statusObj.title.indexOf("新版本") !== -1 || statusObj.title.indexOf("更新") !== -1));
-    if (isUpdate) {
-      btn.textContent = "更新模型";
-      btn.disabled = false;
-      btn.style.display = "";
-      return;
-    }
-    if (statusObj.ok === true) {
-      btn.textContent = "模型已就绪";
-      btn.disabled = true;
-      btn.style.display = "";
-      return;
-    }
-    // 未安装或损坏
-    btn.textContent = "一键下载模型";
-    btn.disabled = false;
-    btn.style.display = "";
-  }
-
   function renderStatusBlock(containerId, statusObj) {
     var el = $(containerId);
     if (!el) return;
     if (!statusObj || !statusObj.title) return;
-
-    if (containerId === "model_action_status") {
-      updateModelButtonState(statusObj);
-    }
 
     el.style.display = "block";
     var okClass = statusObj.ok ? "ok" : "bad";
@@ -390,16 +360,6 @@
       html += '<span class="action-status-time">' + escapeHtml(timeStr) + "</span>";
     }
     html += "</div>";
-
-    if (statusObj.progress && typeof statusObj.progress.percent === "number") {
-      var pct = Math.min(100, Math.max(0, statusObj.progress.percent));
-      var fName = statusObj.progress.file || "下载中";
-      var statTxt = statusObj.progress.status === "verifying" ? "正在校验 SHA-256…" : (pct + "%");
-      html += '<div class="model-progress-box">' +
-        '<div class="model-progress-bar"><div class="model-progress-fill" style="width:' + pct + '%;"></div></div>' +
-        '<div class="model-progress-meta"><span>' + escapeHtml(fName) + '</span><span class="model-progress-pct">' + escapeHtml(statTxt) + '</span></div>' +
-      '</div>';
-    }
 
     if (Array.isArray(statusObj.lines) && statusObj.lines.length > 0) {
       html += '<ul class="action-status-lines">';
@@ -556,15 +516,12 @@
   function waitingHtml(cardKey, left, totalWait, opHint) {
     var total = totalWait || WAIT_SECONDS;
     var pct = Math.max(0, Math.min(100, Math.round((total - left) / total * 100)));
-    var isDownload = opHint === "model_download" || (cardKey === "model" && total >= 300);
-    var isModelCheck = opHint === "model_check";
-    var title = isDownload ? "正在进行后台下载与校验…" : (isModelCheck ? "正在检测本地小模型…" : "正在等待宿主执行…");
-    var badge = isDownload ? "⏳ 下载中" : (isModelCheck ? "⏳ 检测中" : "⏳ 等待中");
-    var lines = isDownload
-      ? '<li>模型约 174MB，支持断点续传与 SHA-256 校验。</li><li>请耐心等待进度回传，完成后将自动刷新。</li>'
-      : (isModelCheck
-        ? '<li>已提交检测本地小模型任务，正在检查环境与模型状态。</li><li>拿到结果会自动显示在此卡片，无需手动刷新。</li>'
-        : '<li>页面只能提交任务，真正执行发生在宿主的下一次调用。</li><li>拿到结果会自动显示，无需手动刷新。</li>');
+    var isModelCheck = opHint === "model_check" || cardKey === "model";
+    var title = isModelCheck ? "正在检测在线模型…" : "正在等待宿主执行…";
+    var badge = isModelCheck ? "⏳ 检测中" : "⏳ 等待中";
+    var lines = isModelCheck
+      ? '<li>已提交真实检测模型任务，宿主将实际调用模型并校验返回。</li><li>拿到结果会自动显示在此卡片，无需手动刷新。</li>'
+      : '<li>页面只能提交任务，真正执行发生在宿主的下一次调用。</li><li>拿到结果会自动显示，无需手动刷新。</li>';
     return '' +
       '<div class="action-status-header">' +
         '<span class="action-status-badge wait">' + badge + '</span>' +
@@ -602,7 +559,7 @@
 
     // 等待期间只接受「比提交时间更新」的结果，避免旧结果把等待态刷掉（会来回闪）
     pendingSince[resolvedCard] = submitTime;
-    var waitSec = opHint === "model_download" ? 600 : WAIT_SECONDS;
+    var waitSec = WAIT_SECONDS;
     var el = $(containerId);
     var deadline = Date.now() + waitSec * 1000;
 
@@ -708,8 +665,7 @@
         storage_setup: "挂载 R2 存储",
         r2_check: "检测 R2 密钥",
         clean_probe: "清理探针文件",
-        model_check: "检测本地小模型",
-        model_download: "下载本地小模型",
+        model_check: "真实检测模型",
         init: "初始化数据库",
         reset: "清空数据库",
         status: "检查结构状态",
@@ -730,7 +686,7 @@
     var ids = [
       "btn_db_provision", "btn_check_ncb", "btn_check_secret", "btn_db_storage_setup", "btn_db_status", "btn_db_reset",
       "btn_confirm_provision", "btn_confirm_reset",
-      "btn_check_r2", "btn_clean_probe", "btn_check_model", "btn_download_model",
+      "btn_check_r2", "btn_clean_probe", "btn_check_model",
       "btn_harvest_gateway"
     ];
     ids.forEach(function (id) {
@@ -826,9 +782,7 @@
           } else if (op === "clean_probe") {
             msg = "已提交清理探针文件任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "model_check") {
-            msg = "已提交检测本地小模型任务（ID: " + action.id + "）。正在等待宿主执行…";
-          } else if (op === "model_download") {
-            msg = "已提交一键下载模型任务（ID: " + action.id + "）。正在启动后台下载…";
+            msg = "已提交真实检测模型任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "status") {
             msg = "已提交检查状态任务。正在等待宿主执行…";
           } else if (op === "reset") {
@@ -1124,6 +1078,13 @@
       });
     }
 
+    var saveCardModelBtn = $("btn_save_card_model");
+    if (saveCardModelBtn) {
+      saveCardModelBtn.addEventListener("click", function () {
+        saveCard("model", "btn_save_card_model", "status_card_model");
+      });
+    }
+
     // MCP Key 切换密码显隐
     var toggleMcpBtn = $("toggle_mcp_key");
     if (toggleMcpBtn) {
@@ -1197,19 +1158,11 @@
       });
     }
 
-    // 检测本地小模型
+    // 真实检测模型
     var checkModelBtn = $("btn_check_model");
     if (checkModelBtn) {
       checkModelBtn.addEventListener("click", function () {
         submitAction("model_check");
-      });
-    }
-
-    // 一键下载/更新本地小模型
-    var downloadModelBtn = $("btn_download_model");
-    if (downloadModelBtn) {
-      downloadModelBtn.addEventListener("click", function () {
-        submitAction("model_download");
       });
     }
 

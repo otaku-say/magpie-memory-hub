@@ -85,9 +85,6 @@ def load_config(args):
         "snapshot_cap": 500,
         "snapshot_interval": 60,
         "dormant_days": 45,
-        # --- 提炼前的语义压缩（离线侧，可换模型）---
-        "compress_engine": "auto",   # auto | kompress | llmlingua2 | none
-        "compress_threshold": 0.5,
         # --- 任务 A: 失败学习证据门槛 ---
         "min_evidence": 3,
         "evidence_file": os.path.expanduser("~/.magpie-memory-hub-evidence.json"),
@@ -112,7 +109,6 @@ def load_config(args):
         "ncb_secret": "NCB_SECRET_KEY",
         "project": "MEMORY_PROJECT",
         "magpie_bin": "MAGPIE_BIN",
-        "compress_engine": "KOMPRESS_ENGINE",
         "min_evidence": "MIN_EVIDENCE",
         "evidence_file": "EVIDENCE_FILE",
         "enable_promotion": "ENABLE_PROMOTION",
@@ -141,10 +137,8 @@ def load_config(args):
             cfg[k] = v
     cfg["_from_plugin_options"] = bool(po)
 
-    if getattr(args, "compress_threshold", None):
-        cfg["compress_threshold"] = args.compress_threshold
     for k in ("ncb_instance",
-              "project", "magpie_bin", "compress_engine",
+              "project", "magpie_bin",
               "evidence_file"):
         v = getattr(args, k, None)
         if v:
@@ -1548,63 +1542,6 @@ def rule_judge(cfg, ncb, cands, project, stats):
     return kept
 
 
-# ------------------------------------------------- 提炼前的语义压缩
-#
-# 为什么压缩放在这里而不是网关中间件：
-#   中间件跑在 moejs，不能加载原生模块/WASM，onRequest 只有 250ms。
-#   ONNX 推理必须放独立进程。而且这里压的是「送进提炼模型的长对话」，
-#   省的是提炼 Token，跟网关侧的请求压缩是两件事、互为补充。
-#
-# 引擎可切换（架构相同，都是 token-classification，换 model id 即可）：
-#   kompress    chopratejas/kompress-v2-base        英文，~140MB，ONNX 现成
-#   llmlingua2  microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank
-#               官方多语言版（52 万下载），需自行导出 ONNX
-#
-# ⚠️ 无论换哪个模型，都【不能】按 token 剪枝——WordPiece 会把中文按字切碎
-#    并产生 U+FFFD。compress_text.py 统一用「词级」剪枝规避了这一点。
-
-ENGINES = {
-    "kompress": {
-        "model": "chopratejas/kompress-v2-base",
-        "onnx": "onnx/kompress-int8-wo.onnx",
-    },
-    "llmlingua2": {
-        "model": "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
-        "onnx": "onnx/model.onnx",
-    },
-}
-
-_compressor = None
-_compressor_tried = False
-
-
-def get_compressor(cfg, logfn):
-    """懒加载；任何失败都返回 None（调用方原样使用文本）。"""
-    global _compressor, _compressor_tried
-    engine = (cfg.get("compress_engine") or "auto").lower()
-    if engine == "none":
-        return None
-    if _compressor_tried:
-        return _compressor
-    _compressor_tried = True
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import compress_text
-        if engine in ENGINES:
-            compress_text.MODEL_ID = ENGINES[engine]["model"]
-            compress_text.MODEL_ONNX = ENGINES[engine]["onnx"]
-            os.environ["KOMPRESS_MODEL"] = compress_text.MODEL_ID
-            os.environ["KOMPRESS_ONNX"] = compress_text.MODEL_ONNX
-        _compressor = compress_text.make(
-            log=logfn, threshold=float(cfg.get("compress_threshold") or 0.5))
-        logfn(f"语义压缩引擎: {engine}"
-              + (f"（{ENGINES[engine]['model']}）" if engine in ENGINES else ""))
-    except Exception as e:
-        logfn(f"语义压缩不可用（原样使用文本）: {e}")
-        _compressor = None
-    return _compressor
-
-
 # ------------------------------------------------- 快照推送（闭环最后一环）
 #
 # 中间件（moejs）没有任何网络能力，它只读得到 plugins.json 里本插件的
@@ -1817,11 +1754,6 @@ def main():
     ap.add_argument("--no-push", action="store_true", help="不把快照推回网关")
     ap.add_argument("--push-once", action="store_true", help="只推一次快照就退出")
     ap.add_argument("--snapshot-cap", dest="snapshot_cap", type=int, help="快照最多多少条")
-    ap.add_argument("--compress-engine", dest="compress_engine",
-                    choices=["auto", "kompress", "llmlingua2", "none"],
-                    help="提炼前的语义压缩引擎（none 关闭）")
-    ap.add_argument("--compress-threshold", dest="compress_threshold", type=float,
-                    help="词保留阈值，默认 0.5；调高=压得更狠")
     ap.add_argument("--min-evidence", dest="min_evidence", type=int,
                     help="失败学习证据门槛（默认 5；<=1 立即入库）")
     ap.add_argument("--evidence-file", dest="evidence_file",
@@ -1856,7 +1788,7 @@ def main():
     if cfg.get("_from_plugin_options"):
         log("配置来源：已合并插件 options（设置页）")
     log(f"实例={cfg['ncb_instance']} 推送快照={cfg.get('push_snapshot')} "
-        f"压缩引擎={cfg.get('compress_engine')} dry_run={args.dry_run}")
+        f"dry_run={args.dry_run}")
 
     # 只推一次快照就退出（配 cron / 计划任务用）
     if args.push_once:

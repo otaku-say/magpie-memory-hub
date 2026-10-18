@@ -105,7 +105,7 @@ for (const table of ["memories", "pitfalls"]) {
   }
   assert.strictEqual(missing.length, 0, `${table} 表代码写入的列必须在 schema.js 中全部声明`);
   const extra = [...declared].filter((k) => !wrote.has(k) && !DB_MANAGED.has(k));
-  if (extra.length) console.log(`  ℹ 声明但代码不直接写（DB 维护或兼容旧库）: ${extra.join(", ")}`);
+  if (extra.length) console.log(`  ℹ 声明但代码不直接写（由数据库维护，或仅在特定通道写入）: ${extra.join(", ")}`);
   const need = [...wrote].filter((k) => !DB_MANAGED.has(k));
   console.log(`  迁移断言：新库建表后这 ${need.length} 列必须存在（否则写入会 400）`);
 }
@@ -136,7 +136,7 @@ const RENAMED_AWAY = {
 };
 /* 合法的同名用法（与数据库列无关），逐条给出理由，不做宽泛豁免 */
 const LEGIT_CTX = [
-  /res\.status|response\.status|\bstatusText\b|statusCode/,   // HTTP 状态
+  /res\.status|response\.status|\bstatusText\b|statusCode|\bstatus\s*:\s*\d{3}\b/,   // HTTP 状态
   /out\.get\("status"\)|\.get\("status"\)\s*==\s*"failed"/,    // 子进程结果字典
   /git status|status\s*[:=]\s*["'](?:ok|failed)["']/,          // 非 DB 的普通状态字段
   /\bversion\s*[:=]\s*(?:["']|SCHEMA_|String\()/,              // 版本号常量

@@ -134,7 +134,7 @@ async function runAll() {
     assert.equal(countTurnsFromMessages(body), 3);
   });
 
-  test("Responses API 与单次 prompt 推导", () => {
+  test("Responses API 轮次推导", () => {
     const bodyInputArray = {
       input: [
         { role: "user", content: "task 1" },
@@ -146,15 +146,13 @@ async function runAll() {
 
     const bodyInputStr = { input: "single task text" };
     assert.equal(countTurnsFromMessages(bodyInputStr), 1);
-
-    const bodyPrompt = { prompt: "legacy prompt" };
-    assert.equal(countTurnsFromMessages(bodyPrompt), 1);
   });
 
   test("【反证】无 user 消息或空输入时严格返回 null（绝不伪造默认轮次）", () => {
     assert.equal(countTurnsFromMessages(null), null);
     assert.equal(countTurnsFromMessages({}), null);
     assert.equal(countTurnsFromMessages({ messages: [] }), null);
+    assert.equal(countTurnsFromMessages({ prompt: "legacy prompt" }), null);
     assert.equal(
       countTurnsFromMessages({
         messages: [
@@ -174,6 +172,49 @@ async function runAll() {
   });
 
   console.log("\n=== 3. 异步网关钩子（gateway_harvest.hooks.js）写入溯源测试 ===");
+  const mockTraceFetch = async (url, opts) => {
+    let bodyText = "";
+    try {
+      const b = typeof opts?.body === "string" ? JSON.parse(opts.body) : opts?.body;
+      bodyText = b?.messages?.map((m) => m.content).join("\n") || "";
+    } catch (e) {
+      bodyText = "";
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify([
+              {
+                category: "decision",
+                title: "技术选型",
+                content: bodyText.includes("/opt/venv")
+                  ? "请激活虚拟环境：source /opt/venv/bin/activate 运行。"
+                  : (bodyText.includes("/data/venv")
+                    ? "请激活虚拟环境：source /data/venv/bin/activate 运行。"
+                    : (bodyText.includes("fastify")
+                      ? "必须统一使用 fastify 替代 express。"
+                      : "技术选型统一采用 vite 替代 webpack 构建前端。")),
+                tags: "convention",
+                confidence: 0.95,
+              },
+              {
+                category: "pitfall",
+                title: "pytest 缺失",
+                content: "运行出现 command not found: pytest，改用 python -m unittest 执行测试。",
+                tags: "pytest",
+                confidence: 0.95,
+              },
+            ]),
+          },
+        }],
+      }),
+    };
+  };
+
   await asyncTest("正向：带 session 与 turn 时 memories 与 pitfalls 正确落盘", async () => {
     const client = makeMockClient();
     const dialogue = `[user]: 记下来：请帮我配置运行环境。
@@ -188,7 +229,11 @@ async function runAll() {
       turn: 3,
     };
 
-    const res = await processDialogueAndHarvest(dialogue, meta, client, { bypass_gate: true });
+    const res = await processDialogueAndHarvest(dialogue, meta, client, {
+      bypass_gate: true,
+      extract_model: "mock-model",
+      _fetch: mockTraceFetch,
+    });
     assert.ok(res.memoriesSaved > 0 || res.pitfallsSaved > 0, "应有提炼入库");
 
     for (const m of client.records.memories) {
@@ -211,7 +256,11 @@ async function runAll() {
       agent: "test-agent",
     };
 
-    await processDialogueAndHarvest(dialogue, meta, client, { bypass_gate: true });
+    await processDialogueAndHarvest(dialogue, meta, client, {
+      bypass_gate: true,
+      extract_model: "mock-model",
+      _fetch: mockTraceFetch,
+    });
 
     assert.ok(client.records.memories.length > 0, "应有记忆产生");
     for (const m of client.records.memories) {
@@ -233,7 +282,11 @@ async function runAll() {
       turn: "5", // 字符串数字测试自动解析
     };
 
-    await processDialogueAndHarvest(dialogue, meta, client, { bypass_gate: true });
+    await processDialogueAndHarvest(dialogue, meta, client, {
+      bypass_gate: true,
+      extract_model: "mock-model",
+      _fetch: mockTraceFetch,
+    });
     assert.ok(client.records.memories.length > 0);
     for (const m of client.records.memories) {
       assert.equal(m.source_session.length, 128, "超长 session 必须安全截断至 128 字符");
@@ -361,7 +414,13 @@ async function runAll() {
     }));
 
     const capturedCalls = [];
-    await harvestGateway({ dir: tmpDir, project: "__test_trace__", force_rescan: true }, {
+    await harvestGateway({
+      dir: tmpDir,
+      project: "__test_trace__",
+      force_rescan: true,
+      extract_model: "mock-model",
+      _fetch: mockTraceFetch,
+    }, {
       _client: {},
       _cfg: {},
       saveMemory: async (c, cfg, payload) => {

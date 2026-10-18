@@ -33,7 +33,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { dbInit, dbReset, dbStatus, dbProvision, storageSetup, ncbCheck, secretCheck, RESET_CONFIRM } from "./db_tools.js";
 import { r2Setup, r2Check, cleanProbes } from "./r2.js";
-import { checkLocalModel, downloadModel, modelDir, human, MODEL_SPEC } from "./model_check.js";
 import { lookupRealDatabase } from "./local_state.js";
 
 /** 插件目录下的状态文件路径（供 iframe 内设置页通过 script 标签加载）。 */
@@ -59,98 +58,8 @@ export const OPS = {
   secret_check: "检测数据库 Secret Key 是否有效（通过只读接口验证，不上传文件）",
   r2_check: "检测 R2 凭据是否真的可用（真实上传探针，只读检测）",
   clean_probe: "扫描 R2 中残留的探针文件并自动删除（走 REST 接口）",
-  model_check: "检测本地多语言小模型是否已就绪（只读检测）",
-  model_download: "下载并安装本地多语言小模型（LLMLingua-2 mBERT INT8，约 174MB，支持断点续传与校验）",
+  model_check: "检测在线模型连通性与可用性（实际调用提炼与判定模型并校验返回）",
 };
-
-let _modelDownloadTask = null;
-
-export function isModelDownloading() {
-  return _modelDownloadTask !== null;
-}
-
-export function startBackgroundModelDownload(cfg, action) {
-  if (_modelDownloadTask) return _modelDownloadTask;
-
-  writeCardStatus("model", {
-    at: Date.now(),
-    op: "model_download",
-    ok: true,
-    title: "正在下载本地小模型…",
-    lines: [
-      "准备连接镜像站并校验已有文件…",
-      "目标模型：LLMLingua-2 mBERT（多语言 INT8，174MB）",
-      "存储目录：" + modelDir(),
-    ],
-    progress: {
-      percent: 0,
-      file: "准备中",
-      done_bytes: 0,
-      total_bytes: MODEL_SPEC.approx_bytes,
-      status: "starting",  // db-col-ok: UI 下载进度状态，非数据库列
-    },
-  });
-
-  let lastWrite = 0;
-  const onProgress = (info) => {
-    const now = Date.now();
-    if (now - lastWrite > 800 || info.percent === 100 || info.status === "verifying") {
-      lastWrite = now;
-      writeCardStatus("model", {
-        at: now,
-        op: "model_download",
-        ok: true,
-        title: info.status === "verifying"
-          ? `正在校验 ${info.file} 的 SHA-256…`
-          : `正在下载模型：${info.percent}%（${info.file}）`,
-        lines: [
-          `当前文件：${info.file}（${human(info.done_bytes)} / ${human(info.total_bytes)}）`,
-          `总体进度：${info.percent}%（已完成 ${info.file_index - 1}/${info.total_files} 个文件）`,
-          `落点目录：${modelDir()}`,
-        ],
-        progress: info,
-      });
-    }
-  };
-
-  _modelDownloadTask = downloadModel(cfg, action, onProgress)
-    .then((res) => {
-      _modelDownloadTask = null;
-      writeCardStatus("model", {
-        at: Date.now(),
-        op: "model_download",
-        ok: true,
-        title: "本地小模型下载并校验成功",
-        lines: [
-          "全部 4 个文件已完成校验并原子落地（总大小约 174.1 MB）",
-          "文件列表：model.onnx、tokenizer.json、vocab.txt、config.json",
-          "存储目录：" + modelDir() + "（Magpie 持久卷）",
-          "离线语义压缩已就绪，请求时可按需启用多语言抽取式压缩",
-        ],
-        progress: { percent: 100, status: "done" },  // db-col-ok: UI 下载进度状态，非数据库列
-      });
-      return res;
-    })
-    .catch((err) => {
-      _modelDownloadTask = null;
-      const errMsg = String((err && err.message) || err);
-      writeCardStatus("model", {
-        at: Date.now(),
-        op: "model_download",
-        ok: false,
-        title: "本地小模型下载失败",
-        lines: [
-          "失败原因：" + errMsg,
-          "旧模型文件（若存在）未受破坏，仍可继续使用",
-          "已下载的临时分块已保留，再次点击可断点续传",
-          "排查建议：检查网络连接是否可访问 hf-mirror.com 或 huggingface.co",
-        ],
-        progress: { percent: 0, status: "failed", error: errMsg },
-      });
-    });
-
-  return _modelDownloadTask;
-}
 
 function statePath(fs, os, path) {
   try {
@@ -281,7 +190,7 @@ export async function runPendingAction(options, cfg) {
     }
   }
 
-  return await execute(action, cfg, fs, sp, state);
+  return await execute(action, cfg, fs, sp, state, options);
 }
 
 /**
@@ -293,7 +202,7 @@ export async function runPendingAction(options, cfg) {
  * 若把两者混为一谈（早先的实现就是把 write-ahead 直接写成 lastDoneId），
  * 被「二次确认门」拦下的任务会被误记为已执行，用户再也无法重试。
  */
-async function execute(action, cfg, fs, sp, state) {
+async function execute(action, cfg, fs, sp, state, options) {
   const args = { database: action.database || undefined };
   if (action.secret) args.secret = action.secret;
   if (action.op === "reset") args.confirm = action.confirm || "";
@@ -329,32 +238,37 @@ async function execute(action, cfg, fs, sp, state) {
     else if (action.op === "secret_check") result = await secretCheck(cfg, args);
     else if (action.op === "r2_check") result = await r2Check(cfg, args);
     else if (action.op === "clean_probe") result = await cleanProbes(cfg, args);
-    else if (action.op === "model_check") result = await checkLocalModel({ checkUpstream: true });
-    else if (action.op === "model_download") {
-      if (isModelDownloading()) {
-        result = {
-          ok: true,
-          action: "IN_PROGRESS",
-          title: "本地小模型正在下载中",
-          lines: [
-            "后台下载任务已在进行中，无需重复触发",
-            "支持断点续传与 sha256 校验，请关注卡片进度条",
-            "完成后将自动就绪并更新卡片状态",
-          ],
-        };
-      } else {
-        startBackgroundModelDownload(cfg, action);
-        result = {
-          ok: true,
-          action: "STARTED",
-          title: "已开始下载本地小模型",
-          lines: [
-            "已启动后台下载任务（约 174MB，支持断点续传与 sha256 校验）",
-            "国内优先走 hf-mirror.com 镜像，失败自动回退官方 HuggingFace",
-            "下载期间不会阻塞 agent 对话，可在本卡片查看实时下载进度",
-          ],
-        };
+    else if (action.op === "model_check") {
+      const { testModelConnectivity } = await import("./gateway_harvest.hooks.js");
+      const modelOpts = Object.assign({}, cfg, options || {});
+      const conn = await testModelConnectivity("all", modelOpts);
+      const ok = conn.ok;
+      const lines = [];
+      if (conn.extract) {
+        if (conn.extract.ok) {
+          lines.push(`提炼模型 [${conn.extract.model}]: 验证成功 (${conn.extract.latencyMs}ms)`);
+        } else {
+          lines.push(`提炼模型: ${conn.extract.error || "调用失败"}`);
+        }
       }
+      if (conn.classify) {
+        if (conn.classify.ok) {
+          lines.push(`判定模型 [${conn.classify.model}]: 验证成功 (端点: ${conn.classify.effectiveEndpoint}, ${conn.classify.latencyMs}ms)`);
+        } else {
+          lines.push(`判定模型: ${conn.classify.error || "调用失败"}`);
+        }
+      }
+      if (lines.length < 2) {
+        lines.push(ok ? "在线模型全部校验通过，响应正常" : "请在设置中配置有效的在线模型名称");
+      }
+      result = {
+        ok,
+        at: Date.now(),
+        op: "model_check",
+        title: ok ? "在线模型连通就绪" : "在线模型检测未通过",
+        lines,
+        detail: conn,
+      };
     }
     else result = await dbStatus(cfg, args);
   } catch (e) {
@@ -365,11 +279,11 @@ async function execute(action, cfg, fs, sp, state) {
   try {
     // 结果写到哪张卡片 —— 必须逐项显式映射，不能只分两类。
     // 早先写成 `op === "storage_setup" ? "r2" : "ncb"`，导致 r2_check 的结果
-    // 被写进 NoCodeBackend 卡片、model_check 干脆无处可去（它当时也没实现）。
+    // 被写进 NoCodeBackend 卡片。
     const CARD_OF_OP = {
       provision: "ncb", init: "ncb", reset: "ncb", status: "ncb", ncb_check: "ncb", secret_check: "ncb",  // db-col-ok: UI 操作对应的卡片映射表，非数据库列
       storage_setup: "r2", r2_check: "r2", clean_probe: "r2",
-      model_check: "model", model_download: "model",
+      model_check: "model",
     };
     const cardKey = CARD_OF_OP[action.op] || "ncb";
     writeCardStatus(cardKey, result, action.op);
@@ -546,17 +460,21 @@ export function formatCardStatus(key, rawResult, opHint) {
       } else {
         const diag = res.diagnosis;
         title = diag && diag.title ? diag.title : (op === "r2_check" ? "R2 凭据验证失败" : "R2 挂载未生效");
-        lines.push(`数据库：${res.database || "当前库"}`);
-        if (diag && diag.detail) lines.push(diag.detail);
-        else if (res.probe && res.probe.error) lines.push(`探针失败：${res.probe.error}`);
-        else if (res.error) lines.push(`错误：${res.error}`);
-        else lines.push("真实上传探针失败，存储无法正常工作");
-
-        if (diag && Array.isArray(diag.actions) && diag.actions.length) {
-          lines.push(diag.actions[0]);
-          if (diag.actions[1] && lines.length < 5) lines.push(diag.actions[1]);
+        if (Array.isArray(res.lines) && res.lines.some((l) => l.includes("【智能诊断】"))) {
+          lines.push(...res.lines);
         } else {
-          lines.push("请到 NoCodeBackend 控制台确认 Cloudflare R2 连接与权限");
+          lines.push(`数据库：${res.database || "当前库"}`);
+          if (diag && diag.detail) lines.push(diag.detail);
+          else if (res.probe && res.probe.error) lines.push(`探针失败：${res.probe.error}`);
+          else if (res.error) lines.push(`错误：${res.error}`);
+          else lines.push("真实上传探针失败，存储无法正常工作");
+
+          if (diag && Array.isArray(diag.actions) && diag.actions.length) {
+            lines.push(diag.actions[0]);
+            if (diag.actions[1] && lines.length < 5) lines.push(diag.actions[1]);
+          } else {
+            lines.push("请到 NoCodeBackend 控制台确认 Cloudflare R2 连接与权限");
+          }
         }
       }
     } else if (op === "clean_probe") {
@@ -583,6 +501,15 @@ export function formatCardStatus(key, rawResult, opHint) {
       lines.push(res.message);
     } else {
       lines.push(ok ? "网关对话提炼功能正常运行" : "未检测到对话录制。请在 Magpie 设置里开启 GatewayConversations（本地录制对话，插件据此提炼记忆）。");
+    }
+  } else if (key === "model") {
+    title = res.title || (ok ? "在线模型连通就绪" : "在线模型检测未通过");
+    if (Array.isArray(res.lines) && res.lines.length) {
+      lines.push(...res.lines);
+    } else if (res.error) {
+      lines.push(`错误：${res.error}`);
+    } else {
+      lines.push(ok ? "在线模型配置有效且响应正常" : "在线模型未配置或检测未通过");
     }
   }
 

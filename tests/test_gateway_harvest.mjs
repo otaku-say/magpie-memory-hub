@@ -26,13 +26,77 @@ function makeTempDir(prefix) {
   return d;
 }
 
+const origFetch = globalThis.fetch;
+let currentNonce = Date.now().toString(36);
+globalThis.fetch = async (url, opts) => {
+  let userText = "";
+  try {
+    const b = typeof opts?.body === "string" ? JSON.parse(opts.body) : opts?.body;
+    const userMsg = b?.messages?.find((m) => m.role === "user");
+    userText = userMsg ? userMsg.content : "";
+  } catch (e) { void e; }
+
+  let ret;
+  if (userText.includes("天气") || userText.includes("你好")) {
+    ret = {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "[]" } }] }),
+    };
+  } else if (userText.includes("sess-001") || userText.includes("pytest") || userText.includes("ModuleNotFoundError")) {
+    ret = {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify([
+              {
+                category: "pitfall",
+                title: "ModuleNotFoundError 报错处理",
+                content: `运行测试命令 pytest 遇到 ModuleNotFoundError，请使用 source /root/.venv_${currentNonce}/activate 激活环境`,
+                tags: "python,pytest",
+                confidence: 0.95,
+              },
+            ]),
+          },
+        }],
+      }),
+    };
+  } else {
+    ret = {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify([
+              {
+                category: "decision",
+                title: "技术选型决策",
+                content: `决定采用 jaq_${currentNonce} 替代 jq 作为高性能 JSON 解析器`,
+                tags: "json,jaq",
+                confidence: 0.95,
+              },
+            ]),
+          },
+        }],
+      }),
+    };
+  }
+  return ret;
+};
+
 try {
+
   const hub = await MagpieMemoryHub({}, {
     ncb_instance: env.instance,
     ncb_secret: env.secret,
     mcp_key: env.mcpKey,
     _client: env.client,
     client: env.client,
+    extract_model: "group/gemini-3.5-flash-lite",
+    classify_model: "off",
   });
 
   console.log("=================================================================");
@@ -113,11 +177,17 @@ try {
   };
 
   // 写入 turns.jsonl 和 standalone json
+  currentNonce = nonce;
   fs.writeFileSync(path.join(dateDir, "turns.jsonl"), JSON.stringify(turn1) + "\n");
   fs.writeFileSync(path.join(dateDir2, "turn.json"), JSON.stringify(turn2, null, 2));
 
   console.log("--> 首次扫描 mock 目录（project = " + env.project + "）...");
-  const firstScan = await hub.tool.harvest_gateway.execute({ dir: mockDir, project: env.project });
+  const firstScan = await hub.tool.harvest_gateway.execute({
+    dir: mockDir,
+    project: env.project,
+    extract_model: "mock-model",
+    classify_model: "off",
+  });
   console.log("首次扫描结果：", JSON.stringify(firstScan, null, 2));
 
   assert.strictEqual(firstScan.success, true, "扫描必须成功");
@@ -132,7 +202,12 @@ try {
   console.log("=================================================================");
 
   console.log("--> 第二次扫描同一 mock 目录（未有新文件/修改）...");
-  const secondScan = await hub.tool.harvest_gateway.execute({ dir: mockDir, project: env.project });
+  const secondScan = await hub.tool.harvest_gateway.execute({
+    dir: mockDir,
+    project: env.project,
+    extract_model: "mock-model",
+    classify_model: "off",
+  });
   console.log("第二次扫描结果：", JSON.stringify(secondScan, null, 2));
 
   assert.strictEqual(secondScan.success, true, "第二次扫描必须成功");
@@ -187,7 +262,11 @@ try {
 
   const ac = new AbortController();
 
-  const abortRes = await harvestGateway({ dir: abortMockDir, project: env.project }, {
+  const abortRes = await harvestGateway({
+    dir: abortMockDir,
+    project: env.project,
+    extract_model: "mock-model",
+  }, {
     _client: {},
     _cfg: {},
     saveMemory: async () => {
@@ -221,7 +300,12 @@ try {
     output: [{ role: "assistant", text: "你好！今天确实是个好天气，很高兴与你聊天。" }]
   }, null, 2));
 
-  const noiseRes = await hub.tool.harvest_gateway.execute({ dir: noiseDir, project: env.project });
+  const noiseRes = await hub.tool.harvest_gateway.execute({
+    dir: noiseDir,
+    project: env.project,
+    extract_model: "mock-model",
+    classify_model: "off",
+  });
   console.log("无事实闲聊提炼结果：", JSON.stringify(noiseRes, null, 2));
   assert.strictEqual(noiseRes.success, true);
   assert.strictEqual(noiseRes.has_conversations, true);
@@ -231,6 +315,7 @@ try {
   console.log("✓ [PASS] 反证测试通过：无事实对话零入库！\n");
 
 } finally {
+  globalThis.fetch = origFetch;
   console.log("=================================================================");
   console.log("执行彻底清理：临时目录 + 真实数据库行");
   console.log("=================================================================");

@@ -25,6 +25,23 @@ import { lookupSecret } from "../../local_state.js";
 const activeEnvs = new Set();
 let processHooksRegistered = false;
 
+// 账号级资源安全防线：严禁在测试环境中向真实 NCB 账号发起建库或修改 R2 存储调用
+const origNcbCreateDatabase = NcbMcp.prototype.createDatabase;
+NcbMcp.prototype.createDatabase = function (name, tables, opts) {
+  if (process.env.TEST_ALLOW_REAL_RESOURCE_CREATION !== "1") {
+    throw new Error(`[SECURITY_BLOCKED] 测试环境严禁调用 NcbMcp.createDatabase('${name}')！防止在用户真实 NCB 账号内建库。如需测试决策逻辑请使用打桩 Client`);
+  }
+  return origNcbCreateDatabase.call(this, name, tables, opts);
+};
+
+const origNcbSetupR2Storage = NcbMcp.prototype.setupR2Storage;
+NcbMcp.prototype.setupR2Storage = function (database, extra) {
+  if (process.env.TEST_ALLOW_REAL_RESOURCE_CREATION !== "1") {
+    throw new Error(`[SECURITY_BLOCKED] 测试环境严禁调用 NcbMcp.setupR2Storage('${database}')！防止在用户真实账号内修改 R2 配置。如需测试决策逻辑请使用打桩 Client`);
+  }
+  return origNcbSetupR2Storage.call(this, database, extra);
+};
+
 // 全局纯内存数据仓库（当运行在内存模式时使用）
 const globalMemoryStore = {
   memories: new Map(),
@@ -257,6 +274,9 @@ export async function createTestEnv(options = {}) {
     mcp = {
       executeSql: async (_inst, sql) => executeMemorySql(sql, prefix),
       callTool: async (name, args) => {
+        if (name === "create_database" || name === "setup_r2_storage") {
+          throw new Error(`[SECURITY_BLOCKED] 测试环境严禁调用账号级资源创建工具 '${name}'！防止污染用户真实账号与消耗配额`);
+        }
         if (name === "execute_sql") return executeMemorySql(args?.sql || "", prefix);
         if (name === "get_schema") return { ok: true, tables: {} };
         return { ok: true };
@@ -308,7 +328,12 @@ export async function createTestEnv(options = {}) {
         }
         return await rawMcp.executeSql(inst, sql);
       },
-      callTool: async (name, args) => rawMcp.callTool(name, args),
+      callTool: async (name, args) => {
+        if (name === "create_database" || name === "setup_r2_storage") {
+          throw new Error(`[SECURITY_BLOCKED] 测试环境严禁调用账号级资源创建工具 '${name}'！防止污染用户真实账号与消耗配额`);
+        }
+        return await rawMcp.callTool(name, args);
+      },
     };
   }
 

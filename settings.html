@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.14.1</span>
+    <span class="version-tag">v6.15.0</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、上下文压缩、R2 存储。</p>
 
@@ -248,6 +248,89 @@
       <div class="card-save-row">
         <button type="button" class="btn-card-save" id="btn_save_r2">保存本卡片</button>
         <span class="status" id="r2_status" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </details>
+
+  <!-- 在线大模型与智能配置 -->
+  <details class="card" id="card_models" open>
+    <summary>
+      <span class="chev"></span>
+      <span class="t">在线大模型与智能配置</span>
+      <span class="sub">知识提炼 · 意图判定 · 错误智能诊断 · 搜索自然语言改写</span>
+    </summary>
+    <div class="body">
+      <div class="row">
+        <div class="row-head">
+          <label for="extract_model">提炼与诊断模型 (extract_model)</label>
+          <span class="badge rec">推荐配置</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">用于异步提炼高价值记忆/踩坑经验，以及为底层未知报错提供智能人话诊断与修复建议。</div>
+          <div class="hint-diff"><strong>留空</strong>：安全跳过模型提炼与智能诊断，零网络请求与额外开销；<strong>填写示例</strong>：<code>group/gemini-3.5-flash-lite</code>。</div>
+        </div>
+        <div class="control">
+          <input type="text" id="extract_model" placeholder="例如：group/gemini-3.5-flash-lite" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="classify_model">前置意图判定模型 (classify_model)</label>
+          <span class="badge">可选</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">提炼前对长对话进行前置轻量价值分类，快速过滤无长期价值对话，节省提炼成本。</div>
+          <div class="hint-diff"><strong>留空</strong>：跳过前置过滤直接提炼；<strong>填写示例</strong>：<code>group/clef</code>。</div>
+        </div>
+        <div class="control">
+          <input type="text" id="classify_model" placeholder="例如：group/clef" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="classify_endpoint">判定模型端点模式 (classify_endpoint)</label>
+          <span class="badge rec">默认 auto</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">判定模型调用的接口端点：auto 具备自适应探测与进程级缓存；systemone 走快速决策端点；chat 走标准对话补全。</div>
+          <div class="hint-diff"><strong>auto</strong>：自适应探测端点并缓存；<strong>systemone</strong>：强制使用决策模型端点；<strong>chat</strong>：强制走对话补全。</div>
+        </div>
+        <div class="control">
+          <select id="classify_endpoint">
+            <option value="auto">auto（自适应探测，推荐）</option>
+            <option value="systemone">systemone（决策端点）</option>
+            <option value="chat">chat（对话补全端点）</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row split">
+        <div class="main">
+          <div class="row-head">
+            <label for="search_rewrite">自然语言搜索改写 (search_rewrite)</label>
+            <span class="badge rec">推荐 开</span>
+          </div>
+          <div class="hint">
+            <div class="hint-desc">记忆检索时，调用提炼模型将自然语言转化为高召回实体关键词，并采用原词+改写词双路混合检索融合打分。</div>
+            <div class="hint-diff"><strong>开</strong>：提升自然语言与长问句检索召回率；<strong>关</strong>：仅使用原始输入词面检索。未配置提炼模型时自动静默回退。</div>
+          </div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="search_rewrite"><span></span></label>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button type="button" id="btn_check_model">真实检测模型</button>
+      </div>
+
+      <div class="action-status-box" id="model_action_status" style="display:none;"></div>
+
+      <div class="card-save-row">
+        <button type="button" class="btn-card-save" id="btn_save_card_model">保存本卡片</button>
+        <span class="status" id="status_card_model" role="status" aria-live="polite"></span>
       </div>
     </div>
   </details>
@@ -514,21 +597,6 @@
         <div class="side">
           <label class="switch"><input type="checkbox" id="cross_turn_dedup"><span></span></label>
         </div>
-      </div>
-
-      <div class="row">
-        <div class="row-head">
-          <label>离线语义压缩引擎</label>
-        </div>
-        <div class="hint">
-          <div class="hint-desc">离线语义压缩固定使用<strong>本地多语言小模型 LLMLingua-2 XLM-RoBERTa-large INT8</strong>（约 552MB，560M 参数，原生支持中文与中英混合长文本），纯 CPU 本地推理，不联网、不上传数据。</div>
-          <div class="hint-diff">可点击下方按钮检测本地模型环境与权重文件是否就绪。</div>
-        </div>
-        <div class="btn-row" style="margin-top:10px;">
-          <button type="button" id="btn_check_model">检测本地小模型</button>
-          <button type="button" id="btn_download_model">一键下载模型</button>
-        </div>
-        <div class="action-status-box" id="model_action_status" style="display:none;"></div>
       </div>
 
       <div class="row">

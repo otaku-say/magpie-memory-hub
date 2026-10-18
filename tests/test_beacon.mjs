@@ -15,7 +15,7 @@ import { TABLES } from "../schema.js";
 const testTables = new Set(["memories", "pitfalls", "schema_meta"]);
 const origCallTool = NcbMcp.prototype.callTool;
 NcbMcp.prototype.callTool = async function (name, args, parseJson) {
-  if (args && args.database === "41694_test") {
+  if (args && (args.database === "__test_mock_beacon_db__" || args.database === "41694_test")) {
     if (name === "get_schema") {
       const curTables = {};
       for (const tname in TABLES) {
@@ -48,7 +48,7 @@ NcbMcp.prototype.callTool = async function (name, args, parseJson) {
 };
 
 const env = {
-  instance: "41694_test",
+  instance: "__test_mock_beacon_db__",
   project: "__test__beacon_" + Date.now(),
   mcpKey: "mcp_sec_test_mock_key_12345678",
   secret: "ncb_sec_test_mock_secret_12345678",

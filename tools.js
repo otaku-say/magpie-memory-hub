@@ -21,10 +21,10 @@ import {
 import { r2Setup, r2Upload, r2List, r2Delete, r2Guide, r2Check } from "./r2.js";
 import { lookupSecret, lookupDatabase } from "./local_state.js";
 import { makeMcpClient } from "./mcp_client.js";
-import { checkLocalModel, MODEL_SPEC, modelDir } from "./model_check.js";
-import { runPendingAction, readAction, writeCardStatus, parseDbInfo, isModelDownloading, startBackgroundModelDownload } from "./page_actions.js";
+import { runPendingAction, readAction, writeCardStatus, parseDbInfo } from "./page_actions.js";
 import { harvestGateway, isTestMode } from "./gateway_harvest.js";
 import { triggerBackgroundDrain } from "./gateway_harvest.hooks.js";
+import { rewriteSearchQuery } from "./online_models.js";
 
 const NCB_BASE = "https://api.nocodebackend.com";
 
@@ -98,6 +98,14 @@ function readOptions(options) {
     minConfidence: Number(o.min_confidence) || 0.6,
     maxInject: Number(o.max_inject_count) || 5,
     maxBudget: Number(o.max_budget_chars) || 2048,
+    // 在线模型配置（设置页自由指定，默认留空安全跳过）
+    extract_model: o.extract_model || o.harvest_model || "",
+    classify_model: o.classify_model || "",
+    classify_endpoint: o.classify_endpoint || "auto",
+    search_rewrite: o.search_rewrite !== false,
+    gateway_url: o.gateway_url || o.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425",
+    gateway_api_key: o.gateway_api_key || o.api_key || process.env.MAGPIE_API_KEY || "",
+    _fetch: o._fetch,
   };
 }
 
@@ -454,7 +462,8 @@ async function memorySave(client, cfg, args, ctx) {
 
 async function memorySearch(client, cfg, args) {
   const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
-  const terms = termsOf(args.query);
+  const rawQuery = String(args.query || "").trim();
+  const origTerms = termsOf(rawQuery);
 
   const fetchParams = { lifecycle_status: "active" };
   if (args.project) fetchParams.project = String(args.project).trim();
@@ -474,8 +483,51 @@ async function memorySearch(client, cfg, args) {
   // 历史版本默认不返回（Headroom：查询默认排除 superseded）
   if (args.include_history !== true) pool = pool.filter((r) => r.lifecycle_status !== "superseded");
 
+  // 优先级 2：在线提炼模型改写自然语言查询（在配置了模型且开启改写时）
+  let rewrittenInfo = null;
+  let rewrittenTerms = [];
+  if (rawQuery) {
+    try {
+      rewrittenInfo = await rewriteSearchQuery({
+        query: rawQuery,
+        options: cfg,
+      });
+      if (rewrittenInfo && rewrittenInfo.rewrittenQuery) {
+        rewrittenTerms = termsOf(rewrittenInfo.rewrittenQuery);
+      }
+    } catch (_) {
+      // 严格 fail-open：模型异常或超时，降级为原查询纯词面检索
+      rewrittenInfo = null;
+      rewrittenTerms = [];
+    }
+  }
+
+  const hasOrig = origTerms.length > 0;
+  const hasRewrite = rewrittenTerms.length > 0;
+
   const scored = pool
-    .map((r) => ({ row: r, hit: scoreMemory(r, terms) }))
+    .map((r) => {
+      if (!hasOrig && !hasRewrite) {
+        return { row: r, hit: 1, origHit: 1, rewriteHit: 0 };
+      }
+      const origHit = hasOrig ? scoreMemory(r, origTerms) : 0;
+      const rewriteHit = hasRewrite ? scoreMemory(r, rewrittenTerms) : 0;
+
+      // 双路融合打分：
+      // 1. 同时命中两路：叠加奖励分（原词 + 改写词同时命中，相关度最高）；
+      // 2. 仅命中原词（如直接搜索专业术语）：原样召回，绝不丢弃；
+      // 3. 仅命中改写词（自然语言问句）：由改写词成功召回原本无法命中的记忆！
+      let combinedHit = 0;
+      if (hasOrig && hasRewrite) {
+        combinedHit = origHit + rewriteHit;
+      } else if (hasOrig) {
+        combinedHit = origHit;
+      } else if (hasRewrite) {
+        combinedHit = rewriteHit;
+      }
+
+      return { row: r, hit: combinedHit, origHit, rewriteHit };
+    })
     .filter((x) => x.hit > 0)
     .sort((a, b) => b.hit - a.hit || rankMemory(b.row) - rankMemory(a.row));
 
@@ -496,7 +548,14 @@ async function memorySearch(client, cfg, args) {
     _hit: x.hit,
   }));
 
-  return jsonOut({ total_active: all.length, matched: scored.length, returned: out.length, memories: out });
+  return jsonOut({
+    total_active: all.length,
+    matched: scored.length,
+    returned: out.length,
+    query_rewritten: rewrittenInfo ? rewrittenInfo.rewrittenQuery : null,
+    rewrite_used: Boolean(rewrittenInfo && rewrittenInfo.rewrittenQuery),
+    memories: out,
+  });
 }
 
 async function memoryList(client, cfg, args) {
@@ -949,55 +1008,6 @@ const TOOLS = {
   },
 
   /* ---------------- R2 文件存储（需 MCP key） ---------------- */
-
-  model_check: {
-    description: "检测本地多语言小模型是否已就绪（离线语义压缩用）。未就绪时会给出缺失文件清单与下载指引；支持可选的 check_upstream 联网比对上游新版本。",
-    args: {
-      type: "object",
-      properties: {
-        check_upstream: { type: "boolean", description: "是否联网检查 HuggingFace / 镜像站比对最新版本（默认 false 纯本地秒级检测）" },
-      },
-    },
-    run: async (args, ctx) => {
-      const r = await checkLocalModel({
-        checkUpstream: !!(args && args.check_upstream),
-        signal: ctx && ctx.signal,
-      });
-      return jsonOut(Object.assign({}, r, { model_dir: modelDir(), spec_repo: MODEL_SPEC.repo }));
-    },
-  },
-
-  model_download: {
-    description: "后台下载并安装本地多语言小模型（LLMLingua-2 mBERT INT8，约 174MB）。优先走国内 hf-mirror.com 镜像，支持断点续传与 SHA-256 完整性校验。后台非阻塞执行，可通过 model_check 工具或设置页查看进度。",
-    args: {
-      type: "object",
-      properties: {
-        force: { type: "boolean", description: "是否强制重新下载已存在的文件（默认 false）" },
-      },
-    },
-    run: (args, ctx) => {
-      if (isModelDownloading()) {
-        return jsonOut({
-          ok: true,
-          action: "IN_PROGRESS",
-          message: "本地小模型正在后台下载中，无需重复触发",
-          model_dir: modelDir(),
-        });
-      }
-      startBackgroundModelDownload(ctx._cfg, {
-        force: !!(args && args.force),
-        signal: ctx && ctx.signal,
-      });
-      return jsonOut({
-        ok: true,
-        action: "STARTED",
-        message: "已启动本地小模型后台下载任务（约 174MB，支持断点续传与 sha256 校验）",
-        model_dir: modelDir(),
-        approx_bytes: MODEL_SPEC.approx_bytes,
-        repo: MODEL_SPEC.repo,
-      });
-    },
-  },
 
   r2_check: {
     description:

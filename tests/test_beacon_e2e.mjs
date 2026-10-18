@@ -36,8 +36,9 @@ try {
   allSentOps.add("provision");
   allSentOps.add("reset");
 
-  // harvest_gateway 是网关对话提炼专有信标（由 gateway_harvest.js 处理并回传至 gateway 卡片）
-  const sentOps = new Set([...allSentOps].filter((op) => op !== "harvest_gateway"));
+  // harvest_gateway 是网关对话提炼专有信标，已下线的本地模型下载信标（model_download）已彻底移除
+  const deprecatedOps = new Set(["harvest_gateway", "model_download"]);
+  const sentOps = new Set([...allSentOps].filter((op) => !deprecatedOps.has(op)));
 
   console.log("=== 1. 页面会发出的 op 清单 ===");
   console.log("  " + [...sentOps].sort().join(", "));
@@ -118,10 +119,10 @@ try {
     }
   }
 
-  console.log("\n=== 5. 合并写：四张卡片的结果必须共存，不能互相覆盖 ===");
+  console.log("\n=== 5. 合并写：各卡片的结果必须共存，不能互相覆盖 ===");
   {
     rmSync(STATUS_JSON_PATH, { force: true });
-    for (const op of ["ncb_check", "r2_check", "model_check"]) {
+    for (const op of ["ncb_check", "r2_check"]) {
       await runPendingAction(
         { _action: { op, id: op + "-merge-" + Date.now(), at: Date.now() } },
         { instance: env.instance, mcpKey: env.mcpKey, secret: env.secret }
@@ -139,8 +140,8 @@ try {
       written = JSON.parse(readFileSync(STATUS_JSON_PATH, "utf8"));
     }
     if (written) {
-      check(["ncb", "r2", "model", "gateway"].every((k) => !!written[k]),
-        `四张卡片结果共存（实际：${Object.keys(written).join(",")}）`);
+      check(["ncb", "r2", "gateway"].every((k) => !!written[k]),
+        `卡片结果共存（实际：${Object.keys(written).join(",")}）`);
     } else {
       no("状态文件不存在");
     }
@@ -154,6 +155,7 @@ try {
       "drop_all_database",
       "exec_command",
       "__proto__",
+      "model_download",
     ];
     let blockedCount = 0;
     for (const bad of bogusCases) {

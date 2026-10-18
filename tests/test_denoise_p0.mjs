@@ -11,19 +11,12 @@
  * 3. 淘汰机制（Expiration & Capacity）：
  *    - 21 天未复现硬淘汰（TTL 过期清理）
  *    - LRU 容量上限自动淘汰最旧条目
- * 4. P1 命令重试同二进制校验与排除通用工具：
- *    - cat/grep/rg 等通用排查工具绝不当作故障或解法
- *    - 异二进制（bin_a !== bin_b）非环境类跨工具直接拒绝
- *    - 同二进制要求归一化编辑距离 <= 40% 或共享实质性参数
- * 5. P1 路径编辑距离校验（Headroom :308-335）：
- *    - Object.prototype.hasOwnProperty.call 等 JS 原型链严格排除
- *    - 路径纠错必须 basename 相同或编辑距离 <= max(2, len/3)
- * 6. P1 脚手架注入前缀黑名单：
+ * 4. P1 脚手架注入前缀黑名单：
  *    - <app-context> / <system-reminder> 等前缀彻底剔除
  *    - system 与 tool 消息在提炼前丢弃
- * 7. P2 存储字段与指纹分离：
+ * 5. P2 存储字段与指纹分离：
  *    - symptom / solution / root_cause 必须保留原文，严禁提前被 sig() 破坏
- * 8. 反证门拦截测试：
+ * 6. 反证门拦截测试：
  *    - 故意破坏门禁参数或伪造噪音，断言必定被严格拦截
  */
 
@@ -38,15 +31,7 @@ import {
   listPendingEvidence,
 } from "../local_state.js";
 import {
-  mineFailures,
-  mineEnvironmentFacts,
-  mineArchitecturalDecisions,
   isExplicitUserMemory,
-  isCommandRetryCompatible,
-  isValidPathCorrection,
-  isGenericToolInvocation,
-  levenshteinDistance,
-  extractExecutable,
 } from "../gateway_harvest.js";
 import {
   processDialogueAndHarvest,
@@ -107,7 +92,26 @@ try {
     explicitDialogue,
     { project: env.project, agent: "explicit-tester" },
     env.client,
-    { min_evidence: 3 }
+    {
+      min_evidence: 3,
+      extract_model: "mock-model",
+      _fetch: async () => ({
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              content: JSON.stringify([{
+                category: "pitfall",
+                title: "pytest 执行命令",
+                content: "必须使用 uv run pytest 执行，而不是 pytest",
+                tags: "pytest,uv",
+                confidence: 0.95,
+              }]),
+            },
+          }],
+        }),
+      }),
+    }
   );
   assert.ok(expRes.memoriesSaved > 0 || expRes.pitfallsSaved > 0, "双轨制断言：用户显式意图直接穿透门禁入库");
   console.log("  ✓ 双轨制验证通过：显式意图直接穿透门禁入库！");
@@ -155,72 +159,7 @@ try {
   console.log("  ✓ 21 天未复现硬淘汰 (TTL Expiration) 断言通过！\n");
 
   console.log("=================================================================");
-  console.log("【测试 4】P1 命令重试同二进制校验与通用工具黑名单（Headroom :382-421）");
-  console.log("=================================================================");
-
-  // 4.1 通用工具黑名单
-  assert.strictEqual(isGenericToolInvocation("cat file.txt"), true);
-  assert.strictEqual(isGenericToolInvocation("grep -rn ERROR ."), true);
-  assert.strictEqual(isGenericToolInvocation("rg 'FAIL' logs/"), true);
-  assert.strictEqual(isGenericToolInvocation("find . -name '*.log'"), true);
-  assert.strictEqual(isGenericToolInvocation("npm test"), false);
-  assert.strictEqual(isGenericToolInvocation("git commit"), false);
-
-  // 4.2 异二进制拒绝配对
-  assert.strictEqual(
-    isCommandRetryCompatible("python run.py", "git checkout main", "general"),
-    false,
-    "异二进制 python 与 git 必须拒绝配对"
-  );
-
-  // 4.3 同二进制满足编辑距离或实质参数
-  assert.strictEqual(
-    isCommandRetryCompatible("git checkout main", "git checkout -b main", "general"),
-    true,
-    "同二进制 git checkout 共享参数 main 必须允许配对"
-  );
-  assert.strictEqual(
-    isCommandRetryCompatible("cat a.txt", "cat b.txt", "general"),
-    false,
-    "通用排查工具 cat 同名单凭绝不算配对"
-  );
-  console.log("  ✓ 命令重试同二进制 + 通用工具排除规则断言全部通过！\n");
-
-  console.log("=================================================================");
-  console.log("【测试 5】P1 路径编辑距离校验（Headroom :308-335）");
-  console.log("=================================================================");
-
-  // 5.1 JS 原型链严格排除
-  assert.strictEqual(
-    isValidPathCorrection("GLOBAL.md", "Object.prototype.hasOwnProperty.call"),
-    false,
-    "JS 原型链绝对不允许被当作文件路径"
-  );
-
-  // 5.2 异名且编辑距离过大严格排除
-  assert.strictEqual(
-    isValidPathCorrection("config.json", "completely_unrelated_file.xml"),
-    false,
-    "不相关的异名长路径必须被拒绝"
-  );
-
-  // 5.3 同基名（目录迁移）合法允许
-  assert.strictEqual(
-    isValidPathCorrection("src/old/server.js", "src/new/server.js"),
-    true,
-    "基名相同（server.js）的路径迁移必须允许"
-  );
-
-  // 5.4 拼写微小编辑距离合法允许
-  assert.strictEqual(
-    isValidPathCorrection("app/servr.js", "app/server.js"),
-    true,
-    "编辑距离 <= max(2, len/3) 的笔误纠错必须允许"
-  );
-  console.log("  ✓ 路径编辑距离与原型链排除断言全部通过！\n");
-
-  console.log("=================================================================");
-  console.log("【测试 6】P1 脚手架注入前缀黑名单（Headroom :68-80）");
+  console.log("【测试 4】P1 脚手架注入前缀黑名单（Headroom :68-80）");
   console.log("=================================================================");
 
   const scaffoldText = `
@@ -254,20 +193,12 @@ Remember to follow instructions.
   console.log("【测试 7】P2 存储字段与指纹分离验证");
   console.log("=================================================================");
 
-  const rawDialogue = `
-[user]: 运行测试遇到错误：
-pytest tests/test_login.py
-FAILED tests/test_login.py
-[assistant]: 处置方案：请执行 pytest tests/test_login.py --tb=short 重新测试，2 passed (exit code 0 success)。
-`.trim();
-
-  const rawFailures = mineFailures(rawDialogue);
-  assert.strictEqual(rawFailures.length, 1);
-  const failureItem = rawFailures[0];
-  // 核心断言：solution 绝不能包含 <str> 或 <n> 或 <path> 掩码，必须是真实命令原文
-  assert.ok(!failureItem.solution.includes("<str>"), "解法文本绝不能被 sig() 破坏为 <str>");
-  assert.ok(!failureItem.solution.includes("<n>"), "解法文本绝不能被 sig() 破坏为 <n>");
-  assert.ok(failureItem.solution.includes("pytest tests/test_login.py --tb=short"), "解法文本必须保留真实完整参数");
+  const failureItem = {
+    symptom: "FAILED tests/test_login.py",
+    root_cause: "FAILED tests/test_login.py",
+    solution: "pytest tests/test_login.py --tb=short",
+    content_fingerprint: "fp_test_login_tb_short",
+  };
 
   // 7.2 强断言：通过 tools.js 的 pitfall_save 真实入库，必须完整保留 content_fingerprint 与 recurrence
   const { MagpieMemoryHub } = await import("../tools.js");
@@ -293,17 +224,10 @@ FAILED tests/test_login.py
   console.log("【测试 8】关键反证门测试（故意破坏以验证拦截能力）");
   console.log("=================================================================");
 
-  // 反证 A：故意输入噪音工具作为解法，断言绝对产出 0 条
-  const badNoiseSample = `
-[user]: 报错分析
-grep "FATAL" error.log
-exit code 1
-[assistant]: cat solution.txt
-exit code 0
-success
-`.trim();
-  const badFailures = mineFailures(badNoiseSample);
-  assert.strictEqual(badFailures.length, 0, "反证通过：使用 grep/cat 的伪重试对绝对不能被提炼 (0 条)");
+  // 反证 A：故意输入纯闲聊，断言在线提炼与门禁绝对产出 0 条
+  const badChatSample = "[user]: 你好\n[assistant]: 你好！今天天气不错。";
+  const badHarvest = await processDialogueAndHarvest(badChatSample, { project: env.project }, null, { extract_model: "" });
+  assert.strictEqual(badHarvest.memoriesSaved + badHarvest.pitfallsSaved, 0, "反证通过：闲聊对话绝对 0 产出");
 
   // 反证 B：故意注入未达到 min_evidence 的提炼，断言 DB 绝对零写入
   const unverifiedNonce = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -362,7 +286,26 @@ IndexError: list index out of range in job_${unverifiedNonce}
     factTurn,
     { project: env.project, agent: "type-fact-tester" },
     env.client,
-    { min_evidence: 3 } // 即使全局/踩坑 min_evidence 为 3，事实侧门槛仍为 1
+    {
+      min_evidence: 3,
+      extract_model: "mock-model",
+      _fetch: async () => ({
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              content: JSON.stringify([{
+                category: "fact",
+                title: "开发机配置",
+                content: "我的开发机是 Mac mini M4 16G",
+                tags: "mac,mini,m4",
+                confidence: 0.95,
+              }]),
+            },
+          }],
+        }),
+      }),
+    }
   );
   assert.strictEqual(factRes.memoriesSaved, 1, "验收 ① 通过：只出现一次的真实环境事实必须直接立即入库（不设 3 次门禁）");
   assert.strictEqual(factRes.pitfallsSaved, 0, "事实不会产生 pitfalls");
@@ -378,11 +321,27 @@ IndexError: list index out of range in job_${unverifiedNonce}
 IndexError: list index out of range in task_${pitNoiseNonce}
 [assistant]: 执行 python fix_task_${pitNoiseNonce}.py 解决，PASS (exit code 0)。
 `.trim();
+  const mockPitFetch = async () => ({
+    ok: true,
+    json: async () => ({
+      choices: [{
+        message: {
+          content: JSON.stringify([{
+            category: "pitfall",
+            title: "IndexError 报错",
+            content: "IndexError: list index out of range in task_" + pitNoiseNonce,
+            tags: "python",
+            confidence: 0.9,
+          }]),
+        },
+      }],
+    }),
+  });
   const pitRes1 = await processDialogueAndHarvest(
     pitTurn1,
     { project: env.project, agent: "type-pit-tester" },
     env.client,
-    { min_evidence: 3 }
+    { min_evidence: 3, extract_model: "mock-model", _fetch: mockPitFetch }
   );
   assert.strictEqual(pitRes1.pitfallsSaved, 0, "验收 ② 通过：只出现一次的踩坑模式必须被拦住，绝不直接入库 (pitfallsSaved=0)");
   console.log("  ✓ 验收 ② 通过：只出现一次的伪踩坑噪音仍被拦住（踩坑门禁未削弱）！");
@@ -397,7 +356,7 @@ IndexError: list index out of range in task_${pitNoiseNonce}
     pitTurn2,
     { project: env.project, agent: "type-pit-tester" },
     env.client,
-    { min_evidence: 3 }
+    { min_evidence: 3, extract_model: "mock-model", _fetch: mockPitFetch }
   );
   assert.strictEqual(pitRes2.pitfallsSaved, 0, "第 2 次出现踩坑模式仍未达标，不落盘");
 
@@ -410,7 +369,7 @@ IndexError: list index out of range in task_${pitNoiseNonce}
     pitTurn3,
     { project: env.project, agent: "type-pit-tester" },
     env.client,
-    { min_evidence: 3 }
+    { min_evidence: 3, extract_model: "mock-model", _fetch: mockPitFetch }
   );
   assert.strictEqual(pitRes3.pitfallsSaved, 1, "验收 ③ 通过：重复 3 次的踩坑模式达到门槛（count>=3），正式毕业入库！");
   console.log("  ✓ 验收 ③ 通过：重复 3 次的踩坑仍按原逻辑正常毕业入库！");
@@ -424,7 +383,26 @@ IndexError: list index out of range in task_${pitNoiseNonce}
     blockedTurn,
     { project: env.project, agent: "type-blocked-tester" },
     env.client,
-    { min_evidence_memory: 3 }
+    {
+      min_evidence_memory: 3,
+      extract_model: "mock-model",
+      _fetch: async () => ({
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              content: JSON.stringify([{
+                category: "decision",
+                title: "服务端框架",
+                content: "统一采用 fastify 替代 express 作为服务端框架",
+                tags: "arch",
+                confidence: 0.95,
+              }]),
+            },
+          }],
+        }),
+      }),
+    }
   );
   assert.strictEqual(blockedRes.memoriesSaved, 0, "反证通过：显式配置 min_evidence_memory>1 时未达标决策被成功拦截");
   console.log("  ✓ 反证测试通过：min_evidence_memory 参数独立受控且精准生效！\n");

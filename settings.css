@@ -950,38 +950,6 @@ code, .mono {
   color: var(--magpie-amber);
 }
 
-/* ---------- 模型下载进度条 ---------- */
-.model-progress-box {
-  margin: 8px 0;
-  padding: 8px 10px;
-  background: var(--magpie-bg);
-  border: 1px solid var(--magpie-line);
-  border-radius: 6px;
-}
-.model-progress-bar {
-  height: 6px;
-  background: var(--magpie-line);
-  border-radius: 3px;
-  overflow: hidden;
-  margin-bottom: 6px;
-}
-.model-progress-fill {
-  height: 100%;
-  background: var(--magpie-accent);
-  transition: width 0.3s ease;
-}
-.model-progress-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 11px;
-  color: var(--magpie-muted);
-}
-.model-progress-pct {
-  font-weight: 600;
-  color: var(--magpie-fg);
-}
-
 /* ---------- 记忆采集来源说明卡片 ---------- */
 .source-intro-box {
   display: flex;

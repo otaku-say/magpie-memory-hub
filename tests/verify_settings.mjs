@@ -75,6 +75,10 @@ const REMOTE = {
   cross_turn_dedup: true,
   compress_max_chars: 3000,
   compress_min_chars: 1200,
+  extract_model: "",
+  classify_model: "",
+  classify_endpoint: "auto",
+  search_rewrite: true,
   memories: [{ id: 1, title: "宿主推进来的快照，绝不能被覆盖掉" }],
   some_future_field: "未来新增的字段也必须在",
 };
@@ -190,12 +194,12 @@ for (const [btnId, op] of [
     const dbHtml = els.db_action_status ? els.db_action_status.innerHTML : "";
     const mHtml = els.model_action_status ? els.model_action_status.innerHTML : "";
     check(
-      !dbHtml.includes("model_check") && !dbHtml.includes("检测本地小模型"),
-      "卡片隔离：#db_action_status 不含小模型任务提示（防串台）"
+      !dbHtml.includes("model_check") && !dbHtml.includes("真实检测模型") && !dbHtml.includes("检测本地小模型"),
+      "卡片隔离：#db_action_status 不含模型任务提示（防串台）"
     );
     check(
-      mHtml.includes("model_check") || mHtml.includes("检测本地小模型"),
-      "卡片隔离：#model_action_status 正确展示小模型任务提示"
+      mHtml.includes("model_check") || mHtml.includes("真实检测模型"),
+      "卡片隔离：#model_action_status 正确展示模型任务提示"
     );
   }
 }
@@ -360,8 +364,8 @@ console.log("\n=== 11. 状态回传渲染测试（伪造 window.__memhubStatus �
     },
     model: {
       at: Date.now(), op: "model_check", ok: true,
-      title: "本地模型就绪",
-      lines: ["模型文件存在：models/kompress-v1.onnx", "模型权重完整，校验耗时 12ms"]
+      title: "在线模型连通就绪",
+      lines: ["提炼模型 [group/gemini-3.5-flash-lite]: 可用 (120ms)", "判定模型 [group/clef]: 可用 (45ms)"]
     },
     gateway: {
       at: Date.now(), op: "harvest_gateway", ok: true,
@@ -398,8 +402,8 @@ console.log("\n=== 11. 状态回传渲染测试（伪造 window.__memhubStatus �
   check(r2Text.includes("请到 NCB 控制台更新 Cloudflare 连接"), "r2_action_status 包含 r2.lines[1]");
 
   const modelText = (els.model_action_status && els.model_action_status.innerText) || "";
-  check(modelText.includes("本地模型就绪"), "model_action_status 包含 model.title");
-  check(modelText.includes("models/kompress-v1.onnx"), "model_action_status 包含 model.lines[0]");
+  check(modelText.includes("在线模型连通就绪"), "model_action_status 包含 model.title");
+  check(modelText.includes("提炼模型 [group/gemini-3.5-flash-lite]"), "model_action_status 包含 model.lines[0]");
 
   const gatewayText = (els.harvest_action_status && els.harvest_action_status.innerText) || "";
   check(gatewayText.includes("对话提炼完成"), "harvest_action_status 包含 gateway.title");

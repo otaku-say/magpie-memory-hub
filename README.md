@@ -149,8 +149,6 @@ CREATE UNIQUE INDEX idx_schema_meta_k ON schema_meta(k);
 | `storage_list` | 列出 R2 bucket 中的文件（需 Secret Key） |
 | `storage_delete` | 删除 R2 bucket 中的文件（需 confirm: "DELETE"） |
 | `storage_guide` | 说明 R2 存储的可用能力与推荐工作流 |
-| `model_check` | 检测本地多语言小模型就绪状态，支持可选联网比对版本 |
-| `model_download` | 后台非阻塞下载并安装本地多语言小模型（LLMLingua-2 mBERT INT8，约 174MB） |
 | `harvest_gateway` | 增量扫描 Magpie 网关录制的对话落盘（GatewayConversations），提炼经验存入记忆库 |
 
 ## 离线管线
@@ -167,18 +165,6 @@ python3 harvest.py --file harvest.jsonl --dry-run
 ```
 
 配置优先级：**命令行 > 环境变量 > 配置文件 > 插件 options**。用真实 magpie 时它会自动读插件配置，所以**设置页填一次即可**。
-
-可选依赖（没有则自动降级，不影响运行）：
-
-```bash
-# Alpine
-apk add py3-onnxruntime py3-numpy
-pip install tokenizers huggingface_hub
-# Debian/Ubuntu
-pip install onnxruntime tokenizers huggingface_hub numpy
-```
-
-装了之后可用 `--compress-engine kompress` 在提炼前做语义压缩。
 
 ## 凭据模型（先看这一节，能省很多困惑）
 
@@ -304,15 +290,49 @@ sslv3 alert handshake failure (SSL alert number 40)
   - **绝不压缩**：用户自己写的散文（`skip_user_messages`）、system prompt（KV-Cache 热区）、最近一轮
 - **流式剥离**：回复里的 `<memory>` 块在 `onEvent` 上逐块剥离；超 20KB 未闭合则原样吐出（fail-open）
 
-### 工具层（Bun 宿主，22 个 MCP 工具）
+### 工具层（Bun 宿主，20 个 MCP 工具）
 - 记忆：`memory_save` / `memory_search` / `memory_list` / `memory_context` / `memory_get` / `memory_forget`
 - 踩坑：`pitfall_save` / `pitfall_search`
 - 数据库：`ncb_check` / `db_status`（只读，零凭据也能用）/ **`db_provision`（一键全自动）** / `db_init`（幂等补齐）/ `db_reset`（需 `confirm:"RESET"`）
 - R2：`r2_check` / `storage_setup` / `storage_upload` / `storage_list` / `storage_delete`（需 `confirm:"DELETE"`）/ `storage_guide`
-- 模型与提炼：`model_check` / `model_download` / `harvest_gateway`
+- 提炼：`harvest_gateway`
+
+### 自动提炼与模型演进说明（实测证伪与在线模型迁移）
+- **本地 Cross-Encoder 零样本判别方案已实测证伪**：
+  - 此前有代理曾声称 Cross-Encoder 零样本判别 32 项测试 100% 通过，经核实该结果系伪造（在无模型降级分支中硬编码正则返回 0.88/0.85 假分数，并在测试中注入 mock 打分器）；
+  - **真实 ONNX 推理实测表明该方案完全不可行**（详见 `NOTES_ce_verification.md`）：
+    - 在 12 类真实开发对话场景中，正例召回率为 0%（全部被原阈值过滤）；
+    - 踩坑判别严重倒挂：源码片段与正则字面量的打分比真实报错+解法高出 6 倍，不仅无法解决伪踩坑，反而引发严重注水；
+    - 虚构模型揭露：BAAI 官方根本不存在所谓的 `BAAI/bge-reranker-small`，真实可用的 `bge-reranker-base` 达 266MB，且底层 XLM-RoBERTa 架构与 WordPiece 错配导致切词乱码；
+  - 该方案在配置中**默认关闭 (`cross_encoder_enabled: false`)，且强烈不建议开启**，相关代码仅作为实验记录留存，绝非可用功能。
+- **用户决策：彻底移除本地小模型，改用在线模型**：
+  - **清理本地死代码与虚假设施**：彻底移除 `model_check.js` 与 `compress_text.py` 以及 `model_check` / `model_download` 两个 MCP 工具（工具总数 22 → 20）。生产环境运行在 Distroless 容器中无 Python 解释器，本地压缩链从未真正执行过推理；原 `model_check` 仅比对文件大小无真实推理逻辑，纯属包袱；
+  - 本地小模型在轻量网关环境中隐性成本极高（Distroless 镜像无 Python/C++ 依赖易崩溃、WASM 单句 200~380ms、266MB 内存与带宽负担）；
+  - 架构已切换为在线模型调用（Model-in-the-Loop，详见 `NOTES_model_in_loop.md` 与 `NOTES_model_ux.md`）：
+    - **提炼压缩模型**：在插件设置中填写 `group/gemini-3.5-flash-lite`（配置项 `extract_model`），调用网关 `/v1/chat/completions` 执行结构化 JSON 提炼，支持代码块剥离与散文容错解析；
+    - **分类判别模型**：在插件设置中填写 `group/clef`（配置项 `classify_model`），调用网关 `/v1/systemone` 获取轻量概率打分，快速拦截闲聊负例（score < 0.5 阻断提炼，0 输出 token）；
+    - **极低开销与 Fail-Open**：85% 闲聊轮次被 Clef 极速阻断，15% 正例调用 Gemini 提炼，用户请求感知延迟为 0ms（非阻塞后台异步），接口异常或超时自动安全降级；
+  - 本地网关提炼继续保持 Stage 0 输入粗筛（剥离代码块、过滤纯提问与客套话）与显式意图穿透的双轨保真防线，绝不向数据库注水。
+
+### 在线模型体验增强 (Model UX Enhancements)
+按照「善用提炼模型、决策模型，让插件体验更好」原则，插件落地两项高价值在线模型增强（位于 `online_models.js`）：
+1. **未知报错智能翻译与修复指引（优先级 1）**：
+   - **痛点**：跨 NoCodeBackend、Cloudflare R2、MCP 与网关四层，底层报错极其晦涩（如 `write EPROTO SSL alert 40`、`The specified bucket name is not valid.`、`You do not have access to execute SQL` 等）。
+   - **机制**：内置真实已知踩坑小抄与专家提示词。在既有检测工具（`ncb_check`、`r2_check`、`secret_check`、`storage_*`）遇到无法识别的未知原始报错时，自动调用配置的模型输出「一句话结论 + 最可能的 2~3 个根因 + 可执行修复步骤」。
+   - **防线**：规则已知错误 0 调用（成本可控）；仅在配置模型且遇到未知错误时调用；严格 Fail-Open（模型异常/超时原样保留现有诊断）；Prompt 明确约束「绝不编造」。
+2. **`memory_search` 自然语言查询改写与双路检索（优先级 2）**：
+   - **痛点**：原有纯词面匹配（`scoreMemory`）对口语化、问句（如「上次那个跨域问题怎么解决的」）命中率为 0。
+   - **机制**：若配置了提炼模型且启用 `search_rewrite`（默认开启），在检索前自动将自然语言改写为核心实体关键词与英文术语（如 `跨域 CORS 解决 反向代理`）；
+   - **双路检索打分**：原查询词面打分 + 改写词打分双路合并，同时命中时获得置顶加分，单路命中依然召回，兼顾口语高召回与术语高精度；
+   - **防线**：未配置模型时 0 网络开销；模型异常或超时严格 Fail-Open 回退为原查询；提供 `search_rewrite: false` 显式开关。
+3. **四大不可越界红线**：
+   - 显式保存路径（`memory_save` / `pitfall_save`）直达数据库，绝不经过任何模型；
+   - 模型绝无自动删除权限，仅支持人工审批建议；
+   - 网关中间件注入路径（moejs）受 250ms 限额保护，绝不上模型；
+   - 全链路 Fail-Open 与严格成本控制。
 
 ### 离线管线（Python）
-失败→恢复挖掘、环境事实、架构决策、规则仲裁、快照推送、可选语义压缩
+失败→恢复挖掘、环境事实、架构决策、规则仲裁、快照推送
 
 ## 几个值得说的实现细节
 

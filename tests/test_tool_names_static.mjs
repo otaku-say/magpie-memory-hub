@@ -13,6 +13,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import assert from "node:assert";
 import { MagpieMemoryHub } from "../tools.js";
 
 // 1. 获取真实工具名集合
@@ -24,6 +25,9 @@ console.log(`    ${[...registeredTools].sort().join(", ")}`);
 if (registeredTools.size === 0) {
   throw new Error("无法从 tools.js 加载注册工具！");
 }
+
+// 强断言：工具总数必须为 20 个（移除本地小模型 model_check / model_download 后）
+assert.strictEqual(registeredTools.size, 20, "真实注册工具总数必须为 20 个");
 
 // 非工具符号白名单（仅限配置选项名、DOM 元素 ID、模块文件名）
 const KNOWN_NON_TOOL_SYMBOLS = new Set([
@@ -102,5 +106,12 @@ if (badErrors2.length !== 2 || !badErrors2.includes("storage_remove") || !badErr
   throw new Error(`反证失败：未能拦截虚构工具名，实际: ${JSON.stringify(badErrors2)}`);
 }
 console.log(`  ✓ 成功拦截虚构工具名: storage_remove, db_drop_all -> 抛出错误`);
+
+const badOfflineSample = '支持调用 model_check 或 model_download 管理本地模型';
+const badOfflineErrors = scanToolIdentifiers(badOfflineSample);
+if (badOfflineErrors.length !== 2 || !badOfflineErrors.includes("model_check") || !badOfflineErrors.includes("model_download")) {
+  throw new Error(`反证失败：已下线的 model_check / model_download 未被拦截为未注册工具名，实际: ${JSON.stringify(badOfflineErrors)}`);
+}
+console.log(`  ✓ 成功拦截已下线工具名: model_check, model_download -> 确认为未注册工具`);
 
 console.log("\n✅ 静态工具名断言测试全部通过！");

@@ -14,6 +14,7 @@ import {
 } from "./schema.js";
 import { rememberSecret, lookupSecret, rememberDatabase, knownDatabases, lookupRealDatabase } from "./local_state.js";
 import { r2Setup, r2Upload, r2Guide, resolveRealDatabase } from "./r2.js";
+import { explainUnknownErrorWithModel, attachAiDiagnosis } from "./online_models.js";
 
 /** 清库需要显式确认串，避免 agent 误触。 */
 export const RESET_CONFIRM = "RESET";
@@ -498,7 +499,7 @@ export async function ncbCheck(cfg, args) {
     }
     const errMsg = String((e && e.message) || e);
     const diag = explainMcpFailure(errMsg);
-    return {
+    const res = {
       ok: false,
       verdict: "FAILED",
       database: want,
@@ -514,6 +515,18 @@ export async function ncbCheck(cfg, args) {
       ],
       diagnosis: diag,
     };
+    if (diag.kind === "MCP_CALL_FAILED") {
+      try {
+        const aiDiag = await explainUnknownErrorWithModel({
+          error: errMsg,
+          component: "ncb_check",
+          database: want,
+          options: cfg,
+        });
+        if (aiDiag) attachAiDiagnosis(res, aiDiag);
+      } catch (_) {}
+    }
+    return res;
   }
 
   const existing = parseDatabases(dbListText);
@@ -572,11 +585,14 @@ export async function ncbCheck(cfg, args) {
   ];
   if (isInit) {
     lines.push("结构完整，3 张核心表与索引均已就绪");
+  } else if (schemaRes && schemaRes.error) {
+    lines.push(`读取结构异常：${schemaRes.error}`);
+    lines.push("可能无权读取表结构，请检查 MCP Key 权限");
   } else {
     lines.push("核心表或索引存在缺失，建议点击「初始化结构」");
   }
 
-  return {
+  const res = {
     ok: true,
     verdict: "VERIFIED",
     database: found,
@@ -588,6 +604,20 @@ export async function ncbCheck(cfg, args) {
     lines,
     diagnosis: null,
   };
+
+  if (schemaRes && schemaRes.error) {
+    try {
+      const aiDiag = await explainUnknownErrorWithModel({
+        error: schemaRes.error,
+        component: "ncb_check",
+        database: found,
+        options: cfg,
+      });
+      if (aiDiag) attachAiDiagnosis(res, aiDiag);
+    } catch (_) {}
+  }
+
+  return res;
 }
 
 /* ------------------------------------------------------------------ *
@@ -746,7 +776,7 @@ export async function secretCheck(cfg, args) {
     }
 
     if (res.status === 500) {
-      return {
+      const retObj = {
         ok: true,
         verdict: "UPSTREAM_ERROR",
         source,
@@ -759,6 +789,16 @@ export async function secretCheck(cfg, args) {
           "处理步骤：NoCodeBackend 鉴权已通过；若需使用对象存储功能，请先在 R2 卡片完成挂载或在控制台检查配置。",
         ],
       };
+      try {
+        const aiDiag = await explainUnknownErrorWithModel({
+          error: errorDetail,
+          component: "secret_check",
+          database: db || rawDb,
+          options: cfg,
+        });
+        if (aiDiag) attachAiDiagnosis(retObj, aiDiag);
+      } catch (_) {}
+      return retObj;
     }
 
     if (res.status > 500) {
@@ -795,7 +835,7 @@ export async function secretCheck(cfg, args) {
   } catch (err) {
     if (timer) clearTimeout(timer);
     const errMsg = String((err && err.message) || err);
-    return {
+    const retObj = {
       ok: false,
       verdict: "ERROR",
       source,
@@ -807,6 +847,16 @@ export async function secretCheck(cfg, args) {
         "无法连接到 api.nocodebackend.com，请检查网络连接后重试",
       ],
     };
+    try {
+      const aiDiag = await explainUnknownErrorWithModel({
+        error: errMsg,
+        component: "secret_check",
+        database: db || rawDb,
+        options: cfg,
+      });
+      if (aiDiag) attachAiDiagnosis(retObj, aiDiag);
+    } catch (_) {}
+    return retObj;
   }
 }
 

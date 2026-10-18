@@ -19,15 +19,12 @@
  *    读取 ctx.options.auto_harvest；未显式开启时（默认 false）首行立即退出，0 额外开销。
  *
  * 4. 抽取逻辑与复用：
- *    复用 gateway_harvest.js 的 mineEnvironmentFacts / mineArchitecturalDecisions / mineFailures，
+ *    采用 Model-in-the-Loop 在线大模型结构化提炼，
  *    通过 content_fingerprint 唯一指纹与近期内存缓存双重防重入库。
  */
 
 import crypto from "node:crypto";
 import {
-  mineEnvironmentFacts,
-  mineArchitecturalDecisions,
-  mineFailures,
   isTestMode,
   isExplicitUserMemory,
 } from "./gateway_harvest.js";
@@ -259,8 +256,6 @@ export function buildDialogueText(body, reply) {
   if (body) {
     if (Array.isArray(body.messages)) {
       userText = extractLastUserTurn(body.messages);
-    } else if (typeof body.prompt === "string" && body.prompt.trim()) {
-      userText = `[user]: ${body.prompt.trim()}`;
     } else if (Array.isArray(body.contents)) {
       // Gemini contents：仅取最后一轮非 model 的 user 内容
       for (let i = body.contents.length - 1; i >= 0; i--) {
@@ -383,12 +378,343 @@ export function countTurnsFromMessages(body) {
     return 1;
   }
 
-  // 4. Legacy single prompt
-  if (typeof body.prompt === "string" && body.prompt.trim()) {
-    return 1;
+  return null;
+}
+
+/* ================================================================== *
+ * 2.5 在线大模型分类判定与结构化提炼 (Model-in-the-Loop)
+ * ================================================================== */
+
+/** 判定模型端点自适应缓存：model -> "systemone" | "chat" */
+export const classifyEndpointCache = new Map();
+
+export const HARVEST_SYSTEM_PROMPT = `你是一个专业的长期记忆与踩坑经验提炼助手。从对话中严格提炼出值得跨会话持久化的重要信息。
+
+【必须记录的内容】：
+1. 偏好/约定 (preference)：用户表达的持久习惯、偏好风格或硬性约束（例如「统一使用 TypeScript」「不要使用 any」）。
+2. 架构决策 (decision)：经确认的技术选型、组件替代、接口协议约定（例如「API 网关采用 fastify 替代 express」）。
+3. 环境事实 (fact)：项目路径、可用的生效端口、确定的配置文件及生效选项、环境变量（例如「跨域必须在 config.toml 中配置 cors = true」）。
+4. 真实踩坑与解法 (pitfall)：真实遇到的具体报错/异常现象，以及最终确证有效的解决办法（必须包含现象、根因、解法三要素）。
+
+【严禁记录的内容】：
+- 闲聊、客套、问候、感谢（如「你好」「谢谢你的帮助」）。
+- 宽泛的概念科普、通用语法讲解、未经运行测试的零散代码片段。
+- 临时性排查提问或未验证的中间推测。
+- 无复用价值的日常操作流水账。
+
+【输出规范】：
+- 若对话中没有任何值得持久化的内容，必须且仅返回空数组: []
+- 若有值得记录的内容，返回合法的 JSON 数组，每个对象包含以下键：
+  {
+    "category": "fact" | "preference" | "decision" | "pitfall",
+    "title": "简明标题（20字以内，点明核心实体与动作）",
+    "content": "核心事实或踩坑解法详情（必须具体，包含关键参数或报错与解法）",
+    "tags": "逗号分隔的标签（如：Magpie,CORS,config.toml）",
+    "confidence": 0.8到1.0之间的置信度数值
+  }
+- 严禁包裹 \`\`\`json 代码块，严禁输出任何 markdown 格式或额外说明文字，仅输出原始 JSON 数组。`;
+
+/**
+ * 健壮的 JSON 数组提取与解析函数（容错解析带代码块或说明文字的返回）
+ */
+export function parseExtractionJson(rawText) {
+  if (!rawText || typeof rawText !== "string") return [];
+  let s = rawText.trim();
+
+  // 去除 markdown 代码块标记 (```json ... ``` 或 ``` ...)
+  s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+
+  // 1. 尝试直接解析
+  try {
+    const direct = JSON.parse(s);
+    if (Array.isArray(direct)) return direct;
+    if (direct && typeof direct === "object") return [direct];
+  } catch (_) {}
+
+  // 2. 正则定位最外层的 [ ... ]
+  const firstBracket = s.indexOf("[");
+  const lastBracket = s.lastIndexOf("]");
+  if (firstBracket !== -1 && lastBracket > firstBracket) {
+    const arrayStr = s.slice(firstBracket, lastBracket + 1);
+    try {
+      const parsed = JSON.parse(arrayStr);
+      if (Array.isArray(parsed)) return parsed;
+    } catch (_) {}
   }
 
-  return null;
+  return [];
+}
+
+/**
+ * 使用网关配置的在线分类模型判定对话是否包含值得长期记忆的内容。
+ * 支持 classify_endpoint: "auto" | "systemone" | "chat"。
+ * 未配置判定模型时明确跳过判定过滤并留诊断日志，绝不调用任何写死模型。
+ */
+export async function classifyDialogueWithOnlineModel(dialogueText, options = {}) {
+  const model = String(options.classify_model || options.classifier_model || "").trim();
+  if (model === "off" || model === "none") {
+    return { shouldHarvest: true, score: 1.0, reason: "disabled" };
+  }
+  if (!model) {
+    _diag("classify_skipped", "未配置判定模型 (classify_model 为空)，跳过前置判定过滤");
+    return { shouldHarvest: true, score: null, reason: "unconfigured_classify_model" };
+  }
+
+  const endpointSetting = String(options.classify_endpoint || "auto").trim().toLowerCase();
+  const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
+  const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
+  const timeoutMs = Number(options.classify_timeout_ms) || 5000;
+  const threshold = typeof options.classify_threshold === "number" ? options.classify_threshold : 0.5;
+  const doFetch = options._fetch || globalThis.fetch;
+
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+
+  // 内部辅助：请求 /v1/systemone 决策端点
+  async function callSystemOne() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const url = `${baseUrl}/v1/systemone`;
+      const payload = {
+        model,
+        state: dialogueText.slice(0, 4000),
+        questions: {
+          worth_remembering: {
+            type: "noul",
+            instructions: "Does this text contain user preferences, technical decisions, environment facts, or bug fixes worth remembering?",
+          },
+        },
+      };
+
+      const res = await doFetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        return { ok: false, status: res.status, errText };
+      }
+
+      const json = await res.json();
+      const noul = json?.answers?.worth_remembering?.noul;
+      if (typeof noul === "number") {
+        return { ok: true, score: noul, reason: "systemone" };
+      }
+      return { ok: false, status: 200, errText: "返回缺少有效 noul 打分" };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // 内部辅助：请求 /v1/chat/completions 对话分类端点
+  async function callChat() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const url = `${baseUrl}/v1/chat/completions`;
+      const payload = {
+        model,
+        messages: [
+          {
+            role: "system",
+            content: "你是一个会话价值判定器。判断用户对话是否包含值得长期记忆的持久事实、配置、偏好、架构决策或报错踩坑解法。若包含返回 YES，若仅为闲聊/临时提问/代码探讨返回 NO。只输出 YES 或 NO。",
+          },
+          {
+            role: "user",
+            content: dialogueText.slice(0, 3000),
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 10,
+      };
+
+      const res = await doFetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        return { ok: false, status: res.status, errText };
+      }
+
+      const json = await res.json();
+      const content = String(json?.choices?.[0]?.message?.content || "").trim().toUpperCase();
+      const isYes = content.includes("YES");
+      return { ok: true, score: isYes ? 1.0 : 0.0, reason: "chat_classifier" };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  try {
+    if (endpointSetting === "systemone") {
+      const sRes = await callSystemOne();
+      if (sRes.ok) {
+        return { shouldHarvest: sRes.score >= threshold, score: sRes.score, reason: "systemone", endpoint: "systemone" };
+      }
+      _diag("systemone_error", `HTTP ${sRes.status}: ${sRes.errText.slice(0, 100)}`);
+      return { shouldHarvest: true, score: 0.5, reason: `systemone_http_${sRes.status}`, endpoint: "systemone" };
+    }
+
+    if (endpointSetting === "chat") {
+      const cRes = await callChat();
+      if (cRes.ok) {
+        return { shouldHarvest: cRes.score >= threshold, score: cRes.score, reason: "chat_classifier", endpoint: "chat" };
+      }
+      _diag("chat_classify_error", `HTTP ${cRes.status}: ${cRes.errText.slice(0, 100)}`);
+      return { shouldHarvest: true, score: 0.5, reason: `chat_http_${cRes.status}`, endpoint: "chat" };
+    }
+
+    // auto 自适应模式：进程级缓存优先
+    const cached = classifyEndpointCache.get(model);
+    if (cached === "systemone") {
+      const sRes = await callSystemOne();
+      if (sRes.ok) {
+        return { shouldHarvest: sRes.score >= threshold, score: sRes.score, reason: "systemone", endpoint: "systemone" };
+      }
+      // 降级尝试 chat
+      const cRes = await callChat();
+      if (cRes.ok) {
+        classifyEndpointCache.set(model, "chat");
+        return { shouldHarvest: cRes.score >= threshold, score: cRes.score, reason: "chat_classifier", endpoint: "chat" };
+      }
+      return { shouldHarvest: true, score: 0.5, reason: "systemone_cached_fail", endpoint: "systemone" };
+    } else if (cached === "chat") {
+      const cRes = await callChat();
+      if (cRes.ok) {
+        return { shouldHarvest: cRes.score >= threshold, score: cRes.score, reason: "chat_classifier", endpoint: "chat" };
+      }
+      return { shouldHarvest: true, score: 0.5, reason: `chat_http_${cRes.status}`, endpoint: "chat" };
+    }
+
+    // 未缓存：优先探测 systemone
+    const sRes = await callSystemOne();
+    if (sRes.ok) {
+      classifyEndpointCache.set(model, "systemone");
+      return { shouldHarvest: sRes.score >= threshold, score: sRes.score, reason: "systemone", endpoint: "systemone" };
+    }
+
+    // systemone 不可用（如 400/404/405/422/501 或非决策模型），自动切换至 chat
+    _diag("classify_auto_fallback", `判定模型 ${model} 在 /v1/systemone 返回 HTTP ${sRes.status}，自动切换至 /v1/chat/completions`);
+    const cRes = await callChat();
+    if (cRes.ok) {
+      classifyEndpointCache.set(model, "chat");
+      return { shouldHarvest: cRes.score >= threshold, score: cRes.score, reason: "chat_classifier", endpoint: "chat" };
+    }
+
+    // 两类均失败，fail-open
+    _diag("classify_all_failed", `模型 ${model} systemone 与 chat 端点均请求失败`);
+    return { shouldHarvest: true, score: 0.5, reason: "classify_all_failed" };
+  } catch (err) {
+    _diag("classifier_exception", (err && err.message) || String(err));
+    return { shouldHarvest: true, score: 0.5, reason: "classifier_exception" };
+  }
+}
+
+/**
+ * 调用网关在线提炼模型提炼事实、偏好、架构决策与踩坑。
+ * 未配置提炼模型时明确跳过并留诊断日志，绝不私自调用写死模型。
+ */
+export async function harvestWithOnlineModel(dialogueText, options = {}) {
+  const model = String(options.extract_model || options.harvest_model || "").trim();
+  if (!model || model === "off" || model === "none") {
+    _diag("harvest_model_missing", "未配置提炼模型 (extract_model 为空)，跳过提炼");
+    return null;
+  }
+
+  const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
+  const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
+  const timeoutMs = Number(options.harvest_timeout_ms) || 12000;
+  const doFetch = options._fetch || globalThis.fetch;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+
+  try {
+    const url = `${baseUrl}/v1/chat/completions`;
+    const payload = {
+      model,
+      messages: [
+        { role: "system", content: HARVEST_SYSTEM_PROMPT },
+        { role: "user", content: dialogueText.slice(0, 8000) },
+      ],
+      temperature: 0.1,
+    };
+
+    const res = await doFetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      _diag("online_harvest_http_err", `HTTP ${res.status}: ${errText.slice(0, 100)}`);
+      return null;
+    }
+
+    const json = await res.json();
+    const rawContent = json?.choices?.[0]?.message?.content || "";
+    const items = parseExtractionJson(rawContent);
+
+    const memories = [];
+    const pitfalls = [];
+
+    for (const item of items) {
+      if (!item || typeof item !== "object") continue;
+      const title = String(item.title || "").trim();
+      const content = String(item.content || "").trim();
+      if (!title || !content) continue;
+
+      const category = String(item.category || "fact").toLowerCase();
+      const tags = String(item.tags || "auto-harvest").trim();
+      const confidence = typeof item.confidence === "number" ? item.confidence : 0.95;
+
+      if (category === "pitfall" || category === "failure" || /踩坑|报错|error|failure/i.test(category)) {
+        pitfalls.push({
+          title,
+          content,
+          symptom: item.symptom || title,
+          solution: item.solution || content,
+          root_cause: item.root_cause || content,
+          component: item.component || (tags.split(",")[0] || "general"),
+          tags,
+          confidence,
+          category: "pitfall",
+        });
+      } else {
+        memories.push({
+          title,
+          content,
+          tags,
+          confidence,
+          category: ["preference", "decision"].includes(category) ? category : "fact",
+        });
+      }
+    }
+
+    return { memories, pitfalls, rawCount: items.length };
+  } catch (err) {
+    _diag("online_harvest_exception", (err && err.message) || String(err));
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /* ================================================================== *
@@ -437,10 +763,71 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     ? options.min_evidence_memory
     : 1;
 
-  // 规则启发式提炼
-  const facts = mineEnvironmentFacts(dialogueText);
-  const decisions = mineArchitecturalDecisions(dialogueText);
-  const failures = mineFailures(dialogueText);
+  // 提取事实与踩坑候选：完全由用户在设置中指定的在线模型提炼
+  const extractModel = String(options.extract_model || options.harvest_model || "").trim();
+  if (!extractModel || extractModel === "off" || extractModel === "none") {
+    // 未配置提炼模型：明确跳过本次采集并记录诊断日志，绝不静默、绝不偷偷使用写死模型、绝不回退规则
+    _diag("harvest_skipped", "未配置提炼模型 (extract_model 为空)，安全跳过本次采集");
+    return {
+      memoriesSaved: 0,
+      pitfallsSaved: 0,
+      pendingSaved: 0,
+      skipped: true,
+      reason: "unconfigured_extract_model",
+    };
+  }
+
+  let facts = [];
+  let decisions = [];
+  let failures = [];
+
+  try {
+    // 1. 分类模型快速过滤（若用户配置）
+    const classRes = await classifyDialogueWithOnlineModel(dialogueText, options);
+    if (classRes && !classRes.shouldHarvest) {
+      _diag("classify_negative", `score=${classRes.score}`);
+      return {
+        memoriesSaved: 0,
+        pitfallsSaved: 0,
+        pendingSaved: 0,
+        skipped: true,
+        reason: "classified_negative",
+        score: classRes.score,
+      };
+    }
+
+    // 2. 在线模型结构化提炼
+    const onlineRes = await harvestWithOnlineModel(dialogueText, options);
+    if (onlineRes === null) {
+      // 提炼模型不可用或异常：安全跳过本次采集并留一行诊断日志，绝不回退启发式规则
+      _diag("harvest_unavailable_skip", "提炼模型服务不可用或异常，安全跳过本次采集");
+      return {
+        memoriesSaved: 0,
+        pitfallsSaved: 0,
+        pendingSaved: 0,
+        skipped: true,
+        reason: "online_harvest_unavailable",
+      };
+    }
+
+    for (const m of onlineRes.memories) {
+      if (m.category === "decision") decisions.push(m);
+      else facts.push(m);
+    }
+    failures = onlineRes.pitfalls;
+  } catch (err) {
+    _diag("online_harvest_err", (err && err.message) || String(err));
+    return {
+      memoriesSaved: 0,
+      pitfallsSaved: 0,
+      pendingSaved: 0,
+      skipped: true,
+      reason: "online_harvest_exception",
+    };
+  }
+
+  // 核心安全红线：彻底切断启发式兜底回退！
+  // 绝不因模型未产出或不可用而静默切回规则制造伪踩坑噪音（fail-open 的正确含义是跳过本次，绝非换一套会制造噪音的规则）
 
   let memoriesSaved = 0;
   let pitfallsSaved = 0;
@@ -507,8 +894,8 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
   // 2. 入库 pitfalls（踩坑与失败规避）
   const turnKey = fingerprint(dialogueText.slice(0, 300));
   for (const item of failures) {
-    const component = String(item.component || "general").trim();
-    const symptom = String(item.symptom || "").trim();
+    const component = String(item.component || (item.tags && item.tags.split(",")[0]) || "general").trim();
+    const symptom = String(item.symptom || item.title || "").trim();
     if (!symptom) continue;
 
     const fp = item.content_fingerprint || fingerprint(`${project}:${component}:${symptom}`);
@@ -823,5 +1210,173 @@ export async function triggerBackgroundDrain(client, options = {}) {
   } finally {
     _isDraining = false;
   }
+}
+
+/* ================================================================== *
+ * 5. 模型连通性与可用性真实检测能力 (Model Health Check)
+ * ================================================================== */
+
+/**
+ * 真实检测提炼模型 (extract_model) 连通性与结构化提炼能力
+ * 实际调用网关 /v1/chat/completions 并校验返回 JSON 结构与延迟
+ */
+export async function testExtractionModel(options = {}) {
+  const model = String(options.extract_model || options.harvest_model || "").trim();
+  if (!model) {
+    return { ok: false, error: "未配置提炼模型 (extract_model 为空)" };
+  }
+
+  const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
+  const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
+  const timeoutMs = Number(options.timeout_ms) || 12000;
+  const doFetch = options._fetch || globalThis.fetch;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const start = Date.now();
+  try {
+    const url = `${baseUrl}/v1/chat/completions`;
+    const res = await doFetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: HARVEST_SYSTEM_PROMPT },
+          { role: "user", content: "[user]: 这个项目统一使用 pnpm 管理依赖。\n[assistant]: 好的，已记录项目环境规范。" },
+        ],
+        temperature: 0.1,
+      }),
+      signal: controller.signal,
+    });
+
+    const latencyMs = Date.now() - start;
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      return {
+        ok: false,
+        model,
+        endpoint: "/v1/chat/completions",
+        status: res.status,
+        latencyMs,
+        error: `网关返回 HTTP ${res.status}: ${errText.slice(0, 200)}`,
+      };
+    }
+
+    const json = await res.json();
+    const rawContent = json?.choices?.[0]?.message?.content || "";
+    const items = parseExtractionJson(rawContent);
+
+    return {
+      ok: true,
+      model,
+      endpoint: "/v1/chat/completions",
+      latencyMs,
+      itemCount: items.length,
+      sampleResult: items,
+      rawOutput: rawContent.slice(0, 200),
+    };
+  } catch (err) {
+    const latencyMs = Date.now() - start;
+    return {
+      ok: false,
+      model,
+      endpoint: "/v1/chat/completions",
+      latencyMs,
+      error: `请求异常: ${(err && err.message) || String(err)}`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 真实检测判定模型 (classify_model) 连通性与打分能力
+ * 根据 classify_endpoint 选项或 auto 自适应探测实际调用 /v1/systemone 或 /v1/chat/completions
+ */
+export async function testClassificationModel(options = {}) {
+  const model = String(options.classify_model || options.classifier_model || "").trim();
+  if (!model) {
+    return { ok: false, error: "未配置判定模型 (classify_model 为空)" };
+  }
+
+  const endpoint = String(options.classify_endpoint || "auto").trim().toLowerCase();
+  const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
+  const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
+  const timeoutMs = Number(options.timeout_ms) || 8000;
+  const doFetch = options._fetch || globalThis.fetch;
+
+  const testDialogue = "[user]: 我们已决定在生产环境采用 PostgreSQL 替代 MySQL。\n[assistant]: 好的，已记录技术选型。";
+
+  const start = Date.now();
+  try {
+    const res = await classifyDialogueWithOnlineModel(testDialogue, {
+      classify_model: model,
+      classify_endpoint: endpoint,
+      gateway_url: baseUrl,
+      gateway_api_key: apiKey,
+      classify_timeout_ms: timeoutMs,
+      _fetch: doFetch,
+    });
+    const latencyMs = Date.now() - start;
+
+    if (res.reason && res.reason.includes("exception")) {
+      return {
+        ok: false,
+        model,
+        endpoint,
+        latencyMs,
+        error: `分类器调用异常: ${res.reason}`,
+      };
+    }
+
+    if (res.reason && res.reason.includes("http_")) {
+      return {
+        ok: false,
+        model,
+        endpoint,
+        latencyMs,
+        error: `网关返回 HTTP 错误: ${res.reason}`,
+      };
+    }
+
+    return {
+      ok: true,
+      model,
+      effectiveEndpoint: res.endpoint || endpoint,
+      latencyMs,
+      score: res.score,
+      shouldHarvest: res.shouldHarvest,
+      reason: res.reason,
+    };
+  } catch (err) {
+    const latencyMs = Date.now() - start;
+    return {
+      ok: false,
+      model,
+      endpoint,
+      latencyMs,
+      error: `检测过程异常: ${(err && err.message) || String(err)}`,
+    };
+  }
+}
+
+/**
+ * 统一模型连通性检测能力入口
+ */
+export async function testModelConnectivity(type = "all", options = {}) {
+  const result = { at: new Date().toISOString() };
+  if (type === "all" || type === "extract" || type === "extraction") {
+    result.extract = await testExtractionModel(options);
+  }
+  if (type === "all" || type === "classify" || type === "classification") {
+    result.classify = await testClassificationModel(options);
+  }
+  result.ok = (!result.extract || result.extract.ok) && (!result.classify || result.classify.ok);
+  return result;
 }
 
