@@ -32,15 +32,36 @@ export function statePath() {
   }
 }
 
-/** 读状态。任何异常都退化为空状态，绝不让调用方崩。 */
+// 进程内缓存与紧凑序列化
+let _cachedState = null;
+let _cachedMtime = 0;
+let _cachedPath = null;
+
+/** 测试或隔离环境清理内存缓存 */
+export function _resetStateCacheForTests() {
+  _cachedState = null;
+  _cachedMtime = 0;
+  _cachedPath = null;
+}
+
+/** 读状态。带进程内 mtime 缓存，仅在文件修改时间变化时才重新读取与解析；任何异常都退化为空状态。 */
 export function readState() {
   const p = statePath();
   if (!p) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: false };
   try {
-    if (!fs.existsSync(p)) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: true, _missing: true };
+    if (!fs.existsSync(p)) {
+      _cachedState = null;
+      _cachedMtime = 0;
+      _cachedPath = null;
+      return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: true, _missing: true };
+    }
+    const stat = fs.statSync(p);
+    if (_cachedState && _cachedPath === p && stat.mtimeMs === _cachedMtime) {
+      return JSON.parse(JSON.stringify(_cachedState));
+    }
     const o = JSON.parse(fs.readFileSync(p, "utf8"));
     if (!o || typeof o !== "object") return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: true };
-    return {
+    const parsed = {
       current: typeof o.current === "string" ? o.current : "",
       secrets: o.secrets && typeof o.secrets === "object" ? o.secrets : {},
       actions: o.actions && typeof o.actions === "object" ? o.actions : {},
@@ -50,15 +71,20 @@ export function readState() {
       harvest_queue: Array.isArray(o.harvest_queue) ? o.harvest_queue : [],
       _ok: true,
     };
+    _cachedState = parsed;
+    _cachedMtime = stat.mtimeMs;
+    _cachedPath = p;
+    return JSON.parse(JSON.stringify(parsed));
   } catch (e) {
     return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: false, _err: String(e && e.message || e) };
   }
 }
 
-/** 原子写状态（先写临时文件再 rename）。返回是否成功。 */
+/** 原子写状态（紧凑无缩进序列化，立省 30%~40% 体积；先写临时文件再 rename；同步更新进程内缓存）。返回是否成功。 */
 export function writeState(state) {
   const p = statePath();
   if (!p) return false;
+  let tmp = null;
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     const out = Object.assign({}, state, {
@@ -74,11 +100,33 @@ export function writeState(state) {
     delete out._ok;
     delete out._missing;
     delete out._err;
+
+    // 自动 Compact 保护：若 pending_patterns 存在已达标项（count>=2）或超量，自动清洗
+    if (out.pending_patterns && typeof out.pending_patterns === "object") {
+      const keys = Object.keys(out.pending_patterns);
+      if (keys.length > 500) {
+        const sorted = keys.map((k) => ({ k, v: out.pending_patterns[k] }))
+          .sort((a, b) => (getEntryTimestamp(b.v) || 0) - (getEntryTimestamp(a.v) || 0));
+        const kept = {};
+        for (const item of sorted.slice(0, 500)) {
+          kept[item.k] = item.v;
+        }
+        out.pending_patterns = kept;
+      }
+    }
+
     const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
-    const tmp = `${p}.tmp.${nonce}`;
-    fs.writeFileSync(tmp, JSON.stringify(out, null, 2), { mode: 0o600 });
+    tmp = `${p}.tmp.${nonce}`;
+    // 紧凑序列化：绝不使用 null, 2，直接写入紧凑 JSON
+    fs.writeFileSync(tmp, JSON.stringify(out), { mode: 0o600 });
     fs.renameSync(tmp, p);
     try { fs.chmodSync(p, 0o600); } catch (e) { /* 某些文件系统不支持，忽略 */ }
+    try {
+      const st = fs.statSync(p);
+      _cachedState = JSON.parse(JSON.stringify(out));
+      _cachedMtime = st.mtimeMs;
+      _cachedPath = p;
+    } catch (_) {}
     return true;
   } catch (e) {
     try {
@@ -94,10 +142,32 @@ export function lookupGatewayHarvest() {
   return st.gateway_harvest || {};
 }
 
-/** 保存 gateway_harvest 增量状态 */
+/** 保存 gateway_harvest 增量状态（file_states 最多保留最近 500 个；processed_fingerprints 上限 1000） */
 export function rememberGatewayHarvest(harvestState) {
   const st = readState();
-  st.gateway_harvest = Object.assign({}, st.gateway_harvest || {}, harvestState || {});
+  const gh = Object.assign({}, st.gateway_harvest || {}, harvestState || {});
+
+  // 1. file_states (files) 淘汰上限：按 processed_at 排序，最多保留最近 500 个
+  if (gh.files && typeof gh.files === "object") {
+    const fileEntries = Object.entries(gh.files);
+    if (fileEntries.length > 500) {
+      fileEntries.sort((a, b) => {
+        const ta = (a[1] && (a[1].processed_at || a[1].mtime || 0)) || 0;
+        const tb = (b[1] && (b[1].processed_at || b[1].mtime || 0)) || 0;
+        return tb - ta; // 降序，最新的在前面
+      });
+      gh.files = Object.fromEntries(fileEntries.slice(0, 500));
+    }
+  }
+
+  // 2. processed_fps (processed_fingerprints) 上限 5000 -> 1000
+  if (Array.isArray(gh.processed_fingerprints)) {
+    if (gh.processed_fingerprints.length > 1000) {
+      gh.processed_fingerprints = gh.processed_fingerprints.slice(-1000);
+    }
+  }
+
+  st.gateway_harvest = gh;
   return writeState(st);
 }
 
@@ -360,9 +430,27 @@ export function forgetR2Mount(database) {
  * P0 & P2: Headroom TrafficLearner LRU 门禁暂存队列管理
  * ================================================================== */
 
-export const DEFAULT_MIN_EVIDENCE = 3;
+export const DEFAULT_MIN_EVIDENCE = 2; // 默认 2 次复现放行
 export const DEFAULT_PENDING_TTL_MS = 21 * 24 * 60 * 60 * 1000; // 21 天未复现硬淘汰 (Headroom :1946)
-export const DEFAULT_MAX_PENDING = 1000; // 上限 1000 条
+export const DEFAULT_MAX_PENDING = 500; // 上限收敛至 500 条
+
+/** 安全截断暂存 Payload（未达门槛前绝不在 sample 里存超长原文） */
+export function truncatePendingPayload(payload) {
+  if (!payload || typeof payload !== "object") return {};
+  const p = { ...payload };
+  for (const k of ["content", "symptom", "root_cause", "solution", "sample", "full_text", "reasoning", "context"]) {
+    if (typeof p[k] === "string" && p[k].length > 200) {
+      p[k] = p[k].slice(0, 200) + "...";
+    }
+  }
+  if (typeof p.title === "string" && p.title.length > 100) {
+    p.title = p.title.slice(0, 100) + "...";
+  }
+  delete p.raw;
+  delete p.dialogue;
+  delete p.history;
+  return p;
+}
 
 /** 安全提取条目时间戳（区分缺失与合法值） */
 export function getEntryTimestamp(entry) {
@@ -385,6 +473,7 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
   const maxPending = typeof options.maxPending === "number" ? options.maxPending : DEFAULT_MAX_PENDING;
   const now = typeof options.now === "number" ? options.now : Date.now();
   const kind = options.kind || "pitfall";
+  const truncatedPayload = truncatePendingPayload(payload);
 
   // minEvidence <= 1 时直接放行毕业
   if (minEvidence <= 1) {
@@ -405,15 +494,23 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
   const st = readState();
   const pending = st.pending_patterns && typeof st.pending_patterns === "object" ? st.pending_patterns : {};
 
-  // 1. 清理过期项 (21 天未复现硬淘汰) 与损坏脏项
+  // 1. 清理过期项 (21 天未复现硬淘汰)、损坏脏项、已达标历史残留并截断超长样本
   for (const [k, v] of Object.entries(pending)) {
     if (!v || typeof v !== "object") {
       delete pending[k];
       continue;
     }
+    if (typeof v.count === "number" && v.count >= minEvidence) {
+      delete pending[k]; // 彻底清除已达标历史僵尸残留
+      continue;
+    }
     const ts = getEntryTimestamp(v);
     if (ts === null || (now - ts > ttlMs)) {
       delete pending[k];
+      continue;
+    }
+    if (v.payload && typeof v.payload === "object") {
+      v.payload = truncatePendingPayload(v.payload);
     }
   }
 
@@ -425,11 +522,22 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
     // 同轮去重：如果传入了 turnKey 且本轮次已经记录过该指纹，则本轮不重复 +1
     if (turnKey && entry.last_turn === turnKey) {
       entry.last_seen = now;
-      if (payload) entry.payload = payload;
+      if (payload) entry.payload = truncatedPayload;
+      if (entry.count >= minEvidence) {
+        delete pending[fingerprint];
+        st.pending_patterns = pending;
+        writeState(st);
+        return {
+          shouldGraduate: true,
+          entry: { ...entry, payload: payload || entry.payload || {} },
+          count: entry.count,
+          needed: minEvidence,
+        };
+      }
       st.pending_patterns = pending;
       writeState(st);
       return {
-        shouldGraduate: entry.count >= minEvidence,
+        shouldGraduate: false,
         entry: { ...entry },
         count: entry.count,
         needed: minEvidence,
@@ -439,7 +547,7 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
     entry.last_seen = now;
     if (turnKey) entry.last_turn = turnKey;
     if (payload) {
-      entry.payload = payload;
+      entry.payload = truncatedPayload;
     }
   } else {
     // 容量上限检查：若超过上限，LRU 淘汰 last_seen 最早的一条
@@ -464,15 +572,15 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
       first_seen: now,
       last_seen: now,
       last_turn: turnKey || undefined,
-      payload: payload || {},
+      payload: truncatedPayload,
     };
     pending[fingerprint] = entry;
   }
 
   // 3. 门禁阈值判断
   if (entry.count >= minEvidence) {
-    // 达到门槛，正式毕业进写入队列，从 pending 移除
-    const graduatedEntry = { ...entry };
+    // 达到门槛，正式毕业进写入队列，从 pending 彻底移除
+    const graduatedEntry = { ...entry, payload: payload || entry.payload || {} };
     delete pending[fingerprint];
     st.pending_patterns = pending;
     writeState(st);
@@ -483,7 +591,7 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
     };
   }
 
-  // 未达门槛，仅更新 pending 计数
+  // 未达门槛，仅更新 pending 计数（保存截断样本）
   st.pending_patterns = pending;
   writeState(st);
   return {
@@ -556,6 +664,7 @@ export function enqueueHarvestItems(items) {
       project: item.project || "global",
       fp: fp,
       enqueued_at: Date.now(),
+      retries: typeof item.retries === "number" ? item.retries : 0,
     });
     added++;
   }
@@ -588,6 +697,26 @@ export function removeHarvestItems(ids) {
     writeState(st);
   }
   return removed;
+}
+
+export function updateHarvestItemRetries(id, errMessage) {
+  if (!id) return false;
+  const st = readState();
+  const queue = Array.isArray(st.harvest_queue) ? st.harvest_queue : [];
+  let updated = false;
+  for (const item of queue) {
+    if (item.id === id) {
+      item.retries = (Number(item.retries) || 0) + 1;
+      if (errMessage) item.last_error = String(errMessage).slice(0, 200);
+      updated = true;
+      break;
+    }
+  }
+  if (updated) {
+    st.harvest_queue = queue;
+    writeState(st);
+  }
+  return updated;
 }
 
 export function clearHarvestQueue() {

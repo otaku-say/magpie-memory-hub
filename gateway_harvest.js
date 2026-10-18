@@ -633,9 +633,9 @@ export async function harvestGateway(args, context) {
     if (aborted) break;
   }
 
-  // 4. 持久化增量状态（受限队列，最多保留 2000 个 turn 指纹）
+  // 4. 持久化增量状态（受限队列，最多保留 1000 个 turn 指纹）
   const allFps = Array.from(processedFpSet);
-  const boundedFps = allFps.slice(Math.max(0, allFps.length - 2000));
+  const boundedFps = allFps.slice(Math.max(0, allFps.length - 1000));
   rememberGatewayHarvest({
     last_harvest_at: Date.now(),
     files: updatedFileStates,

@@ -49,6 +49,11 @@ Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记�
 magpie plugin add github:otaku-say/magpie-memory-hub
 ```
 
+> ⚠️ **GitHub 源安装与下发特性重要说明**：
+> Magpie 内部通过 Bun 拉取并安装 GitHub 源依赖（`bun add github:otaku-say/magpie-memory-hub`）。  
+> **Bun 对 Git 源依赖直接解压整棵 Git 仓库树，完全忽略 `package.json` 中的 `files` 白名单**（`files` 白名单仅在向 npm registry 发布并 `npm pack` 时生效）。  
+> 为确保生产部署目录干净小巧、不产生垃圾文件下发污染，仓库根目录已物理清除废弃脚本并收敛历史开发笔记为单一 `DEVNOTES.md`；测试用例目录 `tests/` 保留供持续自动化回归验证，运行时完全不被载入。
+
 在 **设置 → 插件** 里开启内置的 **Plugin tools**，然后在 **插件页「记忆中枢」** 里填数据库信息。
 
 **把 MCP 接给 agent**：在 **资源库 → MCP 服务器** 添加

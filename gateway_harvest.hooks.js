@@ -44,6 +44,7 @@ import {
   enqueueHarvestItems,
   readHarvestQueue,
   removeHarvestItems,
+  updateHarvestItemRetries,
 } from "./local_state.js";
 import {
   MEMHUB_INTERNAL_HEADER,
@@ -55,6 +56,7 @@ import {
 } from "./model_budget.js";
 
 import { _diag, SCAFFOLDING_PATTERNS, stripScaffolding } from "./gateway_harvest.js";
+export { SCAFFOLDING_PATTERNS, stripScaffolding };
 
 /* ================================================================== *
  * 1. 进程内近期去重与辅助结构
@@ -608,6 +610,9 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
       if (cRes.ok) {
         classifyEndpointCache.set(model, "chat");
         return { shouldHarvest: cRes.score >= threshold, score: cRes.score, reason: "chat_classifier", endpoint: "chat" };
+      }
+      if (sRes.reason === "systemone_network_exception" || cRes.reason === "chat_network_exception") {
+        return { shouldHarvest: true, score: 0.5, reason: "classifier_exception", endpoint: "systemone" };
       }
       return { shouldHarvest: true, score: 0.5, reason: "systemone_cached_fail", endpoint: "systemone" };
     } else if (cached === "chat") {
@@ -1175,11 +1180,13 @@ export async function triggerBackgroundDrain(client, options = {}) {
       if (!queue || queue.length === 0) break;
       let batchSuccess = 0;
       const successIds = [];
+      const deadLetterIds = [];
       for (const item of queue) {
         try {
           if (item.table === "memories") {
             const fp = item.fp || item.data?.content_fingerprint || "";
             const project = item.project || "global";
+            const memKey = `m:${project}:${fp}`;
             const category = item.data?.category || "fact";
             const title = item.data?.title || "";
             const content = item.data?.content || item.data?.full_text || "";
@@ -1220,6 +1227,7 @@ export async function triggerBackgroundDrain(client, options = {}) {
             const now = new Date().toISOString().slice(0, 19).replace("T", " ");
             const drainMemoryPayload = {
               ...item.data,
+              lifecycle_status: item.data?.lifecycle_status || "active",
               revision: revision || Number(item.data?.revision) || 1,
               recurrence: Number(item.data?.recurrence) || 1,
               created_at: (item.data && item.data.created_at) || now,
@@ -1245,7 +1253,7 @@ export async function triggerBackgroundDrain(client, options = {}) {
               totalMemoriesSaved++;
             } catch (createErr) {
               const msg = String(createErr?.message || createErr || "");
-              if (/duplicate|ER_DUP_ENTRY|already exists/i.test(msg)) {
+              if (/duplicate|ER_DUP_ENTRY|already exists|1062/i.test(msg)) {
                 // 唯一索引拦截：累加复发计数
                 try {
                   const dupRows = await client.list("memories", { project, content_fingerprint: fp, limit: 1 });
@@ -1256,7 +1264,16 @@ export async function triggerBackgroundDrain(client, options = {}) {
                   }
                 } catch (_) {}
               } else {
-                throw createErr;
+                // 非 1062 报错：累加 retries
+                const currentRetries = (Number(item.retries) || 0) + 1;
+                item.retries = currentRetries;
+                if (currentRetries >= 3) {
+                  deadLetterIds.push(item.id);
+                  _diag("dead_letter_evicted", `item ${item.id} table=${item.table} retries=${currentRetries} err=${msg.slice(0, 100)}`);
+                } else {
+                  updateHarvestItemRetries(item.id, msg);
+                }
+                continue;
               }
             }
             markRecent(memKey);
@@ -1299,25 +1316,43 @@ export async function triggerBackgroundDrain(client, options = {}) {
               totalPitfallsSaved++;
             } catch (createErr) {
               const msg = String(createErr?.message || createErr || "");
-              if (/duplicate|ER_DUP_ENTRY|already exists/i.test(msg)) {
+              if (/duplicate|ER_DUP_ENTRY|already exists|1062/i.test(msg)) {
                 // 已存在则视为成功去重消费
               } else {
-                throw createErr;
+                // 非 1062 报错：累加 retries
+                const currentRetries = (Number(item.retries) || 0) + 1;
+                item.retries = currentRetries;
+                if (currentRetries >= 3) {
+                  deadLetterIds.push(item.id);
+                  _diag("dead_letter_evicted", `item ${item.id} table=${item.table} retries=${currentRetries} err=${msg.slice(0, 100)}`);
+                } else {
+                  updateHarvestItemRetries(item.id, msg);
+                }
+                continue;
               }
             }
             markRecent(pitKey);
             successIds.push(item.id);
             batchSuccess++;
           }
-        } catch (_) {
-          // 单项失败容错并保留在队列
+        } catch (itemErr) {
+          // 单项失败容错并检查是否达到死信上限
+          const currentRetries = (Number(item.retries) || 0) + 1;
+          item.retries = currentRetries;
+          if (currentRetries >= 3 && !deadLetterIds.includes(item.id)) {
+            deadLetterIds.push(item.id);
+            _diag("dead_letter_evicted", `item ${item.id} table=${item.table} retries=${currentRetries} err=${((itemErr && itemErr.message) || String(itemErr)).slice(0, 100)}`);
+          } else {
+            updateHarvestItemRetries(item.id, (itemErr && itemErr.message) || String(itemErr));
+          }
         }
       }
-      if (successIds.length > 0) {
-        removeHarvestItems(successIds);
+      const toRemove = [...successIds, ...deadLetterIds];
+      if (toRemove.length > 0) {
+        removeHarvestItems(toRemove);
       }
       totalProcessed += batchSuccess;
-      if (batchSuccess === 0) {
+      if (batchSuccess === 0 && deadLetterIds.length === 0) {
         break;
       }
     }
