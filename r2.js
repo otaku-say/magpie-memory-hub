@@ -635,7 +635,7 @@ export async function r2Upload(cfg, args) {
   const hasContent = args && args.content != null;
   const hasSecret = !!((cfg && (cfg.secret || cfg.ncb_secret)) || "");
 
-  // 有内容 + 有 Secret Key → REST multipart（二进制不用 base64，省 33% 且更快）
+  // 有内容 + 有 Secret Key → 优先尝试 REST multipart（二进制不用 base64，省 33% 且更快）
   if (hasContent && hasSecret) {
     const isText = args.encoding !== "base64";
     let bytes;
@@ -646,15 +646,19 @@ export async function r2Upload(cfg, args) {
     }
     const form = new FormData();
     form.append("file", new Blob([bytes], { type: args.content_type || "application/octet-stream" }), filename);
-    const { status, body } = await rest(cfg, "POST", "/upload", { form });
-    const url = (body && body.url) || "";
-    return {
-      ok: status < 400 && !!url,
-      database: db, filename, url, via: "rest-multipart", http: status, result: body,
-      note: url
-        ? "上传完成。建议用 memory_save 把 url 存成 category=file 的记忆，日后可检索回该文件。"
-        : "上传失败，详见 result。",
-    };
+    try {
+      const { status, body } = await rest(cfg, "POST", "/upload", { form });
+      const url = (body && body.url) || "";
+      if (status < 400 && !!url) {
+        return {
+          ok: true,
+          database: db, filename, url, via: "rest-multipart", http: status, result: body,
+          note: "上传完成。建议用 memory_save 把 url 存成 category=file 的记忆，日后可检索回该文件。",
+        };
+      }
+    } catch (_) {
+      // REST 失败（如 403 密钥过期或重置）时，平滑后备降级到 MCP upload_file 走 MCP key 上传
+    }
   }
 
   // 否则走 MCP（base64 直传，或返回 presigned 上传 URL）
@@ -693,7 +697,17 @@ export async function r2List(cfg, args) {
   }
 
   const { status, body } = await rest(clientCfg, "GET", "/files", {});
-  if (status >= 400) return { ok: false, error: `HTTP ${status}`, body };
+  if (status >= 400) {
+    const isBadSecret = status === 403 || /invalid secret/i.test(JSON.stringify(body || ""));
+    return {
+      ok: false,
+      error: `HTTP ${status}`,
+      body,
+      hint: isBadSecret
+        ? "数据库 Secret Key 无效（可能数据库已重建换了新密钥）。列出文件必须使用 Secret Key（NCB MCP 未提供 list_files 工具）。请在 NoCodeBackend 控制台复制最新的 Secret Key 填入设置页。"
+        : "获取文件列表失败，详见 body。",
+    };
+  }
   const files = (body && body.files) || [];
   const limit = Number((args && args.limit) || 100) || 100;
   return { ok: true, count: files.length, files: files.slice(0, limit), truncated: files.length > limit };
@@ -724,9 +738,14 @@ export async function r2Delete(cfg, args) {
   }
 
   const { status, body } = await rest(clientCfg, "DELETE", "/files/" + encodeURIComponent(key), {});
+  const isFailed = status >= 400 || (body && body.status === "failed");
+  const isBadSecret = status === 403 || /invalid secret/i.test(JSON.stringify(body || ""));
   return {
-    ok: status < 400 && !(body && body.status === "failed"),
+    ok: !isFailed,
     key, http: status, result: body,
+    hint: isBadSecret
+      ? "数据库 Secret Key 无效（可能数据库已重建换了新密钥）。删除文件必须使用 Secret Key（NCB MCP 未提供 delete_file 工具）。请在 NoCodeBackend 控制台复制最新的 Secret Key 填入设置页。"
+      : (isFailed ? "删除失败，详见 result。" : "删除成功。"),
   };
 }
 

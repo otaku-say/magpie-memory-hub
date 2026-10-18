@@ -266,8 +266,10 @@ export function lookupR2Mount(database) {
     if (hit) return mounts[hit];
   }
 
-  // ③ 唯一记录兜底
-  if (names.length === 1) return mounts[names[0]];
+  // ③ 唯一记录兜底（仅在未指定目标库，或目标库与唯一记录同源时兜底）
+  if (names.length === 1) {
+    if (!want || norm(names[0]) === target) return mounts[names[0]];
+  }
   return null;
 }
 
@@ -277,17 +279,30 @@ export function lookupR2Mount(database) {
 export function forgetR2Mount(database) {
   if (!database) return false;
   const st = readState();
-  if (!st.r2_mounts || typeof st.r2_mounts !== "object") return true;
-  const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
-  const target = norm(database);
   let changed = false;
-  for (const k of Object.keys(st.r2_mounts)) {
-    if (k === database || norm(k) === target) {
-      delete st.r2_mounts[k];
-      changed = true;
+  if (st.r2_mounts && typeof st.r2_mounts === "object") {
+    const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
+    const target = norm(database);
+    for (const k of Object.keys(st.r2_mounts)) {
+      if (k === database || norm(k) === target) {
+        delete st.r2_mounts[k];
+        changed = true;
+      }
     }
+    if (changed) writeState(st);
   }
-  return changed ? writeState(st) : true;
+  // 同时同步清除 _status.json 中的 r2 挂载卡片状态，杜绝已解绑的数据库被 _status.json 僵尸复活
+  try {
+    const p = path.join(process.cwd(), "_status.json");
+    if (fs.existsSync(p)) {
+      const o = JSON.parse(fs.readFileSync(p, "utf8"));
+      if (o && o.r2) {
+        delete o.r2;
+        fs.writeFileSync(p, JSON.stringify(o, null, 2));
+      }
+    }
+  } catch (_) {}
+  return true;
 }
 
 /* ================================================================== *
