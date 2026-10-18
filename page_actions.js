@@ -181,6 +181,17 @@ export async function runPendingAction(options, cfg) {
  * 被「二次确认门」拦下的任务会被误记为已执行，用户再也无法重试。
  */
 async function execute(action, cfg, fs, sp, state, options) {
+  /* 统一构建 client（harvest_gateway / memory_audit / sync_snapshot 共用）
+     ✗ 构建失败置 null ✗ 各分支自身降级 ✓ */
+  let client = null;
+  try {
+    if (cfg && cfg.client) client = cfg.client;
+    else if (cfg && (cfg.mcpKey || cfg.mcp_key)) {
+      const { makeMcpClient } = await import("./mcp_client.js");
+      client = makeMcpClient(cfg);
+    }
+  } catch (_) { client = null; }
+
   const args = { database: action.database || undefined };
   if (action.secret) args.secret = action.secret;
   if (action.op === "reset") args.confirm = action.confirm || "";
@@ -282,7 +293,7 @@ async function execute(action, cfg, fs, sp, state, options) {
     else if (action.op === "sync_snapshot") {
       let memories = [];
       try {
-        const client = cfg && cfg.client ? cfg.client : (await import("./mcp_client.js")).makeMcpClient(cfg);
+        if (!client) client = (await import("./mcp_client.js")).makeMcpClient(cfg);
         const resList = await client.list("memories", {
           lifecycle_status: "active",
           order_by: "updated_at DESC",

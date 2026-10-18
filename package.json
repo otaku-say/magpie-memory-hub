@@ -1,6 +1,6 @@
 {
   "name": "magpie-memory-hub",
-  "version": "6.27.0",
+  "version": "6.27.1",
   "description": "Magpie 网关的透明记忆层：自动提炼上下文存入 NoCodeBackend，向 agent 提供记忆检索与 R2 文件存储 MCP 工具；内置幂等的数据库初始化与清空。",
   "type": "module",
   "main": "./tools.js",
