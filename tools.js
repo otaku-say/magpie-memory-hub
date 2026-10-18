@@ -1353,7 +1353,7 @@ async function memoryAudit(client, cfg, args, ctx) {
   args = args || {};
   if (!client || typeof client.list !== "function") {
     return jsonOut({ action: "DEDUP_REPORT", success: false, data_changed: false,
-      batch: "0/0", status: "skipped", note: "无可用数据库客户端，已跳过去重（不影响插件加载）" });
+      batch: "0/0", dedup_state: "skipped", note: "无可用数据库客户端，已跳过去重（不影响插件加载）" });
   }
   if (args && (args.undo === true || args.undo_before)) {
     return await memoryAuditUndo(client, cfg, args);
