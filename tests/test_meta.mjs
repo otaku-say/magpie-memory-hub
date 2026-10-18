@@ -157,7 +157,7 @@ export function runMetaCheck(options = {}) {
   }
 
   // 强断言：锁定当前活跃测试文件总数（移除了 3 个本地模型旧测试，新增模型交互、配置化与语义去重测试后为 33 个）
-  assert.strictEqual(testFiles.length, 33, `测试文件总数断言：期望 33 个，实际 ${testFiles.length} 个`);
+  assert.strictEqual(testFiles.length, 34, `测试文件总数断言：期望 34 个，实际 ${testFiles.length} 个`);
 
   // 反证测试 1：验证门禁对写 global 恶意用例具备拦截能力
   const fakeSample = `

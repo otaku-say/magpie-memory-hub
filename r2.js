@@ -19,7 +19,7 @@
 import { NcbMcp } from "./ncb_mcp.js";
 import fs from "node:fs";
 import path from "node:path";
-import { lookupSecret, lookupRealDatabase, rememberDatabase, rememberR2Mount, lookupR2Mount, forgetR2Mount } from "./local_state.js";
+import { lookupSecret, forgetSecret, lookupRealDatabase, rememberDatabase, rememberR2Mount, lookupR2Mount, forgetR2Mount } from "./local_state.js";
 import { explainUnknownErrorWithModel, attachAiDiagnosis } from "./online_models.js";
 
 const REST_BASE = "https://api.nocodebackend.com";
@@ -216,7 +216,13 @@ export async function r2Probe(cfg, database) {
           try {
             const r = await rest(restCfg, "DELETE", "/files/" + encodeURIComponent(k), {});
             if (r.status < 400) { cleaned = true; break; }
+            if (r.status === 401 || r.status === 403) {
+              forgetSecret(db || rawDb);
+            }
           } catch (e) {
+            if (/403|401|invalid secret/i.test(String(e && e.message || e))) {
+              forgetSecret(db || rawDb);
+            }
             if (e.name === "AbortError" || (signal && signal.aborted)) throw e;
           }
         }
@@ -656,7 +662,13 @@ export async function r2Upload(cfg, args) {
           note: "上传完成。建议用 memory_save 把 url 存成 category=file 的记忆，日后可检索回该文件。",
         };
       }
-    } catch (_) {
+      if (status === 401 || status === 403 || /invalid secret/i.test(JSON.stringify(body || ""))) {
+        forgetSecret(db);
+      }
+    } catch (e) {
+      if (/403|401|invalid secret/i.test(String(e && e.message || e))) {
+        forgetSecret(db);
+      }
       // REST 失败（如 403 密钥过期或重置）时，平滑后备降级到 MCP upload_file 走 MCP key 上传
     }
   }
@@ -699,12 +711,15 @@ export async function r2List(cfg, args) {
   const { status, body } = await rest(clientCfg, "GET", "/files", {});
   if (status >= 400) {
     const isBadSecret = status === 403 || /invalid secret/i.test(JSON.stringify(body || ""));
+    if (isBadSecret) {
+      forgetSecret(db || rawDb);
+    }
     return {
       ok: false,
       error: `HTTP ${status}`,
       body,
       hint: isBadSecret
-        ? "数据库 Secret Key 无效（可能数据库已重建换了新密钥）。列出文件必须使用 Secret Key（NCB MCP 未提供 list_files 工具）。请在 NoCodeBackend 控制台复制最新的 Secret Key 填入设置页。"
+        ? "数据库 Secret Key 无效（可能数据库已重建换了新密钥）。已自动清除本地失效密钥缓存。请在 NoCodeBackend 控制台复制最新的 Secret Key 填入设置页。"
         : "获取文件列表失败，详见 body。",
     };
   }
@@ -740,11 +755,14 @@ export async function r2Delete(cfg, args) {
   const { status, body } = await rest(clientCfg, "DELETE", "/files/" + encodeURIComponent(key), {});
   const isFailed = status >= 400 || (body && body.status === "failed");
   const isBadSecret = status === 403 || /invalid secret/i.test(JSON.stringify(body || ""));
+  if (isBadSecret) {
+    forgetSecret(db || rawDb);
+  }
   return {
     ok: !isFailed,
     key, http: status, result: body,
     hint: isBadSecret
-      ? "数据库 Secret Key 无效（可能数据库已重建换了新密钥）。删除文件必须使用 Secret Key（NCB MCP 未提供 delete_file 工具）。请在 NoCodeBackend 控制台复制最新的 Secret Key 填入设置页。"
+      ? "数据库 Secret Key 无效（可能数据库已重建换了新密钥）。已自动清除本地失效密钥缓存。请在 NoCodeBackend 控制台复制最新的 Secret Key 填入设置页。"
       : (isFailed ? "删除失败，详见 result。" : "删除成功。"),
   };
 }
@@ -849,6 +867,9 @@ export async function cleanProbes(cfg, args) {
 
   if (!listRes.ok) {
     const isAuth = listRes.error && (listRes.error.includes("401") || listRes.error.includes("403"));
+    if (isAuth) {
+      forgetSecret(db || rawDb);
+    }
     return {
       ok: false,
       action: "AUTH_FAILED",
@@ -860,8 +881,10 @@ export async function cleanProbes(cfg, args) {
         isAuth
           ? "Secret Key 鉴权失败（403/401），两个最常见原因：① 误把 MCP Key 当成 Secret Key ② 数据库重建后换了新密钥，当前手里是旧的"
           : `错误信息：${String(listRes.error || "").slice(0, 100)}`,
-        "无法获取桶内文件列表，清理中止",
-        "建议去 NoCodeBackend 控制台重新复制 Secret Key 填入设置页，或去 Cloudflare 手动删除",
+        isAuth
+          ? "【已自动处理】已自动清除本地缓存的失效密钥，请到 NCB 控制台复制当前 Secret Key 填入设置页。"
+          : "无法获取桶内文件列表，清理中止",
+        "建议去 NoCodeBackend 控制台重新复制 Secret Key 填入设置页；如无法找回旧密钥，可点击「一键创建数据库」重新建库以重新捕获新密钥（注意：旧库数据不会自动迁移）。",
       ],
     };
   }

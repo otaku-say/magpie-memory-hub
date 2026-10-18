@@ -12,7 +12,7 @@ import {
   detectDrift, buildStatements, buildDropStatements, describePlan,
   versionUpsertSQL, SCHEMA_VERSION, TABLES, META_TABLE, VERSION_KEY, toNcbTables,
 } from "./schema.js";
-import { rememberSecret, lookupSecret, rememberDatabase, knownDatabases, lookupRealDatabase } from "./local_state.js";
+import { rememberSecret, lookupSecret, forgetSecret, rememberDatabase, knownDatabases, lookupRealDatabase } from "./local_state.js";
 import { r2Setup, r2Upload, r2Guide, resolveRealDatabase } from "./r2.js";
 import { explainUnknownErrorWithModel, attachAiDiagnosis } from "./online_models.js";
 
@@ -817,19 +817,23 @@ export async function secretCheck(cfg, args) {
     }
 
     // 分支 3：真实密钥被拒绝（401/403 或显式 Invalid secret_key）
+    // 关键修复：清除本地失效的缓存密钥，避免后续操作持续拿旧密钥撞 403
+    forgetSecret(db || rawDb);
+    const failedSource = source === "自动捕获" ? "自动捕获（已失效，已自动清除）" : (source === "手动填写" ? "手动填写（已失效）" : source);
     return {
       ok: false,
       verdict: "INVALID",
-      source,
+      source: failedSource,
       database: db || rawDb,
       title: "密钥被 NoCodeBackend 拒绝（鉴权失败）",
       lines: [
-        `目标数据库：${db || rawDb}（来源：${source}）`,
+        `目标数据库：${db || rawDb}（来源：${failedSource}）`,
         `远端接口返回：${errorDetail}（HTTP ${res.status}）`,
+        "【已自动处理】已自动清除本地缓存的失效密钥，避免持续死循环撞 403。",
         "两个最常见原因：",
-        "① 复制的是 MCP Key 而不是 Secret Key（MCP Key 无法访问 REST 接口）",
+        "① 误把 MCP Key 当成 Secret Key（MCP Key 无法访问 REST 接口）",
         "② 数据库删除重建后 NCB 换了新密钥，当前手里保存的是旧密钥",
-        "自救指引：前往 NoCodeBackend 控制台重新复制该库当前密钥；若无法找回，可点「一键创建数据库」选择新建获得一把新密钥",
+        "自救指引：请到 NoCodeBackend 控制台复制当前 Secret Key 手动填入设置页；若无法找回，可点击「一键创建数据库」重新建库以自动捕获新密钥。",
       ],
     };
   } catch (err) {

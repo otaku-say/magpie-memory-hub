@@ -152,6 +152,45 @@ export function lookupSecret(database) {
   return "";
 }
 
+/**
+ * 忘记某个数据库的 Secret Key（403 鉴权失败或显式重置时调用）。
+ * 对称匹配 lookupSecret 的逻辑：精确匹配 -> 归一化匹配 -> 唯一记录兜底清除。
+ */
+export function forgetSecret(database) {
+  const st = readState();
+  const secrets = st.secrets && typeof st.secrets === "object" ? st.secrets : {};
+  const names = Object.keys(secrets);
+  if (!names.length) return false;
+
+  const want = String(database || "").trim();
+  const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
+  const target = want ? norm(want) : "";
+
+  let removed = 0;
+  for (const k of names) {
+    if (!want) {
+      delete secrets[k];
+      removed++;
+    } else if (k === want || norm(k) === target) {
+      delete secrets[k];
+      removed++;
+    }
+  }
+
+  // 若未精准/归一化匹配但本地仅存 1 条记录（对应 lookupSecret 的 ③ 唯一记录兜底命中），也将其清除
+  if (removed === 0 && names.length === 1) {
+    delete secrets[names[0]];
+    removed++;
+  }
+
+  if (removed > 0) {
+    st.secrets = secrets;
+    writeState(st);
+    return true;
+  }
+  return false;
+}
+
 /** 记录设置页信标的执行结果（供 page_actions.js 用）。 */
 export function rememberAction(id, info) {
   const st = readState();
