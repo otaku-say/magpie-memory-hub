@@ -394,6 +394,17 @@
       }
     }
 
+    if (containerId === "r2_action_status") {
+      var hasProbeResidue = (statusObj && statusObj.probe && statusObj.probe.cleaned === false) ||
+        (Array.isArray(statusObj.lines) && statusObj.lines.some(function (l) { return l.indexOf("探针残留提示") !== -1 || l.indexOf("探针文件已留在") !== -1; }));
+      if (hasProbeResidue) {
+        html += '<div class="secret-guide-tip r2-probe-tip">' +
+          '<strong>⚠️ 探针残留提示：</strong>检测探针已写入 R2 存储桶，但因删除需要数据库 Secret Key（当前未填或失效，只有 MCP Key 时只能上传不能删除），探针未能自动删除。<br>' +
+          '<strong>清理方法：</strong>请在上方「数据库设置」中填入 <strong>Secret Key</strong>，然后点击下方 <strong>「清理探针文件」</strong> 按钮即可一键批量删除所有探针。' +
+        '</div>';
+      }
+    }
+
     el.innerHTML = html;
   }
 

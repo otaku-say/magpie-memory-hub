@@ -205,17 +205,25 @@ export async function r2Probe(cfg, database) {
       if (out && out.key) keys.push(String(out.key));
       const prefix = (out && (out.prefix || out.path)) ? String(out.prefix || out.path) : "";
       if (prefix) keys.push(prefix.replace(/\/+$/, "") + "/" + name);
+      // 从 url / publicUrl 的 pathname 提取 key（防止 out 仅返回 url 未带 key 导致删除匹配不到真实对象）
+      if (url) {
+        try {
+          const u = new URL(url);
+          const pathKey = decodeURIComponent(u.pathname.replace(/^\/+/, ""));
+          if (pathKey && !keys.includes(pathKey)) keys.push(pathKey);
+        } catch (_) {}
+      }
       keys.push(name);
       const capturedSecret = lookupSecret(db) || lookupSecret(rawDb) || "";
       const secretVal = (cfg && (cfg.secret || cfg.ncb_secret)) || capturedSecret || "";
       const hasSecret = !!secretVal;
       if (!hasSecret) {
-        cleanNote = "探针文件已留在 R2 存储中，因为删除需要数据库 Secret Key，而当前尚未填写（只有 MCP Key 时只能上传）。如需删除探针，请前往 NoCodeBackend 控制台 → 该数据库 → 复制 Secret Key 填入设置页，然后点击「清理探针文件」或调用 storage_delete。";
+        cleanNote = "探针文件已留在 R2 存储中，因为删除需要数据库 Secret Key，而当前尚未填写（只有 MCP Key 时只能上传不能删除）。清理方法：请前往 NoCodeBackend 控制台复制 Secret Key 填入设置页，然后点击下方「清理探针文件」按钮即可一键批量删除所有探针。";
       } else {
         const restCfg = Object.assign({}, cfg, { instance: db, secret: secretVal });
         for (const k of keys) {
           try {
-            const r = await rest(restCfg, "DELETE", "/files/" + encodeURIComponent(k), {});
+            const r = await rest(restCfg, "DELETE", "/files/" + encodeURIComponent(k), { skip_mount_check: true });
             if (r.status < 400) { cleaned = true; break; }
             if (r.status === 401 || r.status === 403) {
               forgetSecret(db || rawDb);
@@ -227,7 +235,7 @@ export async function r2Probe(cfg, database) {
             if (e.name === "AbortError" || (signal && signal.aborted)) throw e;
           }
         }
-        if (!cleaned) cleanNote = "探针文件删除失败（已尝试返回的 key 与原始文件名），它可能仍留在 R2 里";
+        if (!cleaned) cleanNote = "探针文件删除失败（已尝试匹配的 key、URL 路径与原始文件名），可能仍留在 R2 存储中。清理方法：请在设置页确认 Secret Key 有效，并点击下方「清理探针文件」按钮重新清理，或前往 Cloudflare R2 控制台手动删除。";
       }
     } catch (e) {
       if (e.name === "AbortError" || (signal && signal.aborted)) throw e;
@@ -513,12 +521,10 @@ export async function r2Check(cfg, args) {
     };
   }
 
-  // 核心拦截：检测 R2 是否已挂载（未挂载时绝不走远端探测，直接给出明确提示）
+  // 【核心修复 Bug 1：检测独立于挂载】
+  // 「检测 R2 密钥」用于独立验证凭据是否真实可用，绝不强依赖已建立的挂载状态。
+  // 只要用户填写了凭据（或远端已有配置），即可直接发起真实上传与删除探针检测。
   const mountCheck = isR2Mounted(cfg, db, a);
-  if (!mountCheck.mounted) {
-    return notMountedResponse(db);
-  }
-
   const pick = (kArg, kCfg) => (a[kArg] != null && a[kArg] !== "" ? a[kArg] : (cfg && cfg[kCfg]) || "");
   const defaultBucket = deriveLegalBucketName(db);
   const customBucket = pick("bucket_name", "r2BucketName");
@@ -530,9 +536,28 @@ export async function r2Check(cfg, args) {
     ? "本次调用传入"
     : hasSavedCreds
     ? "插件设置页保存的"
-    : "未提供任何凭据（使用 NCB 缓存连接）";
+    : (mountCheck.mounted ? "已挂载配置" : "未提供任何凭据（使用 NCB 缓存连接）");
 
-  // 不做 setupR2Storage，直接用真实探针判断凭据是否可用
+  // 若本次传入或配置了凭据，先行通过 setup_r2_storage 同步至 NCB，以便真实探针基于该套凭据验证
+  if (hasInputCreds || hasSavedCreds) {
+    try {
+      const mcp = clientOf(cfg);
+      const creds = {
+        account_id: pick("account_id", "r2AccountId"),
+        access_key_id: pick("access_key_id", "r2AccessKeyId"),
+        secret_access_key: pick("secret_access_key", "r2SecretAccessKey"),
+        bucket_name: bucketName,
+        public_url: publicUrl,
+      };
+      const extra = {};
+      for (const k of Object.keys(creds)) if (creds[k]) extra[k] = creds[k];
+      if (Object.keys(extra).length) {
+        await mcp.setupR2Storage(db, extra);
+      }
+    } catch (_) {}
+  }
+
+  // 真实探针探测（上传 + 删除）
   let probe;
   try {
     probe = await r2Probe(cfg, db);
@@ -542,6 +567,7 @@ export async function r2Check(cfg, args) {
   const explained = probe.ok ? null : explainProbeFailure(probe.error);
   const ok = !!probe.ok;
 
+  // 检测成功后，顺带落地挂载记录；检测失败则清除失效挂载记录
   if (ok) {
     const accId = (cfg && (cfg.r2AccountId || cfg.account_id)) || (a && (a.account_id || a.r2AccountId)) || "";
     rememberR2Mount(db, {
@@ -571,6 +597,7 @@ export async function r2Check(cfg, args) {
       probe.cleaned === false
         ? (probe.clean_note ? `探针残留提示：${probe.clean_note}` : "真实上传验证成功；探针文件留在 R2（删除需 Secret Key）")
         : "真实上传与删除探针测试成功，存储通道就绪",
+      "凭据真实有效，R2 存储通道已就绪（可随时使用或点击『挂载 R2 存储』确认配置）",
     ] : [
       `数据库：${db}`,
       explained && explained.detail ? `诊断：${explained.detail}` : `错误：${String(probe.error).slice(0, 100)}`,
@@ -684,14 +711,34 @@ export async function r2List(cfg, args) {
   const db = rawDb ? await resolveRealDatabase(cfg, rawDb) : "";
   const clientCfg = db ? Object.assign({}, cfg, { instance: db }) : cfg;
 
-  // 依赖 R2 守卫：未挂载时直接返回明确提示
-  const mountCheck = isR2Mounted(clientCfg, db || rawDb, args);
-  if (!mountCheck.mounted) {
-    const res = notMountedResponse(db || rawDb);
-    return Object.assign({ count: 0, files: [], truncated: false }, res);
+  // 依赖 R2 守卫：未挂载时直接返回明确提示（允许传 skip_mount_check 内部绕过，如 cleanProbes）
+  if (!args || !args.skip_mount_check) {
+    const mountCheck = isR2Mounted(clientCfg, db || rawDb, args);
+    if (!mountCheck.mounted) {
+      const res = notMountedResponse(db || rawDb);
+      return Object.assign({ count: 0, files: [], truncated: false }, res);
+    }
   }
 
-  const { status, body } = await rest(clientCfg, "GET", "/files", {});
+  let status, body;
+  try {
+    const r = await rest(clientCfg, "GET", "/files", {});
+    status = r.status;
+    body = r.body;
+  } catch (err) {
+    return {
+      ok: false,
+      error: err.code || "REQUEST_FAILED",
+      message: err.message,
+      hint: err.code === "NO_SECRET"
+        ? "未配置数据库 Secret Key。R2 的「列举 / 删除」走 NoCodeBackend 的 REST，需要 Secret Key。解决办法：前往 NoCodeBackend 控制台复制 Secret Key 填入设置页。"
+        : err.message,
+      count: 0,
+      files: [],
+      truncated: false,
+    };
+  }
+
   if (status >= 400) {
     const isBadSecret = status === 403 || /invalid secret/i.test(JSON.stringify(body || ""));
     if (isBadSecret) {
@@ -728,14 +775,32 @@ export async function r2Delete(cfg, args) {
     };
   }
 
-  // 依赖 R2 守卫：未挂载时直接返回明确提示
-  const mountCheck = isR2Mounted(clientCfg, db || rawDb, args);
-  if (!mountCheck.mounted) {
-    const res = notMountedResponse(db || rawDb);
-    return Object.assign({ key }, res);
+  // 依赖 R2 守卫：未挂载时直接返回明确提示（允许传 skip_mount_check 内部绕过，如 cleanProbes）
+  if (!args || !args.skip_mount_check) {
+    const mountCheck = isR2Mounted(clientCfg, db || rawDb, args);
+    if (!mountCheck.mounted) {
+      const res = notMountedResponse(db || rawDb);
+      return Object.assign({ key }, res);
+    }
   }
 
-  const { status, body } = await rest(clientCfg, "DELETE", "/files/" + encodeURIComponent(key), {});
+  let status, body;
+  try {
+    const r = await rest(clientCfg, "DELETE", "/files/" + encodeURIComponent(key), {});
+    status = r.status;
+    body = r.body;
+  } catch (err) {
+    return {
+      ok: false,
+      key,
+      error: err.code || "REQUEST_FAILED",
+      message: err.message,
+      hint: err.code === "NO_SECRET"
+        ? "未配置数据库 Secret Key。R2 的「列举 / 删除」走 NoCodeBackend 的 REST，需要 Secret Key。解决办法：前往 NoCodeBackend 控制台复制 Secret Key 填入设置页。"
+        : err.message,
+    };
+  }
+
   const isFailed = status >= 400 || (body && body.status === "failed");
   const isBadSecret = status === 403 || /invalid secret/i.test(JSON.stringify(body || ""));
   if (isBadSecret) {
@@ -800,13 +865,6 @@ export async function cleanProbes(cfg, args) {
   const rawDb = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
   const db = await resolveRealDatabase(cfg, rawDb);
 
-  // 依赖 R2 守卫：未挂载时直接返回明确提示（不走远端探测与清理）
-  const mountCheck = isR2Mounted(cfg, db || rawDb, args);
-  if (!mountCheck.mounted) {
-    const res = notMountedResponse(db || rawDb);
-    return Object.assign({ action: "NOT_MOUNTED", deleted_count: 0 }, res);
-  }
-
   const manual = String((args && args.secret) || (cfg && (cfg.ncb_secret || cfg.secret)) || "").trim();
   const captured = db ? (lookupSecret(db) || lookupSecret(rawDb)) : (lookupSecret("") || "");
   const secret = manual || captured || "";
@@ -832,7 +890,7 @@ export async function cleanProbes(cfg, args) {
   const clientCfg = Object.assign({}, cfg, { instance: db, secret });
   let listRes;
   try {
-    listRes = await r2List(clientCfg, { limit: 1000 });
+    listRes = await r2List(clientCfg, { limit: 1000, skip_mount_check: true });
   } catch (err) {
     return {
       ok: false,
@@ -901,7 +959,7 @@ export async function cleanProbes(cfg, args) {
   let failed = 0;
   for (const k of probeKeys) {
     try {
-      const del = await r2Delete(clientCfg, { key: k, confirm: "DELETE" });
+      const del = await r2Delete(clientCfg, { key: k, confirm: "DELETE", skip_mount_check: true });
       if (del.ok) deleted++;
       else failed++;
     } catch (_) {

@@ -497,6 +497,7 @@ export function formatCardStatus(key, rawResult, opHint) {
         if (res.public_url) lines.push(`公开域名：${res.public_url}`);
         if (res.probe && res.probe.cleaned === false) {
           lines.push(res.probe.clean_note ? `探针残留提示：${res.probe.clean_note}` : "真实上传验证成功；探针文件留在 R2（删除需 Secret Key）");
+          lines.push("清理方法：在设置页填写数据库 Secret Key 后，点击「清理探针文件」即可一键清除。");
         } else {
           lines.push("真实上传与删除探针测试成功，存储通道就绪");
         }
