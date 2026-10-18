@@ -19,7 +19,7 @@ import {
   dbStatus, dbInit, dbProvision, dbReset, storageSetup, storageUpload, storageGuide, ncbCheck, RESET_CONFIRM,
 } from "./db_tools.js";
 import { r2Setup, r2Upload, r2List, r2Delete, r2Guide, r2Check } from "./r2.js";
-import { lookupSecret, lookupDatabase } from "./local_state.js";
+import { lookupSecret, lookupDatabase, lookupRealDatabase } from "./local_state.js";
 import { makeMcpClient } from "./mcp_client.js";
 import { runPendingAction, readAction, writeCardStatus, parseDbInfo } from "./page_actions.js";
 import { harvestGateway, isTestMode } from "./gateway_harvest.js";
@@ -79,16 +79,17 @@ function justWritten(fp) {
 
 function readOptions(options) {
   const o = options && typeof options === "object" ? options : {};
+  const rawInst = o.ncb_instance || lookupDatabase() || "41694_agent_memory";
+  const instance = lookupRealDatabase(rawInst) || rawInst;
   return {
-    // 库名：优先按用户填的；没填就用上次 provision 真正用到的那个
-    instance: o.ncb_instance || lookupDatabase() || "41694_agent_memory",
+    // 库名：优先按用户填的并归一化解析；没填就用上次 provision 真正用到的那个
+    instance,
     // Secret Key：用户在设置页填的优先；
     // 若库是本插件创建的，创建时已自动取得并保存在本地状态里，这里直接取用，
     // 于是**用户只需要填 MCP key**。
-    secret: o.ncb_secret || lookupSecret(o.ncb_instance || lookupDatabase()) || "",
+    secret: o.ncb_secret || lookupSecret(instance) || lookupSecret(rawInst) || "",
     // MCP key：仅用于建表/清库/schema/R2。数据库 Secret Key 只能读写数据。
     mcpKey: o.mcp_key || "",
-    storagePublicUrl: o.storage_public_url || "",
     // 宿主每次加载时自愈（结构缺失就补）。默认关：避免给工具枚举引入网络等待。
     autoInit: o.auto_init === true,
     // 宿主每次加载时自动增量扫描网关录制的对话落盘。默认关：避免涉及用户隐私与启动延迟。
@@ -317,6 +318,19 @@ function nowSql() {
   return new Date().toISOString().slice(0, 19).replace("T", " ");
 }
 
+/** 检查记忆是否有效（未标记 invalid_at 且未超过 expires_at） */
+function isMemoryValid(row, nowMs = Date.now()) {
+  if (!row) return false;
+  if (row.invalid_at) return false;
+  if (row.expires_at) {
+    const str = String(row.expires_at).trim();
+    const iso = str.replace(" ", "T") + (str.includes("Z") ? "" : "Z");
+    const t = Date.parse(iso);
+    if (!isNaN(t) && t <= nowMs) return false;
+  }
+  return true;
+}
+
 async function saveMemory(client, cfg, m, ctx) {
   const project = String(m.project || "global").trim();
   const category = CATEGORIES.includes(m.category) ? m.category : "fact";
@@ -464,20 +478,23 @@ async function saveMemory(client, cfg, m, ctx) {
   markRecent("m:" + fp);
 
   if (superseded.length && newId) {
-    const oldId = superseded[0].id;
-    try {
-      await client.update("memories", oldId, {
-        lifecycle_status: "superseded", superseded_by_id: newId,
-        invalid_at: nowSql(),
-        invalid_reason: "superseded",
-        updated_at: nowSql(),
-      });
-      return { action: "UPDATE", id: newId, superseded_id: oldId, superseded_count: superseded.length, recurrence: initialRecurrence };
-    } catch (e) {
-      if (!/404|not found/i.test(String(e.message))) throw e;
-      // 旧行已不可达（被清理/缓存残留）：新版本已写入，直接按 ADD 返回
-      return { action: "ADD", id: newId, recurrence: initialRecurrence, note: "旧版本行不可达，已跳过 supersede 标记" };
+    let updatedCount = 0;
+    for (const oldRow of superseded) {
+      if (!oldRow || !oldRow.id) continue;
+      try {
+        await client.update("memories", oldRow.id, {
+          lifecycle_status: "superseded",
+          superseded_by_id: newId,
+          invalid_at: nowSql(),
+          invalid_reason: "superseded",
+          updated_at: nowSql(),
+        });
+        updatedCount++;
+      } catch (e) {
+        if (!/404|not found/i.test(String(e.message))) throw e;
+      }
     }
+    return { action: "UPDATE", id: newId, superseded_id: superseded[0].id, superseded_count: updatedCount || superseded.length, recurrence: initialRecurrence };
   }
   return { action: "ADD", id: newId, recurrence: initialRecurrence };
 }
@@ -513,6 +530,7 @@ async function memorySearch(client, cfg, args) {
   if (args.origin) pool = pool.filter((r) => String(r.origin || "") === String(args.origin));
   // 历史版本默认不返回（Headroom：查询默认排除 superseded）
   if (args.include_history !== true) pool = pool.filter((r) => r.lifecycle_status !== "superseded");
+  pool = pool.filter((r) => isMemoryValid(r));
 
   // 优先级 2：在线提炼模型改写自然语言查询（在配置了模型且开启改写时）
   let rewrittenInfo = null;
@@ -597,7 +615,7 @@ async function memoryList(client, cfg, args) {
   if (args.client) fetchParams.client = String(args.client).trim();
 
   let all = (await fetchAll(client, "memories", fetchParams)).filter(
-    (r) => r.lifecycle_status !== "superseded"
+    (r) => r.lifecycle_status !== "superseded" && isMemoryValid(r)
   );
   if (args.project) all = all.filter((r) => String(r.project || "") === String(args.project));
   if (args.client) all = all.filter((r) => String(r.client || "") === String(args.client));
@@ -627,7 +645,7 @@ async function memoryContext(client, cfg, args) {
   if (args.project) fetchParams.project = String(args.project).trim();
 
   let pool = (await fetchAll(client, "memories", fetchParams)).filter(
-    (r) => r.lifecycle_status !== "superseded"
+    (r) => r.lifecycle_status !== "superseded" && isMemoryValid(r)
   );
   if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
 
@@ -743,7 +761,7 @@ async function pitfallSearch(client, cfg, args) {
   if (args.component) fetchParams.component = String(args.component).trim();
 
   const all = await fetchAll(client, "pitfalls", fetchParams);
-  let pool = all;
+  let pool = all.filter((r) => !r.invalid_at);
   if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
   if (args.client) pool = pool.filter((r) => String(r.client || "") === String(args.client));
   if (args.component) pool = pool.filter((r) => String(r.component || "") === args.component);
@@ -1210,7 +1228,6 @@ export const MagpieMemoryHub = async (input, options) => {
       description: def.description,
       args: def.args,
       execute: async (args, ctx) => {
-        const callerAgent = (ctx && ctx.agent) != null ? ctx.agent : "";
         const abortSignal = (ctx && ctx.abort) || null;
         if (abortSignal && abortSignal.aborted) {
           const abortErr = new Error("操作已被取消 (aborted)");
@@ -1228,27 +1245,11 @@ export const MagpieMemoryHub = async (input, options) => {
               throw err;
             }
           };
-          const waitWithAbort = (ms) => new Promise((resolve, reject) => {
-            checkAbort();
-            const t = setTimeout(() => {
-              if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
-              resolve();
-            }, ms);
-            const onAbort = () => {
-              clearTimeout(t);
-              const err = new Error("操作已被取消 (aborted)");
-              err.name = "AbortError";
-              reject(err);
-            };
-            if (abortSignal) abortSignal.addEventListener("abort", onAbort, { once: true });
-          });
 
           callClient = {
             ...baseClient,
             create: async (t, d) => { checkAbort(); return await baseClient.create(t, d); },
             list: async (t, p) => {
-              checkAbort();
-              if (abortSignal) await waitWithAbort(15);
               checkAbort();
               return await baseClient.list(t, p);
             },

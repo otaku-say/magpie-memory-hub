@@ -103,6 +103,20 @@ async function runTest() {
     console.log("\n4. 验证运行中的 fetch 收到异步 abort 信号立即干净退出:");
     {
       const ac = new AbortController();
+      const origList = env.client.list;
+      env.client.list = async (t, p) => {
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(async () => {
+            try { resolve(await origList(t, p)); } catch (e) { reject(e); }
+          }, 40);
+          ac.signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            const err = new Error("操作已被取消 (aborted)");
+            err.name = "AbortError";
+            reject(err);
+          }, { once: true });
+        });
+      };
       const timer = setTimeout(() => ac.abort(), 10);
       try {
         await assertAbortedCleanly(
@@ -111,6 +125,7 @@ async function runTest() {
         );
       } finally {
         clearTimeout(timer);
+        env.client.list = origList;
       }
     }
 

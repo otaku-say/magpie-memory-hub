@@ -1105,15 +1105,19 @@ def save_memory(ncb, cfg, m, cache):
     new_id = res.get("id") or res.get("insertId")
 
     if superseded and new_id:
-        old = superseded[0]["id"]
-        ncb.update("memories", old, {
-            "lifecycle_status": "superseded",
-            "superseded_by_id": new_id,
-            "invalid_at": now_str(),
-            "invalid_reason": "superseded",
-            "updated_at": now_str(),
-        })
-        return {"action": "UPDATE", "id": new_id, "superseded_id": old}
+        for old_row in superseded:
+            if old_row and old_row.get("id"):
+                try:
+                    ncb.update("memories", old_row["id"], {
+                        "lifecycle_status": "superseded",
+                        "superseded_by_id": new_id,
+                        "invalid_at": now_str(),
+                        "invalid_reason": "superseded",
+                        "updated_at": now_str(),
+                    })
+                except Exception:
+                    pass
+        return {"action": "UPDATE", "id": new_id, "superseded_id": superseded[0]["id"], "superseded_count": len(superseded)}
     return {"action": "ADD", "id": new_id}
 
 

@@ -122,22 +122,6 @@ function auditSafe(arr, guard, keptIdx) {
   return true;
 }
 
-/** 完全相同项的折叠：只在【保留集】层面做，不动原数组 */
-function dedupIdentical(arr, idxs) {
-  if (CRUSH.dedupIdentical === false) return idxs;
-  var seen = {}, out = [];
-  for (var i = 0; i < idxs.length; i++) {
-    var v = arr[idxs[i]];
-    var key;
-    try { key = typeof v === "string" ? v : JSON.stringify(v); } catch (e) { key = null; }
-    if (key === null) { out.push(idxs[i]); continue; }
-    if (seen[key]) continue;      // 之前已保留过一份完全相同的
-    seen[key] = 1;
-    out.push(idxs[i]);
-  }
-  return out;
-}
-
 function isErrorItem(v) {
   try {
     var t = typeof v === "string" ? v : JSON.stringify(v);
@@ -424,7 +408,6 @@ function dedupLogTemplates(text, opts) {
  *
  * 判定必须带边界，否则 "0 errors" 这类例行行会被误判为致命
  * （实测：宽松正则导致 120 行 INFO 全部被判致命，压缩彻底失效）。 */
-var CRITICAL_RE = /(\bFATAL\b|\bPANIC\b|\bCRITICAL\b|\bSEVERE\b|Traceback \(most recent|^\s*at\s+[\w.$]+\s*\(|\bException\b|\bError:\s|\bFAILED\b|\bassertion failed\b|connection refused|permission denied|access denied|timed out|\btimeout\b|segfault|\bOOM\b|\bkilled\b|No such file|not found|\bcannot\b|\bunable\b|exit code [1-9]|\b[1-9]\d* (?:failed|errors?|failures?)\b)/;
 
 /* 次要行：仍然有信息量，但可以被预算裁掉 */
 var NOISE_RE = /(\berror\b|\berr\b|\bwarn\b|\bfailed\b|https?:\/\/|\/[\w.\-\/]{4,}|\.(?:py|js|ts|go|rs|java|rb|json|ya?ml|toml)(?::\d+)?|\d{3,})/i;
@@ -727,11 +710,10 @@ function compressBody(body, opts) {
   var startedAt = Date.now();
   var workUsed = 0;
   var guardTripped = "";
-  /* 是否还有预算继续压下一块；返回 tripGuard('work'|'time') 表示用完了 */
+  /* 是否还有预算继续压下一块；只按确定性字符预算中断，杜绝非确定性墙钟中断破坏 KV-Cache */
   function budgetLeft(len) {
     if (guardTripped) return false;
     if (workUsed + len > workBudget) { guardTripped = "work"; return false; }
-    if (Date.now() - startedAt > timeBudgetMs) { guardTripped = "time"; return false; }
     workUsed += len;
     return true;
   }

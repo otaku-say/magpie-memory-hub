@@ -34,6 +34,7 @@ import path from "node:path";
 import { dbInit, dbReset, dbStatus, dbProvision, storageSetup, ncbCheck, secretCheck, RESET_CONFIRM } from "./db_tools.js";
 import { r2Setup, r2Check, cleanProbes } from "./r2.js";
 import { lookupRealDatabase } from "./local_state.js";
+import { harvestGateway } from "./gateway_harvest.js";
 
 /** 插件目录下的状态文件路径（供 iframe 内设置页通过 script 标签加载）。 */
 export const STATUS_JS_PATH = fileURLToPath(new URL("./_status.js", import.meta.url));
@@ -41,8 +42,6 @@ export const STATUS_JSON_PATH = fileURLToPath(new URL("./_status.json", import.m
 
 /** options 里存放信标的键。以 _ 开头，与用户配置区分。 */
 export const ACTION_KEY = "_action";
-/** 执行结果也写回 options 的同一个键（页面可读）。 */
-export const RESULT_KEY = "_action_result";
 
 const STATE_DIR = ".magpie-memory-hub";
 const STATE_FILE = "page-actions.json";
@@ -59,6 +58,7 @@ export const OPS = {
   r2_check: "检测 R2 凭据是否真的可用（真实上传探针，只读检测）",
   clean_probe: "扫描 R2 中残留的探针文件并自动删除（走 REST 接口）",
   model_check: "检测在线模型连通性与可用性（实际调用提炼与判定模型并校验返回）",
+  harvest_gateway: "立即扫描网关对话录制并提炼记忆",
 };
 
 function statePath(fs, os, path) {
@@ -88,16 +88,19 @@ function loadState(fs, p) {
 }
 
 function saveState(fs, p, state) {
+  let tmp = null;
   try {
-    const dir = p.slice(0, p.lastIndexOf("/"));
+    const dir = path.dirname(p);
     fs.mkdirSync(dir, { recursive: true });
     // 只留最近 50 条历史，避免无限增长
     const hist = (state.history || []).slice(-50);
-    const tmp = p + ".tmp";
+    const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+    tmp = `${p}.tmp.${nonce}`;
     fs.writeFileSync(tmp, JSON.stringify({ lastDoneId: state.lastDoneId, pendingId: state.pendingId || "", history: hist }, null, 2));
     fs.renameSync(tmp, p);      // 原子替换
     return true;
   } catch (e) {
+    try { if (tmp && fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
     return false;
   }
 }
@@ -277,6 +280,30 @@ async function execute(action, cfg, fs, sp, state, options) {
         detail: conn,
       };
     }
+    else if (action.op === "harvest_gateway") {
+      const res = await harvestGateway(action.args || {}, { options: options || {}, client });
+      const ok = res && res.success !== false;
+      const lines = [];
+      if (res && res.message) lines.push(res.message);
+      if (res && res.details) {
+        if (res.details.filesScanned !== undefined) {
+          lines.push(`扫描文件: ${res.details.filesScanned} · 记忆: ${res.details.memoriesSaved || 0} · 踩坑: ${res.details.pitfallsSaved || 0}`);
+        }
+      } else if (res && res.turns_scanned !== undefined) {
+        lines.push(`扫描轮次: ${res.turns_scanned} · 提炼记忆: ${res.memories_saved || 0} · 提炼踩坑: ${res.pitfalls_saved || 0}`);
+      }
+      if (lines.length < 2) {
+        lines.push(ok ? "网关对话录制增量扫描完成" : "网关对话录制扫描未完成");
+      }
+      result = {
+        ok,
+        at: Date.now(),
+        op: "harvest_gateway",
+        title: ok ? "对话录制扫描完成" : "对话录制扫描失败",
+        lines,
+        detail: res,
+      };
+    }
     else result = await dbStatus(cfg, args);
   } catch (e) {
     result = { ok: false, error: String(e && e.message || e) };
@@ -291,6 +318,7 @@ async function execute(action, cfg, fs, sp, state, options) {
       provision: "ncb", init: "ncb", reset: "ncb", status: "ncb", ncb_check: "ncb", secret_check: "ncb",  // db-col-ok: UI 操作对应的卡片映射表，非数据库列
       storage_setup: "r2", r2_check: "r2", clean_probe: "r2",
       model_check: "model",
+      harvest_gateway: "gateway",
     };
     const cardKey = CARD_OF_OP[action.op] || "ncb";
     writeCardStatus(cardKey, result, action.op);
@@ -594,13 +622,17 @@ export function writeCardStatus(key, payloadOrResult, opHint, customStatusPath) 
     return false;
   }
 
-  const jsPath = customStatusPath || STATUS_JS_PATH;
-  const jsonPath = jsPath.replace(/\.js$/, ".json");
-  const nonce = Date.now() + "." + Math.random().toString(36).slice(2, 8);
-  const tmpJsonPath = jsonPath + ".tmp." + nonce;
-  const tmpJsPath = jsPath + ".tmp." + nonce;
+  let tmpJsonPath = null;
+  let tmpJsPath = null;
 
   try {
+    const rawPath = typeof customStatusPath === "string" ? customStatusPath : (typeof customStatusPath === "object" && customStatusPath ? (customStatusPath.jsPath || customStatusPath.path || "") : "");
+    const jsPath = rawPath || STATUS_JS_PATH;
+    const jsonPath = jsPath.replace(/\.js$/, ".json");
+    const nonce = process.pid + "." + Date.now() + "." + Math.random().toString(36).slice(2, 8);
+    tmpJsonPath = jsonPath + ".tmp." + nonce;
+    tmpJsPath = jsPath + ".tmp." + nonce;
+
     // 1. 读回现有内容（优先从真相源 _status.json 读，退避时解析 _status.js）
     let current = {};
     if (fs.existsSync(jsonPath)) {

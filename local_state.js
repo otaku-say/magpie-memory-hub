@@ -17,9 +17,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const STATE_DIRNAME = ".magpie-memory-hub";
 export const STATE_FILENAME = "state.json";
+const STATUS_JSON_PATH = fileURLToPath(new URL("./_status.json", import.meta.url));
 
 /** 状态文件路径；拿不到 HOME 时返回 null（调用方需容错）。 */
 export function statePath() {
@@ -71,12 +73,16 @@ export function writeState(state) {
     delete out._ok;
     delete out._missing;
     delete out._err;
-    const tmp = p + ".tmp";
+    const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+    const tmp = `${p}.tmp.${nonce}`;
     fs.writeFileSync(tmp, JSON.stringify(out, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, p);
     try { fs.chmodSync(p, 0o600); } catch (e) { /* 某些文件系统不支持，忽略 */ }
     return true;
   } catch (e) {
+    try {
+      if (tmp && fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    } catch (_) {}
     return false;
   }
 }
@@ -191,25 +197,6 @@ export function forgetSecret(database) {
   return false;
 }
 
-/** 记录设置页信标的执行结果（供 page_actions.js 用）。 */
-export function rememberAction(id, info) {
-  const st = readState();
-  st.actions[id] = Object.assign({ at: Date.now() }, info || {});
-  // 只保留最近 30 条
-  const keys = Object.keys(st.actions);
-  if (keys.length > 30) {
-    keys.sort((a, b) => (st.actions[a].at || 0) - (st.actions[b].at || 0));
-    for (const k of keys.slice(0, keys.length - 30)) delete st.actions[k];
-  }
-  return writeState(st);
-}
-
-/** 读回某次信标的执行结果。 */
-export function lookupAction(id) {
-  const st = readState();
-  return st.actions[id] || null;
-}
-
 /** 记住本次真正使用的数据库实例名（NCB 可能自动加账号前缀或后缀）。 */
 export function rememberDatabase(name) {
   if (!name) return false;
@@ -299,15 +286,15 @@ export function lookupR2Mount(database) {
 
   // ② 归一化匹配（忽略账号数字前缀与大小写）
   const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
-  if (want) {
-    const target = norm(want);
+  const target = want ? norm(want) : "";
+  if (target) {
     const hit = names.find((k) => norm(k) === target);
     if (hit) return mounts[hit];
   }
 
-  // ③ 唯一记录兜底（仅在未指定目标库，或目标库与唯一记录同源时兜底）
-  if (names.length === 1) {
-    if (!want || norm(names[0]) === target) return mounts[names[0]];
+  // ③ 唯一记录兜底（仅在未指定目标库时兜底；明确指定且不匹配时决不能兜底返回其他库）
+  if (!want && names.length === 1) {
+    return mounts[names[0]];
   }
   return null;
 }
@@ -332,7 +319,7 @@ export function forgetR2Mount(database) {
   }
   // 同时同步清除 _status.json 中的 r2 挂载卡片状态，杜绝已解绑的数据库被 _status.json 僵尸复活
   try {
-    const p = path.join(process.cwd(), "_status.json");
+    const p = STATUS_JSON_PATH;
     if (fs.existsSync(p)) {
       const o = JSON.parse(fs.readFileSync(p, "utf8"));
       if (o && o.r2) {

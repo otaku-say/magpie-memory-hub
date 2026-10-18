@@ -152,17 +152,15 @@ try {
     const blockedStatusJson = join(fileAsParent, "sub", "_status.json");
 
     let threw = false;
+    let ret = true;
     try {
-      writeCardStatus("ncb", {
+      ret = writeCardStatus("ncb", {
         at: Date.now(),
         op: "test",
         ok: true,
         title: "只读测试",
         lines: ["降级测试"]
-      }, {
-        jsPath: blockedStatusJs,
-        jsonPath: blockedStatusJson
-      });
+      }, "test", blockedStatusJs);
     } catch (e) {
       threw = true;
       console.error("异常抛出:", e);
@@ -171,6 +169,7 @@ try {
     }
 
     assert.strictEqual(threw, false, "断言失败：在只读目录中写状态抛出异常，未静默降级！");
+    assert.strictEqual(ret, false, "断言失败：只读/阻塞路径下 writeCardStatus 应返回 false 降级");
     console.log("  ✓ 只读目录静默降级测试通过（无抛错）");
   }
 

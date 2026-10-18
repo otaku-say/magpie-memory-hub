@@ -10,7 +10,7 @@ Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记�
 | 仲裁 | **规则**（置信度 + 信息量 + 相似度） | clef 模型 |
 | 额外调用 | **0** | 每轮 1~2 次 |
 | 额外成本 | **0** | 按模型计费 |
-| 配置 | `inline_extract` 开 + `extractor_model` 留空 + `clef_mode=rule` | 填模型 ID |
+| 配置 | `inline_extract` 开 + `extract_model` 留空 + `classify_endpoint=auto` | 填模型 ID |
 
 零外部模型模式的机制来自 [Headroom](https://github.com/headroomlabs-ai/headroom)：**提炼不需要另起一个模型，让本来就要跑的那个顺势完成**。中间件在请求里注入一条提炼指令，回复末尾的 `<memory>` 块被解析入库、并从用户可见输出里剥掉。
 
@@ -68,12 +68,12 @@ CREATE TABLE memories (
   origin VARCHAR(32) DEFAULT 'tool',
   title VARCHAR(512) NOT NULL,
   content TEXT NOT NULL,
-  full_text LONGTEXT NULL,
+  full_text TEXT NULL,
   tags VARCHAR(512) DEFAULT '',
   related_entities VARCHAR(512) DEFAULT '',
   content_fingerprint VARCHAR(64) NOT NULL,
   confidence_score INT DEFAULT 100,
-  lifecycle_status VARCHAR(16) DEFAULT 'active',
+  lifecycle_status VARCHAR(24) DEFAULT 'active',
   superseded_by_id INT NULL,
   revision INT DEFAULT 1,
   recurrence INT DEFAULT 1,

@@ -53,27 +53,7 @@ import {
   getModelBudgetState,
 } from "./model_budget.js";
 
-/** Headroom :68-80 脚手架注入前缀黑名单 */
-export const SCAFFOLDING_PATTERNS = [
-  /<app-context[\s\S]*?(?:<\/app-context>|$)/gi,
-  /<system-reminder[\s\S]*?(?:<\/system-reminder>|$)/gi,
-  /<permissions instructions[\s\S]*?(?:<\/permissions instructions>|$)/gi,
-  /<skills_instructions[\s\S]*?(?:<\/skills_instructions>|$)/gi,
-  /<context[\s\S]*?(?:<\/context>|$)/gi,
-  /<instructions[\s\S]*?(?:<\/instructions>|$)/gi,
-  /#\s*agents\.md\s+instructions\s+for[^\n]*/gi,
-  /another language model started to solve[^\n]*/gi,
-  /\[developer instructions\][\s\S]*?(?:\n\n|$)/gi,
-];
-
-export function stripScaffolding(text) {
-  if (!text) return "";
-  let s = String(text);
-  for (const pat of SCAFFOLDING_PATTERNS) {
-    s = s.replace(pat, "");
-  }
-  return s.trim();
-}
+import { _diag, SCAFFOLDING_PATTERNS, stripScaffolding } from "./gateway_harvest.js";
 
 /* ================================================================== *
  * 1. 进程内近期去重与辅助结构
@@ -511,25 +491,30 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
         },
       };
 
-      const res = await doFetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-      try { modelBudgetRecord(); } catch (_) {}
+      let res;
+      try {
+        res = await doFetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        try { modelBudgetRecord(); } catch (_) {}
+      } catch (netErr) {
+        return { ok: false, status: 0, errText: String(netErr?.message || netErr), reason: "systemone_network_exception" };
+      }
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
-        return { ok: false, status: res.status, errText };
+        return { ok: false, status: res.status, errText, reason: `systemone_http_${res.status}` };
       }
 
-      const json = await res.json();
+      const json = await res.json().catch(() => null);
       const noul = json?.answers?.worth_remembering?.noul;
       if (typeof noul === "number") {
         return { ok: true, score: noul, reason: "systemone" };
       }
-      return { ok: false, status: 200, errText: "返回缺少有效 noul 打分" };
+      return { ok: false, status: 200, errText: "返回缺少有效 noul 打分", reason: "systemone_missing_noul" };
     } finally {
       clearTimeout(timer);
     }
@@ -557,23 +542,35 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
         max_tokens: 10,
       };
 
-      const res = await doFetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-      try { modelBudgetRecord(); } catch (_) {}
+      let res;
+      try {
+        res = await doFetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        try { modelBudgetRecord(); } catch (_) {}
+      } catch (netErr) {
+        return { ok: false, status: 0, errText: String(netErr?.message || netErr), reason: "chat_network_exception" };
+      }
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
-        return { ok: false, status: res.status, errText };
+        return { ok: false, status: res.status, errText, reason: `chat_http_${res.status}` };
       }
 
-      const json = await res.json();
-      const content = String(json?.choices?.[0]?.message?.content || "").trim().toUpperCase();
-      const isYes = content.includes("YES");
-      return { ok: true, score: isYes ? 1.0 : 0.0, reason: "chat_classifier" };
+      const json = await res.json().catch(() => null);
+      const content = String(json?.choices?.[0]?.message?.content || "").trim();
+      const hasYes = /\bYES\b/i.test(content);
+      const hasNo = /\bNO\b/i.test(content);
+      if (hasYes && !hasNo) {
+        return { ok: true, score: 1.0, reason: "chat_classifier" };
+      }
+      if (hasNo && !hasYes) {
+        return { ok: true, score: 0.0, reason: "chat_classifier" };
+      }
+      return { ok: false, status: 200, errText: "非预期判定输出: " + content.slice(0, 40), reason: "chat_invalid_output" };
     } finally {
       clearTimeout(timer);
     }
@@ -717,6 +714,8 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
       const category = String(item.category || "fact").toLowerCase();
       const tags = String(item.tags || "auto-harvest").trim();
       const confidence = typeof item.confidence === "number" ? item.confidence : 0.95;
+      const minConf = Number(options.min_confidence ?? options.minConfidence ?? 0.6);
+      if (confidence < minConf) continue;
 
       if (category === "pitfall" || category === "failure" || /踩坑|报错|error|failure/i.test(category)) {
         pitfalls.push({
@@ -731,12 +730,13 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
           category: "pitfall",
         });
       } else {
+        const VALID_CATS = ["principle", "preference", "fact", "context", "entity", "decision", "insight"];
         memories.push({
           title,
           content,
           tags,
           confidence,
-          category: ["preference", "decision"].includes(category) ? category : "fact",
+          category: VALID_CATS.includes(category) ? category : "fact",
         });
       }
     }
@@ -890,13 +890,15 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     if (!title || !content) continue;
 
     const fp = semanticFingerprint(project, item.category || "fact", title, content);
-    if (isRecent("m:" + fp)) continue;
+    const memKey = `m:${project}:${fp}`;
+    if (isRecent(memKey)) continue;
 
     // 门禁按类型区分：非显式表达且显式指定了 minEvidenceMemory > 1 时进入 pending 门禁
     if (!isExplicit && minEvidenceMemory > 1) {
-      const pendingRes = recordPendingEvidence("m:" + fp, { ...item, project, agent }, {
+      const pendingRes = recordPendingEvidence(memKey, { ...item, project, agent }, {
         kind: "memory",
         minEvidence: minEvidenceMemory,
+        turnKey: fingerprint(dialogueText.slice(0, 300)),
       });
       if (!pendingRes.shouldGraduate) {
         pendingSaved++;
@@ -935,7 +937,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       source_turn: sourceTurn,
     };
     enqueueHarvestItems([{ id: queueId, table: "memories", data: memoryPayload, project, fp }]);
-    markRecent("m:" + fp);
+    markRecent(memKey);
     memoriesSaved++;
   }
 
@@ -1001,11 +1003,13 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     try {
       const drainRes = await triggerBackgroundDrain(client);
       _diag("drain", JSON.stringify(drainRes).slice(0, 200));
-      if (drainRes && typeof drainRes.memoriesSaved === "number") {
-        memoriesSaved = drainRes.memoriesSaved;
-      }
-      if (drainRes && typeof drainRes.pitfallsSaved === "number") {
-        pitfallsSaved = drainRes.pitfallsSaved;
+      if (drainRes && !drainRes.inProgress) {
+        if (typeof drainRes.memoriesSaved === "number") {
+          memoriesSaved = drainRes.memoriesSaved;
+        }
+        if (typeof drainRes.pitfallsSaved === "number") {
+          pitfallsSaved = drainRes.pitfallsSaved;
+        }
       }
     } catch (_) {}
   }
@@ -1133,7 +1137,8 @@ export async function onResponse(reply, ctx) {
     let client = (opts && (opts._client || opts.client)) || null;
     if (!client) {
       const mcpKey = opts.mcp_key || opts.mcpKey || process.env.NCB_API_KEY || "";
-      const instance = opts.ncb_instance || opts.instance || lookupDatabase() || "memory";
+      const rawInst = opts.ncb_instance || opts.instance || lookupDatabase() || "memory";
+      const instance = lookupRealDatabase(rawInst) || rawInst;
       if (mcpKey) {
         try {
           client = makeMcpClient({ mcpKey, instance });
@@ -1185,10 +1190,12 @@ export async function triggerBackgroundDrain(client, options = {}) {
             const title = item.data?.title || "";
             const content = item.data?.content || item.data?.full_text || "";
 
-            // Layer ① 语义指纹查重 + Layer ② 滑动窗口语义相似度比对
+            // Layer ① 语义指纹查重 + Layer ② 滑动窗口语义相似度比对 (上限提升至 200)
             const existing = await client.list("memories", {
               project,
-              limit: 50,
+              category,
+              lifecycle_status: "active",
+              limit: 200,
             });
             const rows = Array.isArray(existing?.data) ? existing.data : (Array.isArray(existing) ? existing : []);
             const categoryRows = rows.filter((r) => !category || r.category === category);
@@ -1208,15 +1215,38 @@ export async function triggerBackgroundDrain(client, options = {}) {
               batchSuccess++;
               continue;
             }
+            // 同标题旧记忆版本演进 (superseded)
+            const superseded = categoryRows.filter(
+              (r) =>
+                r.lifecycle_status === "active" &&
+                String(r.title || "").trim().toLowerCase() === title.toLowerCase()
+            );
+            const revision = superseded.reduce(function (mx, r) { return Math.max(mx, Number(r.revision) || 1); }, 0) + (superseded.length > 0 ? 1 : 0);
             const now = new Date().toISOString().slice(0, 19).replace("T", " ");
             const drainMemoryPayload = {
               ...item.data,
+              revision: revision || Number(item.data?.revision) || 1,
               recurrence: Number(item.data?.recurrence) || 1,
               created_at: (item.data && item.data.created_at) || now,
               updated_at: now,
             };
             try {
-              await client.create("memories", drainMemoryPayload);
+              const created = await client.create("memories", drainMemoryPayload);
+              const newId = created && (created.id || created.insertId);
+              if (newId && superseded.length > 0) {
+                for (const oldRow of superseded) {
+                  if (!oldRow || !oldRow.id) continue;
+                  try {
+                    await client.update("memories", oldRow.id, {
+                      lifecycle_status: "superseded",
+                      superseded_by_id: newId,
+                      invalid_at: now,
+                      invalid_reason: "superseded",
+                      updated_at: now,
+                    });
+                  } catch (_) {}
+                }
+              }
               totalMemoriesSaved++;
             } catch (createErr) {
               const msg = String(createErr?.message || createErr || "");
@@ -1234,7 +1264,7 @@ export async function triggerBackgroundDrain(client, options = {}) {
                 throw createErr;
               }
             }
-            markRecent("m:" + fp);
+            markRecent(memKey);
             successIds.push(item.id);
             batchSuccess++;
           } else if (item.table === "pitfalls") {
@@ -1411,8 +1441,8 @@ export async function testExtractionModel(options = {}) {
  */
 export async function testClassificationModel(options = {}) {
   const model = String(options.classify_model || options.classifier_model || "").trim();
-  if (!model) {
-    return { ok: false, error: "未配置判定模型 (classify_model 为空)" };
+  if (!model || model === "off" || model === "none") {
+    return { ok: false, error: "未配置判定模型 (classify_model 为空或已禁用)" };
   }
 
   const endpoint = String(options.classify_endpoint || "auto").trim().toLowerCase();
@@ -1437,7 +1467,10 @@ export async function testClassificationModel(options = {}) {
     });
     const latencyMs = Date.now() - start;
 
-    if (res.reason && res.reason.includes("exception")) {
+    const isSuccess = res && (res.reason === "systemone" || res.reason === "chat_classifier");
+    if (!isSuccess) {
+      const reasonMsg = res?.reason || "unknown_failure";
+      const extraErr = res?.budgetSkipped ? " (调用预算超限)" : (res?.errText ? ` - ${res.errText.slice(0, 80)}` : "");
       return {
         ok: false,
         model,
@@ -1445,19 +1478,8 @@ export async function testClassificationModel(options = {}) {
         usedUrl: url,
         timeoutMs,
         latencyMs,
-        error: `分类器调用异常: ${res.reason} (URL: ${url}, 耗时: ${latencyMs}ms)`,
-      };
-    }
-
-    if (res.reason && res.reason.includes("http_")) {
-      return {
-        ok: false,
-        model,
-        endpoint,
-        usedUrl: url,
-        timeoutMs,
-        latencyMs,
-        error: `网关返回 HTTP 错误: ${res.reason} (URL: ${url}, 耗时: ${latencyMs}ms)`,
+        reason: res?.reason,
+        error: `分类器验证未通过: ${reasonMsg}${extraErr} (URL: ${url}, 耗时: ${latencyMs}ms)`,
       };
     }
 

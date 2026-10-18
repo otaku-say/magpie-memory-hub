@@ -69,15 +69,19 @@ if (missingIds.length > 0) {
 // 1.4 检查 CSS 中是否使用了硬编码颜色
 const hexColorRegex = /#([0-9a-fA-F]{3,8})\b/g;
 const rgbColorRegex = /\brgba?\(/g;
-const newCssSection = css.slice(css.indexOf("/* ---- 危险与次级按钮 ---- */"));
-const hexInNewCss = newCssSection.match(hexColorRegex);
-const rgbInNewCss = newCssSection.match(rgbColorRegex);
-if (hexInNewCss || rgbInNewCss) {
-  console.error("FAIL: 新增 CSS 样式中发现了硬编码颜色:", hexInNewCss, rgbInNewCss);
+// 全量扫描 settings.css（排除注释后），绝不漏检前 417 行
+const cleanCss = css.replace(/\/\*[\s\S]*?\*\//g, "");
+const hexInCss = cleanCss.match(hexColorRegex);
+const rgbInCss = cleanCss.match(rgbColorRegex);
+if (hexInCss || rgbInCss) {
+  console.error("FAIL: settings.css 全文发现了硬编码颜色:", hexInCss, rgbInCss);
   process.exit(1);
 } else {
-  console.log("PASS: 新增 CSS 样式中无任何硬编码颜色，完全使用 --magpie-* 主题变量");
+  console.log("PASS: settings.css 全文无任何硬编码颜色，100% 使用 --magpie-* 主题变量");
 }
+// 反证测试：故意向测试文本注入硬编码颜色，证明检测器能有效抓住 Bug
+const badCss = cleanCss + "\n.test-bad { color: #abcdef; }";
+assert.ok(badCss.match(hexColorRegex), "反证门：检测器必须能准确识别注入的硬编码颜色");
 
 console.log("\n==========================================");
 console.log("2. 真实执行 settings.js 与 DOM Stub 交互测试");

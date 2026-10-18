@@ -76,13 +76,27 @@ function tokenize(text) {
   return out;
 }
 
+/* ================= 时间解析辅助 ================= */
+function parseTime(s) {
+  if (!s) return NaN;
+  var str = String(s).trim();
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(str)) {
+    str = str.replace(" ", "T") + (str.indexOf("Z") < 0 ? "Z" : "");
+  }
+  return Date.parse(str);
+}
+
 /* ================= 双时态：是否仍然有效 ================= */
 function isValid(m, now) {
   if (!m) return false;
   if (m.lifecycle_status === "superseded") return false;
   if (m.invalid_at) {
-    var t = Date.parse(String(m.invalid_at));
-    if (!isNaN(t) && t <= now) return false;
+    var it = parseTime(m.invalid_at);
+    if (!isNaN(it) && it <= now) return false;
+  }
+  if (m.expires_at) {
+    var et = parseTime(m.expires_at);
+    if (!isNaN(et) && et <= now) return false;
   }
   return true;
 }
@@ -95,7 +109,7 @@ function retention(m, now) {
   var rc = parseInt(m.retrieval_count, 10);
   if (!rc || rc !== rc) rc = 0;
   var S = 1.0 * (1 + 1.5 * Math.log(1 + rc));
-  var t = Date.parse(String(m.updated_at || m.last_used_at || m.created_at || ""));
+  var t = parseTime(m.updated_at || m.last_used_at || m.created_at || "");
   if (isNaN(t)) return 1;
   var days = (now - t) / DAY_MS;
   if (days <= 0) return 1;
@@ -545,7 +559,7 @@ function onRequestInner(body, ctx) {
       version: "5.0", // db-col-ok: 存活探针版本
       disabled: !!opts.disabled,
       memories_count: (opts.memories && Array.isArray(opts.memories)) ? opts.memories.length : 0,
-      compress: opts.compress !== false,
+      compress: opts.compress === true,
       protocol: proto,
       turn_no: (Number(ctx.state.turnNo) || 0) + 1,
       timestamp: Date.now ? Date.now() : 0
@@ -578,8 +592,10 @@ function onRequestInner(body, ctx) {
 
   /* --- ⓪ 上下文压缩（Headroom 思路的纯 JS 实现） ---
    * 只压历史里的工具输出与超长文本块，绝不动 system prompt 与最后一条用户消息。
+   * 默认关闭：保 KV-Cache 核心不变量，避免原地改写历史消息导致前缀缓存击穿。
+   * 仅在用户显式开启 compress === true 时运行。
    * 压缩模块内部有兜底：压完不比原文小就原样返回，且失败一律 fail-open。 */
-  if (opts.compress !== false) {
+  if (opts.compress === true) {
     try {
       var cr = compressBody(body, {
         max_chars: parseInt(opts.compress_max_chars, 10) || 3000,
@@ -622,6 +638,7 @@ function onRequestInner(body, ctx) {
         var lim = bucket.length > BUCKET_CAP ? BUCKET_CAP : bucket.length;
         for (var b = 0; b < lim; b++) {
           var m = bucket[b];
+          if (!isValid(m, now)) continue;
           var uid = String(m.id != null ? m.id : (m.project + ":" + m.title));
           if (seen[uid]) continue;
           seen[uid] = 1;

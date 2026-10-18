@@ -35,7 +35,7 @@ import { semanticFingerprint } from "./semantic_dedup.js";
 
 /* 诊断：把静默吞掉的错误说出来（每类只打一次，不含对话内容） */
 var _diagLogged = {};
-function _diag(tag, msg) {
+export function _diag(tag, msg) {
   if (_diagLogged[tag]) return;
   _diagLogged[tag] = 1;
   try { console.log("[memory-hub][diag] " + tag + ": " + String(msg).slice(0, 300)); } catch (_) {}
@@ -273,7 +273,7 @@ function extractDialogueText(turn) {
     parts.push(`[assistant]: ${output}`);
   }
 
-  return parts.join("\n");
+  return stripScaffolding(parts.join("\n"));
 }
 
 function turnFingerprint(turn) {
@@ -439,9 +439,11 @@ export async function harvestGateway(args, context) {
     let processedInThisFile = 0;
     let turnIndex = 0;
 
+    let fileComplete = true;
     for (const turn of turns) {
       if (signal && signal.aborted) {
         aborted = true;
+        fileComplete = false;
         break;
       }
 
@@ -502,12 +504,15 @@ export async function harvestGateway(args, context) {
             }
             failures = onlineRes.pitfalls;
           } else {
+            fileComplete = false;
             _diag("harvest_gateway_unavailable", "在线提炼模型服务异常，安全跳过该轮录制扫描");
+            continue;
           }
         } catch (err) {
           _diag("harvest_gateway_err", (err && err.message) || String(err));
         }
       } else {
+        fileComplete = false;
         _diag("harvest_gateway_skipped", "未配置提炼模型 (extract_model 为空)，安全跳过录制扫描");
       }
 
@@ -615,13 +620,15 @@ export async function harvestGateway(args, context) {
       processedInThisFile++;
     }
 
-    // 记录该文件处理进度
-    updatedFileStates[filePath] = {
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-      turns_count: turns.length,
-      processed_at: Date.now(),
-    };
+    // 记录该文件处理进度（仅当整文件完整扫描且未被中断时才记录增量状态）
+    if (!aborted && fileComplete) {
+      updatedFileStates[filePath] = {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        turns_count: turns.length,
+        processed_at: Date.now(),
+      };
+    }
 
     if (aborted) break;
   }

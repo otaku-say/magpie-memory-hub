@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.20.0</span>
+    <span class="version-tag">v6.21.0</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、上下文压缩、R2 存储。</p>
 
@@ -43,7 +43,7 @@
           <span class="step-badge">3</span>
           <div class="step-body">
             <strong>完成并开始使用</strong>
-            <span>主路径即刻就绪，所有 agent 均可通过 MCP 检索与沉淀长期记忆。可选：挂载 Cloudflare R2 存储或下载本地离线小模型；其余设置项均自带生产级推荐值，保持默认即可。</span>
+            <span>主路径即刻就绪，所有 agent 均可通过 MCP 检索与沉淀长期记忆。可选：挂载 Cloudflare R2 存储与配置在线提炼模型；其余设置项均自带生产级推荐值，保持默认即可。</span>
           </div>
         </div>
       </div>
@@ -368,7 +368,7 @@
     <summary>
       <span class="chev"></span>
       <span class="t">记忆采集来源</span>
-      <span class="sub">网关异步自动记忆 · 对话录制离线扫描备选 · 零模型开销</span>
+      <span class="sub">网关异步自动记忆 · 对话录制离线扫描备选</span>
     </summary>
     <div class="body">
       <div class="source-intro-box">
@@ -592,18 +592,18 @@
     <summary>
       <span class="chev"></span>
       <span class="t">上下文压缩与去重</span>
-      <span class="sub">历史工具输出压缩 · 跨轮文件指纹去重 · 本地小模型</span>
+      <span class="sub">历史工具输出压缩 · 跨轮文件指纹去重</span>
     </summary>
     <div class="body">
       <div class="row split">
         <div class="main">
           <div class="row-head">
             <label for="compress">请求压缩</label>
-            <span class="badge rec">推荐 开</span>
+            <span class="badge">默认 关</span>
           </div>
           <div class="hint">
             <div class="hint-desc">压掉历史消息中冗余的工具调用输出与过长文本块（绝不动 system prompt 与最后一条用户消息）。</div>
-            <div class="hint-diff"><strong>开</strong>：显著节省 Token 与推理成本，但历史消息的中间调试过程会被折叠；<strong>关</strong>：上下文原样完整保留，费用更高。</div>
+            <div class="hint-diff"><strong>开</strong>：压缩历史工具调用输出；<strong>关（推荐，保 KV-Cache）</strong>：历史消息逐字节未改，保证上游推理缓存命中率，降低费用与延迟。</div>
           </div>
         </div>
         <div class="side">

@@ -19,8 +19,11 @@
 import { NcbMcp } from "./ncb_mcp.js";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { lookupSecret, forgetSecret, lookupRealDatabase, rememberDatabase, rememberR2Mount, lookupR2Mount, forgetR2Mount } from "./local_state.js";
 import { explainUnknownErrorWithModel, attachAiDiagnosis } from "./online_models.js";
+
+const STATUS_JSON_PATH = fileURLToPath(new URL("./_status.json", import.meta.url));
 
 const REST_BASE = "https://api.nocodebackend.com";
 
@@ -359,10 +362,14 @@ export function isR2Mounted(cfg, database, args) {
 
   // 2. 检查 _status.json（平滑兼容历史状态）
   try {
-    const p = path.join(process.cwd(), "_status.json");
+    const p = STATUS_JSON_PATH;
     if (fs.existsSync(p)) {
       const o = JSON.parse(fs.readFileSync(p, "utf8"));
       if (o && o.r2 && o.r2.ok === true && (o.r2.op === "storage_setup" || o.r2.op === "r2_check")) {
+        const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
+        if (o.r2.database && db && norm(o.r2.database) !== norm(db)) {
+          return { mounted: false, record: null, reason: "NOT_MOUNTED" };
+        }
         if (db) {
           rememberR2Mount(db, {
             bucket: o.r2.bucket_name || "",

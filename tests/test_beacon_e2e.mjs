@@ -37,7 +37,7 @@ try {
   allSentOps.add("reset");
 
   // harvest_gateway 是网关对话提炼专有信标，已下线的本地模型下载信标（model_download）已彻底移除
-  const deprecatedOps = new Set(["harvest_gateway", "model_download"]);
+  const deprecatedOps = new Set(["model_download"]);
   const sentOps = new Set([...allSentOps].filter((op) => !deprecatedOps.has(op)));
 
   console.log("=== 1. 页面会发出的 op 清单 ===");

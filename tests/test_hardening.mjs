@@ -157,30 +157,29 @@ console.log("\n=================================================================
 console.log("【加固二测试】思维链流式与非流式隔离测试");
 console.log("=================================================================");
 
-// 2.1 正文中 <think>...</think> 段：客户端逐字节不变测试
+// 2.1 正文中 <think>...</think> 段：开启 inline_extract 时思考链完整保留且 <memory> 块精准剥离测试
 {
   const ctx = {
-    options: { inline_extract: false },
-    state: { promptText: "请回答宇宙的终极答案是什么？" }
+    options: { inline_extract: true },
+    state: { promptText: "请回答宇宙的终极答案是什么？", inlineExtract: true }
   };
 
   const chunks = [
     { choices: [{ delta: { content: "<think>The user is asking the ultimate question." } }] },
     { choices: [{ delta: { content: " According to Hitchhiker's Guide to the Galaxy, the answer is 42." } }] },
-    { choices: [{ delta: { content: " I should state this clearly.</think>宇宙的终极答案是 42。" } }] },
+    { choices: [{ delta: { content: " I should state this clearly.</think>宇宙的终极答案是 42。<memory>[{\"title\":\"答案\",\"content\":\"42\"}]</memory>" } }] },
     { choices: [{ delta: { content: "出自《银河系漫游指南》。" }, finish_reason: "stop" }] }
   ];
-
-  // 深度克隆原始 chunks 用以做客户端逐字节无损对比
-  const origChunksJson = JSON.stringify(chunks);
 
   for (const chunk of chunks) {
     onEvent(chunk, ctx);
   }
 
-  // 证明客户端看到的流式内容逐字节不变
-  assert.strictEqual(JSON.stringify(chunks), origChunksJson, "核心不变量：客户端流式内容必须逐字节不变！");
-  console.log("✓ 核心不变量验证通过：客户端收到的流式 chunk 逐字节 100% 保持原样，未被改动");
+  const fullOutput = chunks.map(c => c.choices[0]?.delta?.content || "").join("");
+  assert.ok(fullOutput.includes("<think>The user is asking the ultimate question."), "思考过程 <think> 标签与内容完整保留");
+  assert.ok(fullOutput.includes("宇宙的终极答案是 42。"), "正常回答完整保留");
+  assert.strictEqual(fullOutput.includes("<memory>"), false, "<memory> 提炼块已从客户端呈现中精准剥离");
+  console.log("✓ 真测试验证通过：开启 inlineExtract 时思考链 100% 保留且 <memory> 标签被精准剔除");
 }
 
 // 2.2 跨 chunk 切分的思考标签透传测试
@@ -311,53 +310,20 @@ console.log("=================================================================")
     }
   };
 
-  // 提取 settings.js 中的 queuedOptionsSet 逻辑进行隔离验证
-  let queuedTimer = null;
-  let queuedPayload = null;
-  let queuedResolvers = [];
-  let lastUnderlyingSetTime = 0;
-
-  function flushQueuedOptionsSet() {
-    if (queuedTimer) {
-      clearTimeout(queuedTimer);
-      queuedTimer = null;
-    }
-    if (!queuedPayload) return Promise.resolve(null);
-    const toSend = queuedPayload;
-    const resolvers = queuedResolvers;
-    queuedPayload = null;
-    queuedResolvers = [];
-
-    lastUnderlyingSetTime = Date.now();
-    return window.magpie.options.set(toSend).then(
-      (written) => {
-        for (const r of resolvers) r.resolve(written);
-        return written;
-      },
-      (err) => {
-        for (const r of resolvers) r.reject(err);
-      }
-    );
-  }
-
-  function queuedOptionsSet(payload, immediate) {
-    if (!queuedPayload) queuedPayload = Object.assign({}, payload || {});
-    else Object.assign(queuedPayload, payload || {});
-
-    return new Promise((resolve, reject) => {
-      queuedResolvers.push({ resolve, reject });
-      const isImmediate = !!(immediate || (payload && payload._action));
-      const now = Date.now();
-      const timeSinceLast = now - lastUnderlyingSetTime;
-      if (isImmediate && (lastUnderlyingSetTime === 0 || timeSinceLast >= 1000)) {
-        flushQueuedOptionsSet();
-      } else {
-        if (queuedTimer) clearTimeout(queuedTimer);
-        const delay = isImmediate ? Math.max(1100 - timeSinceLast, 50) : 1100;
-        queuedTimer = setTimeout(flushQueuedOptionsSet, delay);
-      }
-    });
-  }
+  // 从真实 settings.js 提取并加载防抖逻辑
+  const settingsSrc = fs.readFileSync(path.join(__dirname, "../settings.js"), "utf8");
+  const vmCtx = {
+    window: { magpie: { options: { set: async (o) => { rawSetCalls++; lastPayload = o; return o; } } } },
+    setTimeout,
+    clearTimeout,
+    Date,
+    Object,
+    Promise,
+  };
+  vm.createContext(vmCtx);
+  const qCode = settingsSrc.slice(settingsSrc.indexOf("var queuedTimer = null;"), settingsSrc.indexOf("function collect()"));
+  vm.runInContext(qCode, vmCtx);
+  const queuedOptionsSet = vmCtx.queuedOptionsSet;
 
   // 3.1 连续快速点击多个按钮/开关：只有最后一次真正落盘，配置全量合并
   rawSetCalls = 0;

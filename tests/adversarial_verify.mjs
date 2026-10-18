@@ -6,17 +6,22 @@ console.log("=================================================================")
 console.log("【对抗性自审反证测试】");
 console.log("=================================================================");
 
-// 1. 验证 cleanText 是否能干净清除 [Memory Check] 块
-console.log("--- 1. cleanText 清洗能力反证 ---");
-const rawPrompt = `你好，请帮我写个脚本。\n\n[Memory Check —— 结束本轮回复前必做一次]\n逐项检查本轮是否产生了下面任一类内容：\n1) 【偏好/约定】...`;
-const cleaned = rawPrompt
-  .replace(/\[Persistent Memory Context\][\s\S]*?(?=\n\n|$)/gi, "")
-  .replace(/\[Memory Instruction\][\s\S]*?(?=\n\n|$)/gi, "")
-  .replace(/\[Memory Check[^\]]*\][\s\S]*?(?=\n\n|$)/gi, "")
-  .trim();
-
-assert.strictEqual(cleaned, "你好，请帮我写个脚本。", "cleanText 必须彻底剥离 [Memory Check] 块，绝不留残余！");
-console.log("✓ cleanText 成功将 [Memory Check] 彻底清洗，恢复纯净用户意图！");
+// 1. 验证真实的 memory.middleware.js cleanText 是否能干净清除 [Memory Check] 块
+console.log("--- 1. 真实中间件 cleanText 清洗能力验证 ---");
+const { onRequest } = await import("../memory.middleware.js");
+const rawPrompt = `你好，请帮我写个脚本。\n\n[Memory Check —— 结束本轮回复前必做一次]\n逐项检查本轮是否产生了下面任一类内容：\n1) 【偏好/约定】...\n\n[Persistent Memory Context]\n- [fact] 测试记忆: 内容`;
+const mockCtx = {
+  protocol: "chat",
+  options: { disabled: false, memories: [] },
+  state: {},
+};
+const testBody = {
+  model: "gpt-4o",
+  messages: [{ role: "user", content: rawPrompt }],
+};
+onRequest(testBody, mockCtx);
+assert.strictEqual(mockCtx.state.promptText, "你好，请帮我写个脚本。", "真实中间件 cleanText 必须彻底剥离 [Memory Check] 与 [Persistent Memory Context]，恢复纯净用户意图！");
+console.log("✓ 真实中间件 cleanText 成功将 [Memory Check] 与上下文标记彻底清洗！");
 
 // 2. 验证 makeMcpClient 分页 metadata 与 SQL 构建
 console.log("\n--- 2. makeMcpClient metadata 返回形状 ---");

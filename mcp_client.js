@@ -17,6 +17,7 @@
  */
 import { TABLES } from "./schema.js";
 import { NcbMcp } from "./ncb_mcp.js";
+import { lookupRealDatabase } from "./local_state.js";
 
 /** 表名白名单 */
 const ALLOWED_TABLES = Object.keys(TABLES);
@@ -159,7 +160,8 @@ export function buildDelete(table, id) {
  * 这样 tools.js 的业务逻辑一行都不用改。
  */
 export function makeMcpClient(cfg, signal) {
-  const db = (cfg && (cfg.instance || cfg.ncb_instance)) || "";
+  const rawDb = (cfg && (cfg.instance || cfg.ncb_instance)) || "";
+  const db = lookupRealDatabase(rawDb) || rawDb;
   const sig = signal || (cfg && cfg.signal) || null;
   const mcp = new NcbMcp({ apiKey: (cfg && (cfg.mcpKey || cfg.mcp_key)) || "", signal: sig });
 

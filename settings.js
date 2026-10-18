@@ -258,10 +258,10 @@
     parts.push("内联提炼 " + (o.inline_extract !== false ? "开" : "关"));
     var conf = (o.min_confidence != null && !isNaN(parseFloat(o.min_confidence))) ? o.min_confidence : 0.6;
     parts.push("入库门槛 " + conf);
-    if (o.compress === false) {
-      parts.push("请求压缩关");
-    } else {
+    if (o.compress === true) {
       parts.push("请求压缩开");
+    } else {
+      parts.push("请求压缩关");
     }
     if (o.disabled) parts.push("网关注入已停用");
     return parts.join(" · ");
