@@ -35,8 +35,66 @@
  *   真实网关调用；默认一律跳过，保证全套测试默认零真实模型调用。
  */
 
+import { readFileSync } from "node:fs";
+
 export const MEMHUB_INTERNAL_HEADER = "x-memhub-internal";
 export const MEMHUB_INTERNAL_VALUE = "1";
+export const MEMHUB_CLIENT_NAME = "Memory";
+
+let _cachedUserAgent = null;
+
+/**
+ * 获取插件内部模型调用使用的 User-Agent
+ * 规则：
+ * - 运行时从 package.json 读取 version，拼接为 "Memory/<version>"
+ * - 模块级变量 _cachedUserAgent 缓存，只读一次，避免每次请求重复读盘
+ * - 容错处理：若读不到或解析失败，回退为 "Memory"（不带斜杠，Magpie agentOf 仍能正确归一为 Memory）
+ */
+export function getClientUserAgent() {
+  if (_cachedUserAgent !== null) {
+    return _cachedUserAgent;
+  }
+  try {
+    const pkgUrl = new URL("./package.json", import.meta.url);
+    const content = readFileSync(pkgUrl, "utf8");
+    const parsed = JSON.parse(content);
+    const ver = typeof parsed?.version === "string" ? parsed.version.trim() : "";
+    if (ver) {
+      _cachedUserAgent = `${MEMHUB_CLIENT_NAME}/${ver}`;
+      return _cachedUserAgent;
+    }
+  } catch (_) {
+    // 容错回退
+  }
+  _cachedUserAgent = MEMHUB_CLIENT_NAME;
+  return _cachedUserAgent;
+}
+
+/** 仅供测试使用：重置 User-Agent 模块缓存 */
+export function _resetUserAgentCacheForTesting() {
+  _cachedUserAgent = null;
+}
+
+/**
+ * 统一构造插件内部发起的大模型请求头
+ *
+ * @param {string} [apiKey=""] - 网关 API 密钥
+ * @param {object} [extraHeaders={}] - 额外自定义头
+ * @returns {Record<string, string>}
+ */
+export function getInternalModelHeaders(apiKey = "", extraHeaders = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    "User-Agent": getClientUserAgent(),
+    "X-Magpie-Agent": MEMHUB_CLIENT_NAME,
+    [MEMHUB_INTERNAL_HEADER]: MEMHUB_INTERNAL_VALUE,
+    ...(extraHeaders || {}),
+  };
+  if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+  return headers;
+}
 
 /**
  * 内部模型调用请求体指纹：四条内部 system prompt 的稳定子串。

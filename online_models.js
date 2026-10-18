@@ -94,10 +94,9 @@ export const QUERY_REWRITE_SYSTEM_PROMPT = `你是一个专业的长期记忆检
 5. 严禁输出任何解释、标点符号或前缀说明，仅输出空格分隔的关键词文本。`;
 
 import {
-  MEMHUB_INTERNAL_HEADER,
-  MEMHUB_INTERNAL_VALUE,
   modelBudgetCheck,
   modelBudgetRecord,
+  getInternalModelHeaders,
 } from "./model_budget.js";
 
 /**
@@ -164,10 +163,7 @@ export async function explainUnknownErrorWithModel({
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const headers = { "Content-Type": "application/json", [MEMHUB_INTERNAL_HEADER]: MEMHUB_INTERNAL_VALUE };
-  if (apiKey) {
-    headers["Authorization"] = `Bearer ${apiKey}`;
-  }
+  const headers = getInternalModelHeaders(apiKey);
 
   const userContent = `【排查上下文】：
 - 发生组件/工具：${component}
@@ -303,10 +299,7 @@ export async function rewriteSearchQuery({
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const headers = { "Content-Type": "application/json", [MEMHUB_INTERNAL_HEADER]: MEMHUB_INTERNAL_VALUE };
-  if (apiKey) {
-    headers["Authorization"] = `Bearer ${apiKey}`;
-  }
+  const headers = getInternalModelHeaders(apiKey);
 
   try {
     const url = `${baseUrl}/v1/chat/completions`;

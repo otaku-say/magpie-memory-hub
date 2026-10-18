@@ -53,6 +53,7 @@ import {
   modelBudgetCheck,
   modelBudgetRecord,
   getModelBudgetState,
+  getInternalModelHeaders,
 } from "./model_budget.js";
 
 import { _diag, SCAFFOLDING_PATTERNS, stripScaffolding } from "./gateway_harvest.js";
@@ -472,10 +473,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
     return { shouldHarvest: true, score: null, reason: _budget.reason, budgetSkipped: true };
   }
 
-  const headers = { "Content-Type": "application/json", [MEMHUB_INTERNAL_HEADER]: MEMHUB_INTERNAL_VALUE };
-  if (apiKey) {
-    headers["Authorization"] = `Bearer ${apiKey}`;
-  }
+  const headers = getInternalModelHeaders(apiKey);
 
   // 内部辅助：请求 /v1/systemone 决策端点
   async function callSystemOne() {
@@ -674,10 +672,7 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const headers = { "Content-Type": "application/json", [MEMHUB_INTERNAL_HEADER]: MEMHUB_INTERNAL_VALUE };
-  if (apiKey) {
-    headers["Authorization"] = `Bearer ${apiKey}`;
-  }
+  const headers = getInternalModelHeaders(apiKey);
 
   try {
     const url = `${baseUrl}/v1/chat/completions`;
@@ -1391,13 +1386,11 @@ export async function testExtractionModel(options = {}) {
 
   const start = Date.now();
   const url = `${baseUrl}/v1/chat/completions`;
+  const headers = getInternalModelHeaders(apiKey);
   try {
     const res = await doFetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-      },
+      headers,
       body: JSON.stringify({
         model,
         messages: [
