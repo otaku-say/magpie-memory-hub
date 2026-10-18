@@ -316,38 +316,85 @@ async function execute(action, cfg, fs, sp, state, options) {
       };
     }
     else if (action.op === "memory_audit") {
-      const { MagpieMemoryHub } = await import("./tools.js");
-      const hub = await MagpieMemoryHub(options || {}, { client });
-      const auditArgs = Object.assign({}, action.args || {});
-      if (action.undo) auditArgs.undo = true;
-      if (action.undo_before) auditArgs.undo_before = action.undo_before;
-      const auditResRaw = await hub.tool.memory_audit.execute(auditArgs, {});
-      const auditRes = typeof auditResRaw === "string" ? JSON.parse(auditResRaw) : auditResRaw;
-      const ok = auditRes && auditRes.success !== false;
-      let lines = [];
-      if (auditRes?.action === "DEDUP_UNDONE") {
-        lines = [
-          auditRes.note || `已恢复 ${auditRes.restored_records || 0} 条 · 撤销 recurrence ${auditRes.undone_recurrence || 0} 次 · 跳过 ${auditRes.skipped || 0} 条`,
-          "状态: 已完成"
-        ];
-      } else if (Array.isArray(auditRes?.lines) && auditRes.lines.length > 0) {
-        lines = auditRes.lines;
-      } else {
-        lines = [
-          `扫描记忆: ${auditRes?.scanned?.memories || 0} 条 · 去重合并: ${auditRes?.deduped?.memories || 0} 条`,
-          `扫描踩坑: ${auditRes?.scanned?.pitfalls || 0} 条 · 去重合并: ${auditRes?.deduped?.pitfalls || 0} 条`,
-          `批次: ${auditRes?.batch || "1/1"}  ·  状态: ${auditRes?.status || "已完成"}`
-        ];
-      }
+      const isUndo = !!action.undo;
+      // 立即返回「已启动」，绝不 await 全程阻塞 runPendingAction 与插件加载
       result = {
-        ok,
+        ok: true,
         at: Date.now(),
         op: "memory_audit",
-        title: auditRes?.action === "DEDUP_UNDONE" ? "去重撤销已完成" : (ok ? "全自动去重完成" : "全自动去重未完成"),
-        lines,
-        detail: auditRes,
-        logs: auditRes?.logs || [],
+        title: isUndo ? "已开始撤销去重任务" : "已开始全自动去重任务",
+        lines: [
+          isUndo ? "已提交撤销去重任务，后台正在异步还原…" : "已提交全自动去重任务，后台正在异步执行…",
+          "状态: 进行中"
+        ],
+        status: "进行中", // db-col-ok: UI 状态字段
+        detail: { started: true, is_async: true },
+        logs: [
+          `[${new Date().toISOString().replace("T", " ").slice(0, 19)}] ${isUndo ? "撤销去重" : "全自动去重"}后台任务已启动`
+        ]
       };
+
+      // 异步在后台执行去重/撤销（fire-and-forget），通过 writeCardStatus("audit", ...) 持续回传进度
+      (async () => {
+        try {
+          const { MagpieMemoryHub } = await import("./tools.js");
+          // 后台任务必须自建 client，不依赖加载期传入的那个
+          let asyncClient = null;
+          try {
+            const clientCfg = Object.assign({}, cfg || {}, options || {});
+            if (clientCfg.mcpKey || clientCfg.mcp_key || clientCfg.ncb_instance) {
+              const { makeMcpClient } = await import("./mcp_client.js");
+              asyncClient = makeMcpClient(clientCfg);
+            }
+          } catch (_) { asyncClient = null; }
+
+          const hub = await MagpieMemoryHub(options || {}, { client: asyncClient });
+          const auditArgs = Object.assign({}, action.args || {});
+          if (action.undo) auditArgs.undo = true;
+          if (action.undo_before) auditArgs.undo_before = action.undo_before;
+
+          const auditResRaw = await hub.tool.memory_audit.execute(auditArgs, {});
+          const auditRes = typeof auditResRaw === "string" ? JSON.parse(auditResRaw) : auditResRaw;
+          const ok = auditRes && auditRes.success !== false;
+          let lines = [];
+          if (auditRes?.action === "DEDUP_UNDONE") {
+            lines = [
+              auditRes.note || `已恢复 ${auditRes.restored_records || 0} 条 · 撤销 recurrence ${auditRes.undone_recurrence || 0} 次 · 跳过 ${auditRes.skipped || 0} 条`,
+              "状态: 已完成"
+            ];
+          } else if (Array.isArray(auditRes?.lines) && auditRes.lines.length > 0) {
+            lines = auditRes.lines;
+          } else {
+            lines = [
+              `扫描记忆: ${auditRes?.scanned?.memories || 0} 条 · 去重合并: ${auditRes?.deduped?.memories || 0} 条`,
+              `扫描踩坑: ${auditRes?.scanned?.pitfalls || 0} 条 · 去重合并: ${auditRes?.deduped?.pitfalls || 0} 条`,
+              `批次: ${auditRes?.batch || "1/1"}  ·  状态: ${auditRes?.status || "已完成"}`
+            ];
+          }
+          const finalResult = {
+            ok,
+            at: Date.now(),
+            op: "memory_audit",
+            title: auditRes?.action === "DEDUP_UNDONE" ? "去重撤销已完成" : (ok ? "全自动去重完成" : "全自动去重未完成"),
+            status: ok ? "已完成" : "未完成", // db-col-ok: UI 状态字段
+            lines,
+            detail: auditRes,
+            logs: auditRes?.logs || [],
+          };
+          writeCardStatus("audit", finalResult, "memory_audit");
+        } catch (bgErr) {
+          console.error("[memory-hub] background memory_audit failed:", bgErr);
+          writeCardStatus("audit", {
+            ok: false,
+            at: Date.now(),
+            op: "memory_audit",
+            title: "去重任务执行异常",
+            lines: [String(bgErr && bgErr.message || bgErr), "状态: 异常退出"],
+            status: "异常", // db-col-ok: UI 状态字段
+            logs: [`[${new Date().toISOString().replace("T", " ").slice(0, 19)}] 错误: ${String(bgErr && bgErr.message || bgErr)}`]
+          }, "memory_audit");
+        }
+      })();
     }
     else result = await dbStatus(cfg, args);
   } catch (e) {

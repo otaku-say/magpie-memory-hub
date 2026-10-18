@@ -179,6 +179,99 @@
     }
   }
 
+  /* ---------------- 时间与定时去重表单辅助 ---------------- */
+  function formatDateTime(d) {
+    if (!d) return "";
+    var date = (d instanceof Date) ? d : new Date(d);
+    if (isNaN(date.getTime())) return "";
+    var y = date.getFullYear();
+    var mon = date.getMonth() + 1;
+    var day = date.getDate();
+    var h = date.getHours();
+    var min = date.getMinutes();
+    var monStr = mon < 10 ? "0" + mon : "" + mon;
+    var dayStr = day < 10 ? "0" + day : "" + day;
+    var hStr = h < 10 ? "0" + h : "" + h;
+    var minStr = min < 10 ? "0" + min : "" + min;
+    return y + "-" + monStr + "-" + dayStr + " " + hStr + ":" + minStr;
+  }
+
+  function normalizeUndoTime(str) {
+    if (!str) return "";
+    var s = String(str).trim();
+    if (!s) return "";
+    s = s.replace(/\//g, "-");
+    var m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/);
+    if (m) {
+      var y = m[1];
+      var mon = parseInt(m[2], 10);
+      var d = parseInt(m[3], 10);
+      var h = m[4] !== undefined ? parseInt(m[4], 10) : 0;
+      var min = m[5] !== undefined ? parseInt(m[5], 10) : 0;
+      if (mon < 1 || mon > 12 || d < 1 || d > 31 || h < 0 || h > 23 || min < 0 || min > 59) return null;
+      var monStr = mon < 10 ? "0" + mon : "" + mon;
+      var dayStr = d < 10 ? "0" + d : "" + d;
+      var hStr = h < 10 ? "0" + h : "" + h;
+      var minStr = min < 10 ? "0" + min : "" + min;
+      return y + "-" + monStr + "-" + dayStr + " " + hStr + ":" + minStr;
+    }
+    if (/^\d{10,13}$/.test(s)) {
+      var ts = Number(s);
+      if (s.length === 10) ts *= 1000;
+      return formatDateTime(new Date(ts));
+    }
+    var parsed = Date.parse(s.replace(/-/g, "/"));
+    if (!isNaN(parsed)) {
+      return formatDateTime(new Date(parsed));
+    }
+    return null;
+  }
+
+  function updateDedupUI() {
+    var schedEl = $("dedup_schedule");
+    var sched = schedEl ? schedEl.value : "off";
+    var wrapWeekday = $("wrap_dedup_weekday");
+    var wrapDay = $("wrap_dedup_day");
+
+    if (wrapWeekday) wrapWeekday.style.display = (sched === "weekly") ? "inline-flex" : "none";
+    if (wrapDay) wrapDay.style.display = (sched === "monthly") ? "inline-flex" : "none";
+
+    var hourEl = $("dedup_hour");
+    var minEl = $("dedup_minute");
+    var h = hourEl ? parseInt(hourEl.value, 10) : 2;
+    var m = minEl ? parseInt(minEl.value, 10) : 0;
+    if (isNaN(h) || h < 0) h = 0;
+    if (h > 23) h = 23;
+    if (isNaN(m) || m < 0) m = 0;
+    if (m > 59) m = 59;
+    var hStr = h < 10 ? "0" + h : "" + h;
+    var minStr = m < 10 ? "0" + m : "" + m;
+    var timeStr = hStr + ":" + minStr;
+
+    var timeInput = $("dedup_time");
+    if (timeInput) timeInput.value = timeStr;
+
+    var previewEl = $("dedup_preview");
+    if (!previewEl) return;
+
+    if (sched === "off") {
+      previewEl.textContent = "已关闭定时去重";
+    } else if (sched === "daily") {
+      previewEl.textContent = "每天的 " + timeStr + " 执行一次";
+    } else if (sched === "weekly") {
+      var weekMap = { "1": "周一", "2": "周二", "3": "周三", "4": "周四", "5": "周五", "6": "周六", "7": "周日" };
+      var wVal = $("dedup_weekday") ? String($("dedup_weekday").value || "1") : "1";
+      var wName = weekMap[wVal] || "周一";
+      previewEl.textContent = "每周 " + wName + " 的 " + timeStr + " 执行一次";
+    } else if (sched === "monthly") {
+      var d = $("dedup_day") ? parseInt($("dedup_day").value, 10) : 1;
+      d = (isNaN(d) || d < 1) ? 1 : Math.min(28, d);
+      previewEl.textContent = "每月 " + d + " 号 " + timeStr + " 执行一次";
+    } else {
+      previewEl.textContent = "已关闭定时去重";
+    }
+  }
+
   /* ---------------- 表单填充与收集 ---------------- */
   function fill(o) {
     o = o || {};
@@ -223,6 +316,30 @@
       }
       if (typeof o[k] === "string" || typeof o[k] === "number") el.value = String(o[k]);
     });
+
+    // 定时去重表单联动填充：拆解 HH:MM 到小时和分钟
+    var timeRaw = String(o.dedup_time || "02:00").trim();
+    var tParts = timeRaw.split(":");
+    var hourVal = parseInt(tParts[0], 10);
+    var minVal = parseInt(tParts[1], 10);
+    if (isNaN(hourVal) || hourVal < 0 || hourVal > 23) hourVal = 2;
+    if (isNaN(minVal) || minVal < 0 || minVal > 59) minVal = 0;
+    if ($("dedup_hour")) $("dedup_hour").value = hourVal;
+    if ($("dedup_minute")) $("dedup_minute").value = minVal;
+    if ($("dedup_time")) {
+      $("dedup_time").value = (hourVal < 10 ? "0" + hourVal : "" + hourVal) + ":" + (minVal < 10 ? "0" + minVal : "" + minVal);
+    }
+    if ($("dedup_schedule") && o.dedup_schedule) {
+      $("dedup_schedule").value = o.dedup_schedule;
+    }
+    if ($("dedup_weekday") && o.dedup_weekday) {
+      $("dedup_weekday").value = String(o.dedup_weekday);
+    }
+    if ($("dedup_day") && o.dedup_day != null) {
+      var dv = parseInt(o.dedup_day, 10);
+      $("dedup_day").value = isNaN(dv) ? 1 : Math.max(1, Math.min(28, dv));
+    }
+    updateDedupUI();
   }
 
   function collect() {
@@ -246,6 +363,22 @@
       var el = $(k); if (!el) return;
       next[k] = el.value;
     });
+
+    // 定时去重表单组合：小时与分钟拼回 HH:MM
+    var h = $("dedup_hour") ? parseInt($("dedup_hour").value, 10) : 2;
+    var m = $("dedup_minute") ? parseInt($("dedup_minute").value, 10) : 0;
+    if (isNaN(h) || h < 0) h = 0; if (h > 23) h = 23;
+    if (isNaN(m) || m < 0) m = 0; if (m > 59) m = 59;
+    var timeStr = (h < 10 ? "0" + h : "" + h) + ":" + (m < 10 ? "0" + m : "" + m);
+    next.dedup_time = timeStr;
+    if ($("dedup_time")) $("dedup_time").value = timeStr;
+
+    if ($("dedup_schedule")) next.dedup_schedule = $("dedup_schedule").value;
+    if ($("dedup_weekday")) next.dedup_weekday = parseInt($("dedup_weekday").value, 10) || 1;
+    if ($("dedup_day")) {
+      var d = parseInt($("dedup_day").value, 10);
+      next.dedup_day = (isNaN(d) || d < 1) ? 1 : Math.min(28, d);
+    }
     if (typeof next.gatewayTimeoutMs !== "number" || isNaN(next.gatewayTimeoutMs)) {
       next.gatewayTimeoutMs = (typeof current.gatewayTimeoutMs === "number" && !isNaN(current.gatewayTimeoutMs)) ? current.gatewayTimeoutMs : 8000;
     }
@@ -507,7 +640,7 @@
         logBox.scrollTop = logBox.scrollHeight;
       }
       if (auditCard.at) {
-        var timeStr = new Date(auditCard.at).toLocaleString("zh-CN", { hour12: false });
+        var timeStr = formatDateTime(auditCard.at);
         var dedupCount = (auditCard.deduped && ((auditCard.deduped.memories || 0) + (auditCard.deduped.pitfalls || 0))) || 0;
         var lastTextEl = $("last_audit_at_text");
         if (lastTextEl) lastTextEl.textContent = timeStr;
@@ -639,13 +772,15 @@
     pollingTimer = setInterval(function () {
       loadStatus(function (err, statusData) {
         statusData = statusData || window.__memhubStatus;
-        var card = statusData && statusData[resolvedCard];
+        var isAuditOp = (opHint === "memory_audit" || opHint === "audit" || opHint === "dedup_undo");
+        var card = statusData && (isAuditOp ? (statusData.audit || statusData.model) : statusData[resolvedCard]);
         if (card && card.at >= submitTime) {
           renderStatusBlock(containerId, card);
           var prog = card.progress;
-          var inProgress = prog && (prog.status === "downloading" || prog.status === "verifying" || prog.status === "starting");
-          if (inProgress && card.ok) {
-            // 仍在下载中，保持轮询更新进度
+          var inProgress = (prog && (prog.status === "downloading" || prog.status === "verifying" || prog.status === "starting")) || (card.status === "进行中");
+          if (inProgress && card.ok !== false) {
+            // 仍在处理中，延长超时时限，保持轮询更新进度
+            deadline = Date.now() + waitSec * 1000;
             return;
           }
           // 拿到比提交时间更新且已完成的结果 → 停止一切计时
@@ -959,6 +1094,21 @@
         }
       });
 
+      if (cardKey === "model") {
+        var ch = $("dedup_hour") ? parseInt($("dedup_hour").value, 10) : 2;
+        var cm = $("dedup_minute") ? parseInt($("dedup_minute").value, 10) : 0;
+        if (isNaN(ch) || ch < 0) ch = 0; if (ch > 23) ch = 23;
+        if (isNaN(cm) || cm < 0) cm = 0; if (cm > 59) cm = 59;
+        next.dedup_time = (ch < 10 ? "0" + ch : "" + ch) + ":" + (cm < 10 ? "0" + cm : "" + cm);
+        if ($("dedup_time")) $("dedup_time").value = next.dedup_time;
+        if ($("dedup_schedule")) next.dedup_schedule = $("dedup_schedule").value;
+        if ($("dedup_weekday")) next.dedup_weekday = parseInt($("dedup_weekday").value, 10) || 1;
+        if ($("dedup_day")) {
+          var cd = parseInt($("dedup_day").value, 10);
+          next.dedup_day = (isNaN(cd) || cd < 1) ? 1 : Math.min(28, cd);
+        }
+      }
+
       return queuedOptionsSet(next, true).then(
         function (written) {
           if (btn) btn.disabled = false;
@@ -1246,14 +1396,33 @@
       });
     }
 
-    // 撤销上次去重
+    // 还原去重
     var dedupUndoBtn = $("btn_dedup_undo");
     if (dedupUndoBtn) {
       dedupUndoBtn.addEventListener("click", function () {
-        var undoTime = $("undo_before_time") ? $("undo_before_time").value.trim() : "";
+        var rawTime = $("undo_before_time") ? $("undo_before_time").value.trim() : "";
+        var undoTime = "";
+        if (rawTime) {
+          undoTime = normalizeUndoTime(rawTime);
+          if (!undoTime) {
+            say("时间点格式无法识别，请使用 YYYY-MM-DD HH:MM 格式（如：2026-10-19 03:00）", "bad");
+            if ($("undo_before_time")) $("undo_before_time").focus();
+            return;
+          }
+          if ($("undo_before_time")) $("undo_before_time").value = undoTime;
+        }
         submitAction("memory_audit", { undo: true, undo_before: undoTime || undefined });
       });
     }
+
+    // 定时去重表单动态联动与预览
+    ["dedup_schedule", "dedup_weekday", "dedup_day", "dedup_hour", "dedup_minute"].forEach(function (id) {
+      var el = $(id);
+      if (el) {
+        el.addEventListener("input", updateDedupUI);
+        el.addEventListener("change", updateDedupUI);
+      }
+    });
 
     // 立即扫描对话录制
     var harvestGatewayBtn = $("btn_harvest_gateway");
@@ -1335,6 +1504,9 @@
     window.renderAllStatus = renderAllStatus;
     window.renderDbPrefix = renderDbPrefix;
     window.__renderMemhubStatus = renderAllStatus;
+    window.fill = fill;
+    window.collect = collect;
+    window.updateDedupUI = updateDedupUI;
 
     // 数据库名称输入联动前缀展示
     var ncbInput = $("ncb_instance");

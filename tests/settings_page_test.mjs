@@ -686,6 +686,88 @@ async function runTests() {
   assert.ok(counterEvidenceCaught, "反证用例生效：未先 get 再合并的伪造保存必定被断言拦截");
   console.log("PASS: 反证测试通过！证明「其它卡片字段与 memories 快照逐字段不变」断言有效，能够精准拦截漏合并缺陷。");
 
+  // ==========================================
+  // 测试 14: 定时去重表单与自然语言预览测试
+  // ==========================================
+  console.log("\n--- 测试 14: 定时去重表单样式、条件显隐与自然语言实时预览 ---");
+  // 14.1 初始为 daily 且时间为 01:30
+  env.sandbox.window.fill({ dedup_schedule: "daily", dedup_time: "01:30" });
+  assert.strictEqual(Number(env.elements.dedup_hour.value), 1, "fill() 成功把 01:30 拆解为小时 1");
+  assert.strictEqual(Number(env.elements.dedup_minute.value), 30, "fill() 成功把 01:30 拆解为分钟 30");
+  assert.strictEqual(env.elements.wrap_dedup_weekday.style.display, "none", "daily 模式下隐藏星期下拉");
+  assert.strictEqual(env.elements.wrap_dedup_day.style.display, "none", "daily 模式下隐藏几号输入框");
+  assert.strictEqual(env.elements.dedup_preview.textContent, "每天的 01:30 执行一次", "daily 预览文字严格对齐");
+
+  // 14.2 切换为 weekly (周一)
+  env.elements.dedup_schedule.value = "weekly";
+  env.elements.dedup_weekday.value = "1";
+  env.elements.dedup_schedule.dispatchEvent({ type: "change", target: env.elements.dedup_schedule });
+  assert.strictEqual(env.elements.wrap_dedup_weekday.style.display, "inline-flex", "weekly 模式下展示星期下拉");
+  assert.strictEqual(env.elements.wrap_dedup_day.style.display, "none", "weekly 模式下隐藏几号输入框");
+  assert.strictEqual(env.elements.dedup_preview.textContent, "每周 周一 的 01:30 执行一次", "weekly 预览文字严格对齐");
+
+  // 14.3 切换为 monthly (13号)
+  env.elements.dedup_schedule.value = "monthly";
+  env.elements.dedup_day.value = "13";
+  env.elements.dedup_schedule.dispatchEvent({ type: "change", target: env.elements.dedup_schedule });
+  assert.strictEqual(env.elements.wrap_dedup_weekday.style.display, "none", "monthly 模式下隐藏星期下拉");
+  assert.strictEqual(env.elements.wrap_dedup_day.style.display, "inline-flex", "monthly 模式下展示几号输入框");
+  assert.strictEqual(env.elements.dedup_preview.textContent, "每月 13 号 01:30 执行一次", "monthly 预览文字严格对齐");
+
+  // 14.4 切换为 off (关闭)
+  env.elements.dedup_schedule.value = "off";
+  env.elements.dedup_schedule.dispatchEvent({ type: "change", target: env.elements.dedup_schedule });
+  assert.strictEqual(env.elements.wrap_dedup_weekday.style.display, "none", "off 模式下隐藏星期下拉");
+  assert.strictEqual(env.elements.wrap_dedup_day.style.display, "none", "off 模式下隐藏几号输入框");
+  assert.strictEqual(env.elements.dedup_preview.textContent, "已关闭定时去重", "off 预览文字严格对齐");
+
+  // 14.5 collect() 组合拼回 "HH:MM"
+  env.elements.dedup_hour.value = "2";
+  env.elements.dedup_minute.value = "5";
+  const collected = env.sandbox.window.collect();
+  assert.strictEqual(collected.dedup_time, "02:05", "collect() 必须把两个数字框重新拼为两位补零的 HH:MM 字符串");
+  assert.strictEqual(collected.dedup_schedule, "off");
+  console.log("PASS: 定时去重表单 fill/collect 拆装、条件字段动态显隐与自然语言预览全部正确！");
+
+  // ==========================================
+  // 测试 15: 回滚时间点与还原按钮信标及非阻塞测试
+  // ==========================================
+  console.log("\n--- 测试 15: 回滚时间点宽容解析与还原按钮信标提交 ---");
+  await new Promise((r) => setTimeout(r, 1100)); // 避开频控
+  assert.ok(env.elements.btn_dedup_undo, "存在 btn_dedup_undo 按钮（显示为「还原」）");
+  assert.ok(env.elements.undo_before_time, "存在 undo_before_time 输入框");
+
+  // 宽容解析：输入斜杠格式带秒 2026/10/19 03:00:00，提交时被规范化并传给后端
+  env.elements.undo_before_time.value = "2026/10/19 03:00:00";
+  const callsBeforeUndo = env.setCalls.length;
+  env.elements.btn_dedup_undo.click();
+  await new Promise((r) => setTimeout(r, 60));
+  assert.strictEqual(env.setCalls.length, callsBeforeUndo + 1, "还原按钮触发 options.set 提交信标");
+  const undoPayload = env.setCalls[env.setCalls.length - 1];
+  assert.ok(undoPayload._action, "包含 _action");
+  assert.strictEqual(undoPayload._action.op, "memory_audit");
+  assert.strictEqual(undoPayload._action.undo, true);
+  assert.strictEqual(undoPayload._action.undo_before, "2026-10-19 03:00", "斜杠带秒输入被宽容转换为规范 YYYY-MM-DD HH:MM");
+  assert.strictEqual(env.elements.undo_before_time.value, "2026-10-19 03:00", "输入框同步回写规范格式");
+  console.log("PASS: 还原按钮信标提交正确，回滚时间宽容解析通过！");
+
+  // ==========================================
+  // 测试 16: runPendingAction 异步非阻塞去重测试
+  // ==========================================
+  console.log("\n--- 测试 16: 验证全量去重任务在 runPendingAction 中立即返回不超时 ---");
+  const { runPendingAction } = await import("../page_actions.js");
+  const startAuditTime = Date.now();
+  const asyncAuditActionRes = await runPendingAction({
+    _action: { op: "memory_audit", id: "audit-nonblock-" + Date.now(), at: Date.now(), args: { full: true } }
+  }, {});
+  const elapsedAuditMs = Date.now() - startAuditTime;
+  assert.ok(elapsedAuditMs < 2000, `全量去重必须在 2 秒内异步返回，实际耗时 ${elapsedAuditMs}ms`);
+  assert.strictEqual(asyncAuditActionRes.op, "memory_audit");
+  assert.strictEqual(asyncAuditActionRes.result.status, "进行中");
+  assert.strictEqual(asyncAuditActionRes.result.ok, true);
+  assert.ok(asyncAuditActionRes.result.title.includes("已开始全自动去重任务"), "必须立即返回已开始");
+  console.log(`PASS: 全量去重在 runPendingAction 耗时 ${elapsedAuditMs}ms 立即响应，宿主加载绝不超时！`);
+
   // 符合 test_meta 元检查的隔离与清理凭据
   const project = "__test__";
   function cleanup() { return true; }

@@ -379,6 +379,113 @@ select {
   font-size: var(--fs-hint);
 }
 
+/* ---------- 定时去重执行周期表单 ---------- */
+.schedule-control-box {
+  margin-top: 10px;
+}
+
+.schedule-form-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.schedule-label {
+  font-size: var(--fs-label);
+  color: var(--magpie-fg);
+  font-weight: 500;
+  white-space: nowrap;
+  margin-right: 2px;
+}
+
+.schedule-select {
+  min-width: 86px;
+  width: auto;
+  height: var(--btn-h);
+  padding: 0 10px;
+}
+
+.schedule-cond {
+  display: inline-flex;
+  align-items: center;
+}
+
+.schedule-time-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.input-with-suffix {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.input-with-suffix input[type=number] {
+  width: 54px;
+  height: var(--btn-h);
+  text-align: center;
+  border: 1px solid var(--magpie-line);
+  border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+  background: var(--magpie-bg);
+  color: var(--magpie-fg);
+  padding: 0 4px;
+  -moz-appearance: textfield;
+}
+
+.input-with-suffix input[type=number]::-webkit-inner-spin-button,
+.input-with-suffix input[type=number]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.input-with-suffix input[type=number]:focus {
+  position: relative;
+  z-index: 1;
+  border-color: var(--magpie-accent);
+}
+
+.input-with-suffix .input-suffix {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  height: var(--btn-h);
+  background: color-mix(in srgb, var(--magpie-card) 70%, var(--magpie-line));
+  color: var(--magpie-fg-2);
+  border: 1px solid var(--magpie-line);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: var(--fs-input);
+  white-space: nowrap;
+  user-select: none;
+  box-sizing: border-box;
+}
+
+.schedule-preview-line {
+  margin-top: 8px;
+  font-size: var(--fs-hint);
+  color: var(--magpie-fg);
+  line-height: 1.5;
+  padding-left: calc(4em + 12px);
+}
+
+@media (max-width: 600px) {
+  .schedule-preview-line {
+    padding-left: 0;
+  }
+}
+
+.undo-input-group {
+  max-width: 440px;
+}
+
+.btn-undo {
+  min-width: 68px;
+  font-weight: 600;
+}
+
 /* ---------- 统一按钮规范 ---------- */
 button {
   font-family: var(--magpie-font);

@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.28.2</span>
+    <span class="version-tag">v6.28.3</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、上下文压缩、R2 存储。</p>
 
@@ -302,72 +302,54 @@
         </div>
       </div>
 
-      <div class="row">
+      <div class="row" id="row_dedup_schedule">
         <div class="row-head">
-          <label for="dedup_schedule">定时去重 (dedup_schedule)</label>
+          <label for="dedup_schedule">定时去重执行周期 (dedup_schedule)</label>
           <span class="badge rec">默认 关闭</span>
         </div>
         <div class="hint">
           <div class="hint-desc">宿主长驻后台定时对库内记忆与踩坑进行全自动去重合并。到达设定时段后立即执行，只软失效绝不物理删除。</div>
-          <div class="hint-diff"><strong>关闭</strong>：仅允许手动触发；<strong>每天/每周/每月</strong>：到达设定时刻自动触发（daily 范围 24h，weekly 范围 7d，monthly 范围 30d）。</div>
+          <div class="hint-diff"><strong>关闭</strong>：仅允许手动触发；<strong>每天 / 每周 / 每月</strong>：到达设定时刻在后台自动触发去重。</div>
         </div>
-        <div class="control">
-          <select id="dedup_schedule">
-            <option value="off" selected>关闭（默认，仅手动触发）</option>
-            <option value="daily">每天自动去重 (daily)</option>
-            <option value="weekly">每周自动去重 (weekly)</option>
-            <option value="monthly">每月自动去重 (monthly)</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="row">
-        <div class="row-head">
-          <label for="dedup_time">去重触发时刻 (dedup_time)</label>
-          <span class="badge rec">默认 02:00</span>
-        </div>
-        <div class="hint">
-          <div class="hint-desc">每日/每周/每月去重触发的具体时刻 (HH:MM)，如 01:49。三种自动频率均使用该时刻。</div>
-          <div class="hint-diff"><strong>格式</strong>：<code>HH:MM</code>（24小时制，例如 <code>01:49</code> 或 <code>02:00</code>）。</div>
-        </div>
-        <div class="control">
-          <input type="text" id="dedup_time" placeholder="例如：01:49" value="02:00" spellcheck="false">
-        </div>
-      </div>
-
-      <div class="row">
-        <div class="row-head">
-          <label for="dedup_weekday">每周去重星期 (dedup_weekday)</label>
-          <span class="badge rec">默认 周一</span>
-        </div>
-        <div class="hint">
-          <div class="hint-desc">当定时去重设为「每周」时生效。指定每周星期几执行去重。</div>
-          <div class="hint-diff"><strong>选项</strong>：1~7（周一至周日）。</div>
-        </div>
-        <div class="control">
-          <select id="dedup_weekday">
-            <option value="1" selected>周一 (1)</option>
-            <option value="2">周二 (2)</option>
-            <option value="3">周三 (3)</option>
-            <option value="4">周四 (4)</option>
-            <option value="5">周五 (5)</option>
-            <option value="6">周六 (6)</option>
-            <option value="7">周日 (7)</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="row">
-        <div class="row-head">
-          <label for="dedup_day">每月去重日期 (dedup_day)</label>
-          <span class="badge rec">默认 1号</span>
-        </div>
-        <div class="hint">
-          <div class="hint-desc">当定时去重设为「每月」时生效。指定每月几号执行去重（1~28号）。</div>
-          <div class="hint-diff"><strong>范围</strong>：1~28（避开月末天数差异）。</div>
-        </div>
-        <div class="control">
-          <input type="number" id="dedup_day" min="1" max="28" step="1" value="1">
+        <div class="control schedule-control-box">
+          <div class="schedule-form-line">
+            <span class="schedule-label">执行周期</span>
+            <select id="dedup_schedule" class="schedule-select">
+              <option value="off" selected>关闭</option>
+              <option value="daily">每天</option>
+              <option value="weekly">每周</option>
+              <option value="monthly">每月</option>
+            </select>
+            <div id="wrap_dedup_weekday" class="schedule-cond" style="display:none;">
+              <select id="dedup_weekday" class="schedule-select">
+                <option value="1" selected>周一</option>
+                <option value="2">周二</option>
+                <option value="3">周三</option>
+                <option value="4">周四</option>
+                <option value="5">周五</option>
+                <option value="6">周六</option>
+                <option value="7">周日</option>
+              </select>
+            </div>
+            <div id="wrap_dedup_day" class="schedule-cond" style="display:none;">
+              <div class="input-with-suffix">
+                <input type="number" id="dedup_day" min="1" max="28" step="1" value="1">
+                <span class="input-suffix">天</span>
+              </div>
+            </div>
+            <div class="schedule-time-group" id="wrap_dedup_time">
+              <div class="input-with-suffix">
+                <input type="number" id="dedup_hour" min="0" max="23" step="1" value="2">
+                <span class="input-suffix">小时</span>
+              </div>
+              <div class="input-with-suffix">
+                <input type="number" id="dedup_minute" min="0" max="59" step="1" value="0">
+                <span class="input-suffix">分钟</span>
+              </div>
+            </div>
+            <input type="hidden" id="dedup_time" value="02:00">
+          </div>
+          <div class="schedule-preview-line" id="dedup_preview">已关闭定时去重</div>
         </div>
       </div>
 
@@ -451,11 +433,14 @@
           <span class="badge">可选</span>
         </div>
         <div class="hint">
-          <div class="hint-desc">输入时间点（如 2026-10-19 03:00），将撤销该时刻之后的所有去重；留空则仅撤销最近一次去重。</div>
-          <div class="hint-diff"><strong>默认</strong>：自动填入上次去重时间。</div>
+          <div class="hint-desc">输入时间点（如 2026-10-19 03:00）将撤销该时刻之后的所有去重；留空则仅撤销最近一次。</div>
+          <div class="hint-diff"><strong>格式</strong>：<code>YYYY-MM-DD HH:MM</code>（如 2026-10-19 03:00），留空点「还原」撤销最近一次。</div>
         </div>
         <div class="control">
-          <input type="text" id="undo_before_time" placeholder="例如：2026-10-19 03:00（留空则撤销最近一次）" spellcheck="false">
+          <div class="input-group undo-input-group">
+            <input type="text" id="undo_before_time" placeholder="如 2026-10-19 03:00（留空则仅撤销最近一次）" spellcheck="false">
+            <button type="button" id="btn_dedup_undo" class="btn-undo">还原</button>
+          </div>
         </div>
       </div>
 
@@ -490,7 +475,6 @@
       <div class="btn-row">
         <button type="button" id="btn_check_model">真实检测模型</button>
         <button type="button" id="btn_memory_audit">立即全量去重</button>
-        <button type="button" id="btn_dedup_undo">撤销上次去重</button>
       </div>
 
       <div class="action-status-box" id="model_action_status" style="display:none;"></div>
