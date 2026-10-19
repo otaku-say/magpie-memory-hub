@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.29.1</span>
+    <span class="version-tag">v6.29.2</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、R2 存储。</p>
 
@@ -582,7 +582,7 @@
             <span class="badge rec">推荐 开</span>
           </div>
           <div class="hint">
-            <div class="hint-desc">让正在对话的当前模型在回复末尾通过特定格式顺手产出记忆，基于在线模型抽取。</div>
+            <div class="hint-desc">在请求尾部轻量注入 [Memory Agent Guide] 指引，按意图动态引导当前模型主动调用 MCP 工具查存记忆，零额外模型调用。</div>
             <div class="hint-diff"><strong>开</strong>：零模型免额外 API 成本，提炼随对话顺手完成；<strong>关</strong>：彻底关闭自动提炼，仅依赖手动录入或外部工具。</div>
           </div>
         </div>

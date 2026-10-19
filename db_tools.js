@@ -87,7 +87,8 @@ export async function fetchPublicSchema(database, opts) {
  * db_status —— 只读：报告当前结构 vs 期望结构的差集
  * ------------------------------------------------------------------ */
 export async function dbStatus(cfg, args) {
-  const db = dbOf(cfg, args);
+  const rawDb = dbOf(cfg, args);
+  const db = (await resolveRealDatabase(cfg, rawDb)) || rawDb;
   const hasMcp = !!((cfg && (cfg.mcpKey || cfg.mcp_key)) || "");
 
   if (!hasMcp) {
@@ -142,7 +143,8 @@ export async function dbStatus(cfg, args) {
  * db_init —— 幂等初始化：只增不删，先探测后执行
  * ------------------------------------------------------------------ */
 export async function dbInit(cfg, args) {
-  const db = dbOf(cfg, args);
+  const rawDb = dbOf(cfg, args);
+  const db = (await resolveRealDatabase(cfg, rawDb)) || rawDb;
   const dryRun = !!(args && args.dry_run);
   const mcp = mcpOf(cfg);
 
@@ -195,7 +197,8 @@ export async function dbInit(cfg, args) {
  * db_reset —— 清空：删除插件自己的三张表（结构 + 数据）
  * ------------------------------------------------------------------ */
 export async function dbReset(cfg, args) {
-  const db = dbOf(cfg, args);
+  const rawDb = dbOf(cfg, args);
+  const db = (await resolveRealDatabase(cfg, rawDb)) || rawDb;
   const confirm = (args && args.confirm) || "";
   if (confirm !== RESET_CONFIRM) {
     // 二次确认：必须显式传 confirm="RESET"，防止 agent 误触
@@ -557,6 +560,10 @@ export async function ncbCheck(cfg, args) {
   }
 
   // 目标库存在：获取结构并检测 drift
+  try {
+    const { rememberDatabase } = await import("./local_state.js");
+    rememberDatabase(found);
+  } catch (_) {}
   let schemaRes = null;
   let foreignTables = [];
   try {

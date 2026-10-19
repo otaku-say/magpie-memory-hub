@@ -108,7 +108,7 @@ export function buildSelect(table, params) {
     ) {
       continue;
     }
-    where.push(safeIdent(k, "column", table) + " = " + sqlValue(p[k]));
+    where.push(safeIdent(k, "column", table) + (p[k] === null ? " IS NULL" : " = " + sqlValue(p[k])));
   }
 
   // 3. 规模化增量游标与批量下推过滤
@@ -242,7 +242,10 @@ export function makeMcpClient(cfg, signal) {
       if (!id) {
         // 拿不到 insertId 时回查一次，保证调用方拿得到 id
         try {
-          const back = await run(buildSelect(table, Object.assign({}, data, { limit: 1 })));
+          const backQuery = data.content_fingerprint
+            ? { project: data.project, content_fingerprint: data.content_fingerprint, order_by: "id DESC", limit: 1 }
+            : { project: data.project, title: data.title, order_by: "id DESC", limit: 1 };
+          const back = await run(buildSelect(table, backQuery));
           const row = (back.rows || [])[0];
           return Object.assign({}, data, { id: (row && row.id) || 0 });
         } catch (e) { /* 回查失败就返回 0，由调用方容错 */ }

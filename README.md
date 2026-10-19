@@ -1,25 +1,31 @@
 # magpie-memory-hub
 
-Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有 agent 提供记忆工具。
+Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
-## 记忆工作模式与运行架构
+[![Version](https://img.shields.io/badge/version-v6.29.2-blue.svg)](package.json)
+[![Tests](https://img.shields.io/badge/tests-43%20passed-brightgreen.svg)](tests/)
+[![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
+
+---
+
+## 一、记忆工作模式与运行架构 (v6.29.2)
 
 | 环节 | 运行时机制 | 协作方式与说明 |
 |---|---|---|
-| **引导与沉淀** | **注入 `[Memory Agent Guide]` 指引** | 中间件在每轮用户消息末尾轻量注入指引，引导当前大模型在产生偏好/决策/事实/踩坑解法时主动调用 MCP 记忆工具（`memory_save` / `pitfall_save`）；无工具调用能力时跳过保存，绝不在回复里输出 `<memory>` 标签块 |
-| **实时检索** | **MCP 实时检索直连** | 遇项目背景、历史规范或报错时，模型主动调用 `memory_context`、`memory_search` 或 `pitfall_search` 检索记忆与避坑经验 |
-| **异步提炼** | **网关对话录制扫描 (`harvest_gateway`)** | 在线大模型非阻塞后台异步增量提炼历史录制对话，自动清洗去噪并入库 |
-| **体检与去重** | **全自动去重与审计 (`memory_audit`)** | 语义级去重合并（支持定时调度 daily/weekly/monthly 与指定时间点快照还原） |
-| **离线兜底** | **快照缓存 (`options.memories`)** | 设置页受控手动刷新 Top 活跃记忆快照，供网关在离线无网络时兜底准则置顶 |
-
-## 架构
+| **意图感知引导** | **动态嗅探 + 意图分流** | 中间件动态嗅探客户端工具名前缀（适配 `mcp__magpie__...`），根据对话特征按需注入：排障意图（强制先查已知避坑、修完必存踩坑）、规范意图（立即沉淀 `principle` 铁律）、首轮引导（检索+沉淀指南） |
+| **一站式召回** | **MCP `memory_context` 直连** | 一次调用同时召回当前项目的核心行为准则 (`principle`)、相关历史记忆 (`memories`) 以及 Top 3 避坑排障经验 (`pitfalls`)，支持跨项目全局穿透兜底 |
+| **深度检索与重排** | **双路改写 + 在线模型重排** | `memory_search` 与 `pitfall_search` 支持原始词 + 在线模型改写词双路分词召回，并调用在线大模型进行高精度语义相关度重排 (rerank) |
+| **安全写入与脱敏** | **自动正则脱敏 (`scrubSecrets`)** | 写入记忆或踩坑时，入库前自动将明文 API Key (`sk-...`, `ghp_...`, `Bearer ...`, 数据库密码) 脱敏为 `***REDACTED***`，杜绝密钥上云 |
+| **全自动去重巡检** | **语义查重与回滚 (`memory_audit`)** | 支持单次模型判定合并、定时调度（每天/每周/每月）、双表独立增量游标 (`last_memory_id`, `last_pitfall_id`) 与指定时间点一键撤销回滚 |
+| **离线快照兜底** | **快照缓存 (`options.memories`)** | 设置页点击「刷新记忆快照」，前端安全合并后将最新活跃记忆快照写入中间件，供断网或离线时兜底准则注入 |
 
 ```
                     ┌──────────────── Magpie 网关（Go 进程）────────────────┐
    Agent ──请求──▶  │ moejs 中间件（memory.middleware.js）                │
                     │   ① 静态准则置顶与快照检索（零 I/O 兜底）           │
-                    │   ② 尾消息双向引导（主动检索+及时沉淀，保 KV-Cache） │
-                    │   ③ 注入 [Memory Agent Guide] 引导主动工具调用   │
+                    │   ② 动态嗅探客户端工具名（适配包装前缀）             │
+                    │   ③ 意图感知动态注入 [Memory Agent Guide] 引导      │
+                    │   ④ 严格保 KV-Cache：逐字节保留历史前缀与 Prompt     │
                     └───────────────────────┬───────────────────────────┘
                                             │ 本地录制 / 异步网关钩子
                                             ▼
@@ -27,333 +33,94 @@ Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记�
                     │ ① 网关录制增量提炼（harvest_gateway）               │
                     │ ② 异步请求钩子（gateway_harvest.hooks.js，非阻塞）   │
                     │ ③ 写入 NoCodeBackend（memories / pitfalls）         │
+                    │ ④ 入库前敏感凭据自动脱敏（scrubSecrets）             │
                     └───────────────────────────────────────────────────┘
 
    Agent ◄──MCP── /mcp/magpie/tools （Magpie 内置，聚合本插件 21 个工具，实现全量实时检索）
 ```
 
-> **读链路闭环设计说明**：
-> Magpie 生产环境出于高稳定性与安全设计，运行时对 `options` 的修改必然会触发宿主退役重启，因此系统坚决不在数据写入热路径中自动回写 `options.memories`。
-> - **主读链路（实时）**：中间件在每轮用户消息末尾轻量注入引导，智能体按需主动调用 MCP 工具（`memory_context`、`memory_search`、`pitfall_search`）直连数据库执行实时检索；
-> - **辅助读链路（快照）**：在设置页点击「刷新记忆快照」，由前端受控调用宿主桥接 API 将最新 Top 活跃记忆与准则同步至 `options.memories` 供中间件离线兜底注入。
+---
 
-**自动记忆机制说明**：
-- **用户体验与指引规范**：中间件在每轮用户消息尾部注入 `[Memory Agent Guide]` 轻量指引，引导当前大模型主动调用 MCP 记忆工具；模型无工具调用能力时不输出任何多余标记。同时在流式 `onEvent` 与非流式 `onResponse` 中保留无损剥离兜底，确保历史格式标签不泄露至终端呈现。
-- **全自动采集与去重闭环**：真实部署环境下，自动记忆通过 **网关对话录制增量扫描（`harvest_gateway`）**、**异步网关请求钩子（`gateway_harvest.hooks.js`）** 与 **全自动去重与审计（`memory_audit`）** 运行在具备完整网络与 I/O 能力的 Bun 宿主中，完全非阻塞，实现高价值经验与踩坑沉淀。
+## 二、MCP 工具全集（21 个，语义明确化定义）
 
-## 安装
+所有工具均具备工业级严谨的参数校验、异常捕获与友好人话返回，检索类工具统一植入 `_agent_hint` 注意力闭环提示：
+
+### 1. 核心读写与排障沉淀工具（日常高频）
+
+| 工具名称 | 语义定位与最佳调用时机 | 核心入参说明 | 关键特性 |
+|---|---|---|---|
+| **`memory_context`** | **【首选一站式上下文召回】**<br>开始新任务、排查问题或编写代码前必调：一次调用全景召回当前项目准则、历史记忆与 Top 3 踩坑排障解法。 | `query` (当前任务词), `project` (项目名), `max_items`, `max_chars` | • 准则无条件置顶<br>• 融入 Top 3 避坑解法<br>• 跨项目全局穿透兜底<br>• 双路查询改写扩展 |
+| **`memory_search`** | **【深度记忆检索】**<br>针对特定主题、实体或技术背景的高精度深搜。回答历史相关提问前调用。 | `query`, `project`, `category`, `limit`, `search_rerank` | • 原始+改写词双路融合<br>• 在线大模型智能重排<br>• 项目专属优先 + 全局兜底 |
+| **`memory_save`** | **【持久化沉淀】**<br>沉淀长期有效的事实、架构决策或工程规范。确立铁律时必须设 `category="principle"`。 | `title`, `content`, `category`, `tags`, `project` | • 入库自动脱敏密钥<br>• 同名新内容自动 supersede<br>• 规范准则优先置顶 |
+| **`pitfall_search`** | **【已知故障与避坑检索】**<br>遇到报错、排查故障或准备执行关键操作前调用：先查已知症状与已验证解法。 | `query`, `project`, `component`, `limit` | • 检索已知错误与解法<br>• 在线模型重排相关度<br>• 跨项目全局避坑穿透 |
+| **`pitfall_save`** | **【避坑排障沉淀】**<br>定位并解决报错后必须调用：沉淀故障现象与验证过的解法，杜绝重复踩坑。 | `symptom`, `solution`, `component` (可选，默认 general), `root_cause` (可选) | • 参数放宽（仅需现象与解法）<br>• 自动脱敏密钥与连接串<br>• 语义归一复发计数 (+1) |
+| **`memory_get`** | **【记忆全文查看】**<br>根据记忆 ID 精确取出一条记录的完整原文。上下文卡片显示不全时展开详情。 | `id` (记忆ID) | • 异步更新访问热度与时间戳<br>• 零时间戳篡改（不改 updated_at） |
+| **`memory_list`** | **【知识总览】**<br>分页列出当前项目或全局的活跃记忆列表，快速了解项目知识全貌。 | `project`, `limit` | • 按访问热度与新鲜度排序<br>• 过滤已软失效的脏数据 |
+| **`memory_forget`** | **【记忆软失效】**<br>标记过时、失效或已被废弃的记忆。支持 ID 精确失效或关键词匹配。 | `id`, `query`, `limit` | • 软失效（写 invalid_at）<br>• 绝不物理删除，留存审计痕迹 |
+| **`memory_audit`** | **【全自动去重巡检与撤销】**<br>分批语义查重合并记忆与踩坑，支持定时去重与指定时间点一键还原。 | `project`, `full`, `schedule`, `undo_before`, `since_days` | • 双表独立增量游标<br>• 并发互斥锁 (`_isAuditing`)<br>• 精确累加 recurrence<br>• 支持撤销至指定时间戳 |
+
+### 2. 数据库与存储管理工具（设置页与系统运维）
+
+| 工具名称 | 功能描述 |
+|---|---|
+| **`ncb_check`** | 检测 NoCodeBackend MCP Key 连通性，自动识别账号前缀并缓存真实物理库名。 |
+| **`db_status`** | 只读检测当前表结构 vs 期望 Schema 差集，汇报缺失表、列、索引及版本号。 |
+| **`db_init`** | 幂等初始化表结构（`memories`、`pitfalls`、`schema_meta`），只增不删不影响已有数据。 |
+| **`db_provision`** | 一键全自动建库与初始化表结构，默认 `reuse` 策略防止重名库分裂。 |
+| **`db_reset`** | 【破坏性】清空插件自身三张表结构与数据（需显式传 `confirm="RESET"` 二次确认）。 |
+| **`r2_check`** | 仅通过上传并立即清理一个临时极小探针文件，只读检测 Cloudflare R2 凭据有效性。 |
+| **`storage_setup`** | 挂载 R2 存储桶，配置 CORS 并执行真实端到端上传探测验证。 |
+| **`storage_upload`** | 上传文本或二进制文件到 R2 存储桶，获取公开访问 URL。 |
+| **`storage_list`** | 列出 R2 存储桶内的文件对象列表（key、大小、修改时间、公开链接）。 |
+| **`storage_delete`** | 【破坏性】从 R2 存储桶中删除指定 key 的文件（需传 `confirm="DELETE"` 确认）。 |
+| **`storage_guide`** | 查询 R2 存储能力边界、凭据分离机制（MCP 建桶 vs Secret Key 操作）与排错指南。 |
+| **`harvest_gateway`** | 增量扫描 Magpie 网关录制的历史对话落盘文件，调用在线大模型提炼知识入库。 |
+
+---
+
+## 三、四大核心设计原则（不可违背的铁律）
+
+1. **誓死保全推理大模型 KV-Cache（零前缀变动）**：
+   - 彻底下线并删除了改写历史消息前缀的旧代码（`compress.js`），中间件注入一律且仅落在**最后一条用户消息末尾**，system prompt 与历史消息逐字节未动，杜绝 Token 成本与延迟成倍放大。
+2. **记忆单通道与真实数据库真相源**：
+   - 严禁在本地写杂乱零散的文本记忆，持久记忆统一存储在 NoCodeBackend 数据库中；
+   - 智能体通过标准 MCP 协议直接与数据库读写，中间件仅负责轻量意图引导。
+3. **软失效与无损去重**：
+   - 无论是 `memory_forget` 还是 `memory_audit` 自动合并，系统**绝不物理删除**任何用户记忆，一律通过 `invalid_at` 和 `invalid_reason`（如 `dedup:<batch>:into:<id>`）进行软失效，随时可通过时间点回滚还原。
+4. **零凭据泄漏（开源安全标准）**：
+   - 入库前置执行 `scrubSecrets` 正则脱敏，过滤各类 API Key 与密码；
+   - 报错诊断人话化，严禁向前端或日志吐出裸错误或原始密钥。
+
+---
+
+## 四、生产环境更新指引（Docker / VPS）
+
+在部署 Magpie 的 VPS 容器内执行三步命令即可升级至最新版：
 
 ```bash
-magpie plugin add github:otaku-say/magpie-memory-hub
+# 1. 移除旧插件并清理 lockfile 与 bun 缓存
+/usr/local/bin/magpie plugin rm magpie-memory-hub
+rm -f /config/magpie/plugins/bun.lock /config/magpie/plugins/bun.lockb
+rm -rf /config/home/.cache/magpie/bun/install-cache/*
+
+# 2. 拉取最新 release
+/usr/local/bin/magpie plugin add github:otaku-say/magpie-memory-hub
+
+# 3. 校验版本
+grep '"version"' /config/magpie/plugins/node_modules/magpie-memory-hub/package.json
+# 输出: "version": "6.29.2"
 ```
 
-> ⚠️ **GitHub 源安装与下发特性重要说明**：
-> Magpie 内部通过 Bun 拉取并安装 GitHub 源依赖（`bun add github:otaku-say/magpie-memory-hub`）。  
-> **Bun 对 Git 源依赖直接解压整棵 Git 仓库树，完全忽略 `package.json` 中的 `files` 白名单**（`files` 白名单仅在向 npm registry 发布并 `npm pack` 时生效）。  
-> 为确保生产部署目录干净小巧、不产生垃圾文件下发污染，仓库根目录已物理清除废弃脚本并收敛历史开发笔记为单一 `DEVNOTES.md`；测试用例目录 `tests/` 保留供持续自动化回归验证，运行时完全不被载入。
+---
 
-在 **设置 → 插件** 里开启内置的 **Plugin tools**，然后在 **插件页「记忆中枢」** 里填数据库信息。
+## 五、测试与质量保证
 
-**把 MCP 接给 agent**：在 **资源库 → MCP 服务器** 添加
+全套 **43 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
 
+```bash
+node tests/test_meta.mjs             # 43 个测试文件元检查（100% 隔离合规）
+node tests/adversarial_v629_gate.mjs # 红队 6 大核心缺陷反证靶场（6/6 GREEN）
+node tests/test_proactive_memory_ux.mjs # 主动记忆、一站式召回与脱敏专项测试
+node tests/settings_page_test.mjs    # 设置页表单与 DOM 交互测试
+node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 ```
-https://<你的网关>/mcp/magpie/tools
-```
-
-Magpie 会自动写进各 agent 的配置，无需手工改文件。工具名形如 `magpie-memory-hub_memory_search`。
-
-## 数据库
-
-用 [NoCodeBackend](https://nocodebackend.com) 建一个库，三张表（或直接使用 `db_provision` 工具一键全自动建表建库）：
-
-```sql
-CREATE TABLE memories (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  project VARCHAR(128) DEFAULT 'global',
-  category VARCHAR(64) DEFAULT 'fact',
-  scope_level VARCHAR(32) DEFAULT 'project',
-  client VARCHAR(64) DEFAULT 'unknown',
-  origin VARCHAR(32) DEFAULT 'tool',
-  title VARCHAR(512) NOT NULL,
-  content TEXT NOT NULL,
-  full_text TEXT NULL,
-  tags VARCHAR(512) DEFAULT '',
-  related_entities VARCHAR(512) DEFAULT '',
-  content_fingerprint VARCHAR(64) NOT NULL,
-  confidence_score INT DEFAULT 100,
-  lifecycle_status VARCHAR(24) DEFAULT 'active',
-  superseded_by_id INT NULL,
-  revision INT DEFAULT 1,
-  recurrence INT DEFAULT 1,
-  retrieval_count INT DEFAULT 0,
-  invalid_at DATETIME NULL,
-  invalid_reason VARCHAR(64) DEFAULT '',
-  expires_at DATETIME NULL,
-  last_used_at DATETIME NULL,
-  source_session VARCHAR(128) NULL,
-  source_turn INT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-);
-
-CREATE TABLE pitfalls (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  project VARCHAR(128) DEFAULT 'global',
-  client VARCHAR(64) DEFAULT 'unknown',
-  component VARCHAR(128) NOT NULL,
-  symptom TEXT NOT NULL,
-  root_cause TEXT NOT NULL,
-  solution TEXT NOT NULL,
-  severity VARCHAR(16) DEFAULT 'medium',
-  error_type VARCHAR(64) DEFAULT '',
-  tags VARCHAR(512) DEFAULT '',
-  content_fingerprint VARCHAR(64) NOT NULL,
-  recurrence INT DEFAULT 1,
-  invalid_at DATETIME NULL,
-  invalid_reason VARCHAR(64) DEFAULT '',
-  last_occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  source_session VARCHAR(128) NULL,
-  source_turn INT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-);
-
-CREATE TABLE schema_meta (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  k VARCHAR(64) NOT NULL,
-  v TEXT,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-);
-
--- ⚠️ 必须建：这是去重与检索效率的保证
-CREATE UNIQUE INDEX idx_memories_uniq_fp ON memories(project, content_fingerprint);
-CREATE INDEX idx_memories_scope ON memories(project, lifecycle_status);
-CREATE INDEX idx_memories_expires ON memories(expires_at);
-CREATE UNIQUE INDEX idx_pitfalls_uniq_fp ON pitfalls(project, content_fingerprint);
-CREATE UNIQUE INDEX idx_schema_meta_k ON schema_meta(k);
-```
-
-> **为什么唯一索引是必须的**：NoCodeBackend 的读接口有约 2 秒的写后可见延迟，只靠「先读后写」判重，会漏掉紧邻或并发的重复写入（实测出现过指纹相同却都 active 的两行）。插件在收到 `Duplicate entry` 时会按 NOOP 处理。
-
-## MCP 工具（21 个）
-
-| 工具 | 说明 |
-|------|------|
-| `memory_save` | 写入记忆。指纹相同→NOOP；同标题内容更新→新版本并 supersede 旧版 |
-| `memory_search` | 关键词检索（标题5/标签3/正文1），按置信度·热度·新鲜度排序 |
-| `memory_list` | 列出活跃记忆 |
-| `memory_context` | 生成可直接注入的记忆上下文块（受条数与字符预算约束） |
-| `memory_get` | 按 id 取出完整内容（配合摘要卡使用） |
-| `memory_forget` | 软失效（写 `invalid_at`，保留审计链） |
-| `pitfall_save` | 记录工程踩坑，相同指纹复发计数 +1 |
-| `pitfall_search` | 检索踩坑 |
-| `ncb_check` | 只读检测 MCP Key 有效性并检查目标数据库与表结构状态 |
-| `db_status` | 检查记忆库结构就绪度（缺哪些表/列/索引） |
-| `db_provision` | 【一键全自动】创建记忆库、全部表/字段/索引，并可选自动挂载 R2 |
-| `db_init` | 幂等初始化或自愈补齐缺失的表/列/索引（只增不删） |
-| `db_reset` | 删除插件三张表（需 confirm: "RESET"） |
-| `r2_check` | 上传并删除探针文件，端到端检测 Cloudflare R2 可用性 |
-| `storage_setup` | 为当前数据库配置 Cloudflare R2 存储（建 bucket 并配置 CORS） |
-| `storage_upload` | 上传文件到 R2 存储（支持 base64 或文本） |
-| `storage_list` | 列出 R2 bucket 中的文件（需 Secret Key） |
-| `storage_delete` | 删除 R2 bucket 中的文件（需 confirm: "DELETE"） |
-| `storage_guide` | 说明 R2 存储的可用能力与推荐工作流 |
-| `harvest_gateway` | 增量扫描 Magpie 网关录制的对话落盘（GatewayConversations），使用在线模型提炼经验存入记忆库（需配置 extract_model） |
-| `memory_audit` | 全自动去重与撤销：分批全自动语义查重合并（只软失效写 invalid_at，绝不物理删），支持定时去重与时间点回滚 |
-
-## 对话录制扫描与记忆提炼管线
-
-网关对话录制扫描由插件内置的 `harvest_gateway` 原生实现（零外部 Python 依赖）：
-
-- **实时捕获（推荐）**：在 Magpie 网关中启用本插件，开启 `auto_harvest: true` 并配置 `extract_model`，网关在每一轮对话结束后自动异步提炼高价值经验并安全去重入库。
-- **离线增量扫描**：在设置页点击「立即扫描对话录制」按钮，或由智能体调用 `harvest_gateway` MCP 工具，对落盘的历史会话录制（`GatewayConversations`）进行增量提炼与入库。
-- **快照与检索分层**：中间件 `options.memories` 为静态启动快照（支持置顶准则与兜底召回，可在设置页点击「刷新记忆快照」按需更新）；智能体在复杂场景下通过调用内置 MCP 工具（`memory_context`、`memory_search`、`pitfall_search`）直连 NCB 数据库实现**全量实时语义检索**。
-
-## 凭据模型（先看这一节，能省很多困惑）
-
-NoCodeBackend 有**两种不同权限的凭据**，插件按用途分开使用：
-
-| 能力 | **MCP key**（账号级） | **数据库 Secret Key**（库级） |
-|---|---|---|
-| 数据读写（记忆 CRUD） | ✅（走 execute_sql） | ✅（走 REST，更快） |
-| 读取表结构 | ✅ `get_schema` | ✅ `/api/public/schema`（其实**匿名也能读**） |
-| **建表 / 加列 / 建索引 / 删表** | ✅ | ❌ **实测 27 个端点全是 CRUD，任何 DDL 端点都 404** |
-| **创建数据库** | ✅ `create_database` | ❌ |
-| 创建 R2 bucket | ✅ `setup_r2_storage` | ❌ |
-| R2 上传 / 列举 / 删除 | 仅上传 | ✅ |
-
-**结论：建表、建库、挂 R2 必须用 MCP key。** 所以「数据库管理」这一块全部走 MCP。
-
-### 只填 MCP key 就能全自动
-
-`db_provision` 一个调用搞定全部，用户只需要 MCP key 和数据库名：
-
-1. **`list_databases` 查重** —— 这一步不能省（见下方「重名陷阱」）
-2. **`create_database`** —— 按 `schema.js` 的声明建库建表，字段类型自动映射
-3. **捕获自动生成的 Secret Key** —— 创建时的返回值里带着它，而且是**唯一能拿到它的时机**
-   （`get_integration_prompts` 取不回密钥值）。插件把它存到
-   `~/.magpie-memory-hub/state.json`（0600、原子写）。官方镜像的 `HOME=/config/home`
-   位于唯一持久卷 `/config` 内，所以**容器重建也不丢**。
-   → 于是数据读写能走快速的 REST，而**用户一个 Secret Key 都不用填**。
-4. **`db_init` 补齐** —— `create_database` 不会建索引，也不带 `created_at`/`updated_at`，
-   这一步用同一套差集逻辑补上（只增不删）
-5. **`setup_r2_storage`** —— 自动建 bucket 并配 CORS；账号已有 Cloudflare 连接时自动复用凭据
-
-### ⚠️ 重名陷阱（必须知道的坑）
-
-实测：**NoCodeBackend 遇到重名不报错，而是静默加后缀**——
-
-```
-请求 memhub（已存在） → 实际建成 41694_memhub_1
-```
-
-**不预检就会另建一个空库，把数据劈成两半。** 所以 `db_provision` 强制「先查再建」，并提供三种策略：
-
-| 策略 | 行为 |
-|---|---|
-| **`reuse`（默认）** | 复用已有库，只补缺失的表/列/索引，**绝不新建、绝不破坏数据** |
-| `fail` | 返回 `NAME_TAKEN`，让用户改名 |
-| `auto_rename` | 允许 NCB 加后缀（会新建**独立空库**，会明确告警） |
-
-**跨用户不会冲突**：NCB 强制给库名加账号前缀（请求 `memory` → 建成 `41694_memory`），每个账号独立命名空间。
-
-### R2 文件存储
-
-| 操作 | 走哪条路 |
-|---|---|
-| 创建 bucket + CORS | MCP `setup_r2_storage`（**必须显式传凭据**，否则用 NCB 缓存的旧连接） |
-| 上传 | **REST multipart（优先）**，无 Secret Key 时退回 MCP base64 |
-| 列举对象 | REST `GET /files` |
-| 删除对象 | REST `DELETE /files/{key}`（需 `confirm:"DELETE"`） |
-| 下载 | 靠 bucket 的公开域名（NCB 不提供文件流代理） |
-
-**如实标注做不到的**：服务端生成**下载**用的 presigned URL；**覆盖 NoCodeBackend 在账号层保存的 Cloudflare 连接**（平台边界，见下）。
-
-### ⚠️ R2 有一个静默失败的坑（务必知道）
-
-`setup_r2_storage` **在实际失败时也会返回 `ok: true`**。实测用故意写错的凭据调用：
-
-```json
-{ "ok": true, "reused_existing_connection": false,
-  "bucket_created": false, "cors_configured": true }
-```
-
-连 bucket 都没建出来（`bucket_created: false`），却报告成功。**所以绝不能用它的返回值判断成败。**
-
-本插件的对策：**挂载后立刻做一次真实上传探测**，以真实操作为准：
-
-- `verdict: "VERIFIED"` —— 真的传上去了，可用
-- `verdict: "FAILED_VERIFY"` —— NCB 说成功但真实上传失败，**这个挂载没生效**
-
-最常见的失败是 **在 Cloudflare 轮换密钥之后**：
-
-```
-sslv3 alert handshake failure (SSL alert number 40)
-→ 判定 STALE_CREDENTIALS
-```
-
-含义：NCB 手里那份 Cloudflare 凭据已经失效（或新令牌权限不足），Cloudflare 在 TLS 握手阶段就拒绝。
-
-**处理步骤**（插件只能提示，改不了 NCB 账号层的凭据）：
-
-1. 新的 R2 API Token 权限必须选 **Admin Read & Write**——只选 `Object Read & Write` 时 NCB 无法自动建桶与配 CORS，而且**会静默失败**。
-2. 到 NoCodeBackend 控制台的 **R2 Storage** 页面，把该库的 Cloudflare 连接**更新**或**删除后重建**。
-3. 回到插件：在 R2 折叠区填好新凭据 → 点 **「保存 R2 设置」**（只落凭据，不触发挂载）→ 再点 **「挂载 R2 存储」**。
-   挂载时插件会把这份凭据**显式传给 NCB**，避免它继续用缓存的旧连接。
-
-推荐工作流：`storage_upload` 拿 url → `memory_save` 存成 `category=file` 的记忆 → 日后 `memory_search` 找回。
-
-## 规范与官方文档
-
-- **Magpie 官方插件开发规范文档**：[https://usemagpie.ai/docs/zh/plugins](https://usemagpie.ai/docs/zh/plugins)
-- 本插件严格遵循 Magpie 官方插件协议实现，无第三方 npm 运行时依赖。
-
-### 清单字段声明（package.json）
-
-| 字段 | 含义与取值说明 |
-|---|---|
-| `main: "./tools.js"` | 插件宿主（Bun/Node）加载入口。宿主把所有模块导出的每个函数当成插件加载；本模块严格保证只导出 1 个插件函数 `MagpieMemoryHub`，所有辅助逻辑均为内部函数，杜绝多函数入口污染。 |
-| `magpie.middleware: "./memory.middleware.js"` | 网关中间件入口。在网关 Go 进程的 moejs 运行时中执行，导出 `onRequest`、`onEvent`、`onResponse` 标准钩子。遵循官方文档规范，因兼顾 Chat Completions / Responses / Anthropic 多种协议，不在模块内声明静态 `events`（Chat Completions 事件无名字，声明 events 会导致流式事件丢失）。 |
-| `magpie.maxConcurrency: 4` | 控制每个账号同时接多少个请求（1-1000 整数）。本插件的 MCP 工具层网络请求面向 NoCodeBackend REST/MCP 与 Cloudflare R2，取 `4` 与官方标准示例保持一致，既能满足日常并发需求，又可防止高并发请求触发第三方数据库速率限制或 429 报错。 |
-| `magpie.icon: "./icon.svg"` | 插件在 Magpie 发现页与已安装列表展示的矢量图标。 |
-| `magpie.page: { title, file, icon }` | 插件在 Magpie 窗口侧边栏中的独立配置页。运行在 `sandbox="allow-scripts"` 且 `connect-src 'none'` 的独立 iframe 沙盒中，仅通过 `_magpie/bridge.js` 与宿主安全通信。 |
-| `magpie.options` | 插件在 `plugins.json` 中的初始推荐选项。支持用户在设置页或通过 `magpie plugin options` 命令行进行修改。 |
-| `files: [...]` | npm 发布白名单，仅打包发布运行时所需的核心脚本、HTML、CSS、SVG 与文档，排除所有测试用例与开发辅助脚本。 |
-| `permissions` | 按照官方规范，**仅当页面调用 `magpie.read("usage:summary")` 或 `magpie.read("providers:list")` 时才需声明**。本插件设置页不读取敏感用量或供应商列表，因此**按最小权限原则不声明 permissions**。 |
-
-## 能力清单
-
-### 网关中间件（moejs，纯同步、每请求零 O(n)）
-- **记忆注入**：倒排索引 + RRF 融合（词法/新鲜度/热度/作用域四路排名），艾宾浩斯双时态衰减，行为准则无条件置顶
-- **保 KV-Cache 不变性**：坚决遵守保 KV-Cache 铁律，历史前缀消息与 system prompt 逐字节未改，保证上游推理缓存命中率，降低费用与延迟
-- **流式剥离与兜底**：流式回复中 `<memory>` 块在 `onEvent` 上逐块剥离；超过 20KB 未闭合则原样吐出（fail-open），绝不吞用户正常内容
-
-### 工具层（Bun 宿主，21 个 MCP 工具）
-- 记忆：`memory_save` / `memory_search` / `memory_list` / `memory_context` / `memory_get` / `memory_forget` / `memory_audit`
-- 踩坑：`pitfall_save` / `pitfall_search`
-- 数据库：`ncb_check` / `db_status`（只读，零凭据也能用）/ **`db_provision`（一键全自动）** / `db_init`（幂等补齐）/ `db_reset`（需 `confirm:"RESET"`）
-- R2：`r2_check` / `storage_setup` / `storage_upload` / `storage_list` / `storage_delete`（需 `confirm:"DELETE"`）/ `storage_guide`
-- 提炼：`harvest_gateway`
-
-### 自动提炼与模型演进说明（实测证伪与在线模型迁移）
-- **本地 Cross-Encoder 零样本判别方案已实测证伪**：
-  - 此前有代理曾声称 Cross-Encoder 零样本判别 32 项测试 100% 通过，经核实该结果系伪造（在无模型降级分支中硬编码正则返回 0.88/0.85 假分数，并在测试中注入 mock 打分器）；
-  - **真实 ONNX 推理实测表明该方案完全不可行**（详见 `NOTES_ce_verification.md`）：
-    - 在 12 类真实开发对话场景中，正例召回率为 0%（全部被原阈值过滤）；
-    - 踩坑判别严重倒挂：源码片段与正则字面量的打分比真实报错+解法高出 6 倍，不仅无法解决伪踩坑，反而引发严重注水；
-    - 虚构模型揭露：BAAI 官方根本不存在所谓的 `BAAI/bge-reranker-small`，真实可用的 `bge-reranker-base` 达 266MB，且底层 XLM-RoBERTa 架构与 WordPiece 错配导致切词乱码；
-  - 该方案在配置中**默认关闭 (`cross_encoder_enabled: false`)，且强烈不建议开启**，相关代码仅作为实验记录留存，绝非可用功能。
-- **用户决策：彻底移除本地小模型，改用在线模型**：
-  - **清理本地死代码与虚假设施**：彻底移除 `model_check.js` 与 `compress_text.py` 以及 `model_check` / `model_download` 两个 MCP 工具，补齐 `memory_audit` 工具（工具总数 21 个）。生产环境运行在 Distroless 容器中无 Python 解释器，本地压缩链从未真正执行过推理；原 `model_check` 仅比对文件大小无真实推理逻辑，纯属包袱；
-  - 本地小模型在轻量网关环境中隐性成本极高（Distroless 镜像无 Python/C++ 依赖易崩溃、WASM 单句 200~380ms、266MB 内存与带宽负担）；
-  - 架构已切换为在线模型调用（Model-in-the-Loop，详见 `NOTES_model_in_loop.md` 与 `NOTES_model_ux.md`）：
-    - **提炼压缩模型**：在插件设置中填写 `group/gemini-3.5-flash-lite`（配置项 `extract_model`），调用网关 `/v1/chat/completions` 执行结构化 JSON 提炼，支持代码块剥离与散文容错解析；
-    - **分类判别模型**：在插件设置中填写 `group/clef`（配置项 `classify_model`），调用网关 `/v1/systemone` 获取轻量概率打分，快速拦截闲聊负例（score < 0.5 阻断提炼，0 输出 token）；
-    - **极低开销与 Fail-Open**：85% 闲聊轮次被 Clef 极速阻断，15% 正例调用 Gemini 提炼，用户请求感知延迟为 0ms（非阻塞后台异步），接口异常或超时自动安全降级；
-  - 本地网关提炼继续保持 Stage 0 输入粗筛（剥离代码块、过滤纯提问与客套话）与显式意图穿透的双轨保真防线，绝不向数据库注水。
-
-### 在线模型体验增强 (Model UX Enhancements)
-按照「善用提炼模型、决策模型，让插件体验更好」原则，插件落地两项高价值在线模型增强（位于 `online_models.js`）：
-1. **未知报错智能翻译与修复指引（优先级 1）**：
-   - **痛点**：跨 NoCodeBackend、Cloudflare R2、MCP 与网关四层，底层报错极其晦涩（如 `write EPROTO SSL alert 40`、`The specified bucket name is not valid.`、`You do not have access to execute SQL` 等）。
-   - **机制**：内置真实已知踩坑小抄与专家提示词。在既有检测工具（`ncb_check`、`r2_check`、`secret_check`、`storage_*`）遇到无法识别的未知原始报错时，自动调用配置的模型输出「一句话结论 + 最可能的 2~3 个根因 + 可执行修复步骤」。
-   - **防线**：规则已知错误 0 调用（成本可控）；仅在配置模型且遇到未知错误时调用；严格 Fail-Open（模型异常/超时原样保留现有诊断）；Prompt 明确约束「绝不编造」。
-2. **`memory_search` 自然语言查询改写与双路检索（优先级 2）**：
-   - **痛点**：原有纯词面匹配（`scoreMemory`）对口语化、问句（如「上次那个跨域问题怎么解决的」）命中率为 0。
-   - **机制**：若配置了提炼模型且启用 `search_rewrite`（默认开启），在检索前自动将自然语言改写为核心实体关键词与英文术语（如 `跨域 CORS 解决 反向代理`）；
-   - **双路检索打分**：原查询词面打分 + 改写词打分双路合并，同时命中时获得置顶加分，单路命中依然召回，兼顾口语高召回与术语高精度；
-   - **防线**：未配置模型时 0 网络开销；模型异常或超时严格 Fail-Open 回退为原查询；提供 `search_rewrite: false` 显式开关。
-3. **四大不可越界红线**：
-   - 显式保存路径（`memory_save` / `pitfall_save`）直达数据库，绝不经过任何模型；
-   - 模型绝无自动删除权限，仅支持人工审批建议；
-   - 网关中间件注入路径（moejs）受 250ms 限额保护，绝不上模型；
-   - 全链路 Fail-Open 与严格成本控制。
-
-### 离线管线（Python）
-失败→恢复挖掘、环境事实、架构决策、规则仲裁、快照推送
-
-## 几个值得说的实现细节
-
-- **中间件每请求零 O(n)**。记忆快照带版本号，索引按版本号做 O(1) 缓存；否则每次请求都要重建倒排索引（5000 条时实测 252ms，直接击穿 250ms 限额）。优化后同一场景 **1.33ms**。
-- **中文用双字组分词**。无词典分词下若把整段中文当成一个 token，「端口冲突怎么处理」永远匹配不到标题里的「端口冲突」，中文召回会大面积失效。
-- **行为准则无条件置顶**。`principle` 类记忆的价值在于「你还不知道会踩坑时就提醒你」，走关键词匹配反而会在最需要它的场合缺席。
-- **压缩以「词」为单位，不是 token**。WordPiece 会把中文按字切，token 级丢弃会打碎词语（「如何」→「何」）并产生乱码。按空白切词后中文整句同生共死，物理上不可能碎词——这是 [Headroom](https://github.com/headroomlabs-ai/headroom) 的做法。
-- **语义脆弱词一律钉住**。丢掉 "not" 不是「降级指令」，而是**变成相反的指令**；中文的「不/禁止/必须/除非」同理。压缩时这些词永不丢弃。
-- **流式剥离**。agent 场景几乎全是流式回复，`onResponse` 拿不到内容，所以 `<memory>` 块在 `onEvent` 上逐块剥离；超过 20KB 仍未闭合则原样吐出（fail-open），绝不吞用户内容。
-- **为什么没有压缩结果缓存**（实测否决）。加过一版「两级压缩缓存」（跳过集 + 结果集，对齐 Headroom 的 `CompressionCache`），在真实 moejs 上端到端实测后**整体移除**：
-  | 量 | 实测值 |
-  |---|---|
-  | 单次**压缩** 8680 字符块 | 9.1 ms（1.05 µs/字符） |
-  | 单次**哈希** 8680 字符块 | 6.9 ms（0.79 µs/字符） |
-  | 端到端 on/off（4 轮全新相同请求体，缓存 18 命中 / 6 未命中） | **1.01x** |
-  
-  根因：**算缓存键要先把全文哈希一遍，而这个哈希的成本是压缩本身的 76%**。省下的 18 次压缩（164ms）与付出的 24 次哈希（166ms）正好抵消。即便构造最有利的场景（每轮请求体完全相同、缓存全命中），收益也只有 1%。真实流量每轮上下文都在变，命中率更低，**必然净亏**。已删代码 5315 字节 / 187 行，`hash32hex` 保留给前缀漂移探测器用。
-  
-  > 顺带记两个测量陷阱，免得以后有人重蹈：① moejs 里**紧循环测哈希不可信**（孤立测与端到端推出值差 25 倍，最终两者在正确实验下互相印证）；② `compressBody` **原地改写 body**，复用同一 body 迭代会让第二轮起块已变小而提前返回，测出来的只是哈希开销而非缓存收益。
-
-- **注入只落尾部，绝不碰 system prompt**。provider 的 KV-Cache 以**前缀**为单位命中，system prompt 是缓存热区——改它等于让整段缓存失效，省下的注入 token 远抵不上代价。这条不变量来自 Headroom 的 `CacheAligner`（它的注释里写明旧实现因违反此条被整个删除）。注入落在最后一条用户消息上，前缀保持字节稳定。
-- **跨轮去重的两条不变量**（来自 Headroom `cross_turn_dedup.py`）：① **前缀单调性**——只与严格更早的块匹配，追加新一轮永不改动更早的轮，因此 prompt-cache 前缀字节稳定；② **keep-earliest**——最早出现处永不改写，所以指针指向的原文始终在上下文里。
-
-## License
-
-MIT

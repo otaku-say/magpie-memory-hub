@@ -168,9 +168,12 @@ const NO_CRED_ERR_MSG = "NO_CREDENTIALS: 未配置有效的 NoCodeBackend 凭据
 
 function makeNoCredentialsClient() {
   const throwNoCred = () => {
-    throw new Error(NO_CRED_ERR_MSG);
+    const err = new Error(NO_CRED_ERR_MSG);
+    err.code = "NO_CREDENTIALS";
+    throw err;
   };
   const target = {
+    _isNoCredentials: true,
     list: async () => throwNoCred(),
     create: async () => throwNoCred(),
     update: async () => throwNoCred(),
@@ -2132,7 +2135,7 @@ function ensureAuditScheduler(client, cfg) {
 const TOOLS = {
   memory_save: {
     description:
-      "写入一条长期记忆。指纹相同→NOOP(已存在)；同项目同分类同标题但内容更新→建立新版本并把旧版标记 superseded。",
+      '【持久化沉淀】向记忆库写入一条长期事实、架构决策或工程规范。当确立了长期不变的偏好/规则时务必设 category="principle"（会被无条件置顶召回）；若同标题内容更新会自动保留历史版本(superseded)；入库前自动对密钥敏感词执行正则脱敏。',
     args: {
       type: "object",
       properties: {
@@ -2155,7 +2158,7 @@ const TOOLS = {
 
   memory_search: {
     description:
-      "搜索长期记忆。支持关键词粗排（标题5/标签3/正文1）+ 在线模型语义增强重排(rerank)，按置信度·访问热度·新鲜度综合排序。回答历史相关问题前先调用它。",
+      '【深度记忆检索】根据关键词检索历史事实、决策与工程背景。支持双路查询分词 + 在线大模型重排(rerank)，支持跨项目全局穿透(project + global)与项目专属优先排序。回答项目历史背景前必调。',
     args: {
       type: "object",
       properties: {
@@ -2174,7 +2177,7 @@ const TOOLS = {
   },
 
   memory_list: {
-    description: "列出活跃记忆，按综合热度降序。用于总览已积累的知识。",
+    description: '【知识总览】分页列出当前项目或全局的活跃记忆列表，按访问热度与新鲜度加权排序。用于快速了解当前项目已积累的知识全貌。',
     args: {
       type: "object",
       properties: {
@@ -2187,7 +2190,7 @@ const TOOLS = {
   },
 
   memory_context: {
-    description: "首选一站式检索入口：综合召回架构准则、相关记忆与 Top 3 避坑经验，自动合并全局与项目专属上下文，生成可直接注入系统提示词的高密度记忆上下文块。",
+    description: '【首选一站式上下文召回】开始分析项目、排查问题或编写代码前首选调用：一次调用同时召回当前项目的核心行为准则(principle)、历史相关记忆(memories)以及 Top 3 踩坑排障解法(pitfalls)，支持跨项目全局准则穿透兜底。',
     args: {
       type: "object",
       properties: {
@@ -2201,7 +2204,7 @@ const TOOLS = {
   },
 
   memory_get: {
-    description: "按 id 取出某条记忆的完整内容。注入里出现摘要卡（带 id）时用它展开全文。",
+    description: '【记忆全文查看】根据记忆 ID 精确取出一条记录的完整正文（包含 full_text）。当上下文卡片中仅显示摘要且需要深入查看细节时调用。调用后自动累加访问热度。',
     args: {
       type: "object",
       properties: { id: { type: "integer", description: "记忆 id" } },
@@ -2211,7 +2214,7 @@ const TOOLS = {
   },
 
   memory_forget: {
-    description: "软失效一条或多条记忆（不物理删除，写 invalid_at）。用于纠正过时或错误的知识。",
+    description: '【记忆软失效】将过时、失效或已被废弃的记忆标记为软失效（记录 invalid_at，绝不物理删除）。可通过 ID 精确失效或关键词匹配批量失效。',
     args: {
       type: "object",
       properties: {
@@ -2225,7 +2228,7 @@ const TOOLS = {
 
   memory_audit: {
     description:
-      "全自动去重与撤销：对库内记忆与踩坑进行分批全自动语义查重合并（只软失效写 invalid_at，绝不物理删）。单次模型调用同时完成判定与合并结果生成；支持定时去重调度、全量分批去重，以及时间点回滚/最近一次去重撤销。",
+      '【全自动去重巡检与撤销】对库内记忆与踩坑记录执行分批语义级查重合并（仅软失效保留审计痕迹），支持定时调度、多轮 recurrence 准确累加、游标断点续跑，以及按指定时间点一键撤销回滚。',
     args: {
       type: "object",
       properties: {
@@ -2245,7 +2248,7 @@ const TOOLS = {
   },
 
   pitfall_save: {
-    description: "记录工程踩坑（现象/根因/解法）。相同指纹→复发次数+1，不重复入库。",
+    description: '【避坑排障沉淀】记录工程报错与排障解法（仅需提供 symptom 与 solution，自动补齐 component 与 root_cause）。发现相似问题时自动累加复发次数(recurrence)；入库前自动对密钥与凭据脱敏。排查定位完 bug 后必须调用！',
     args: {
       type: "object",
       properties: {
@@ -2267,7 +2270,7 @@ const TOOLS = {
   },
 
   pitfall_search: {
-    description: "检索已记录的工程踩坑，避免重复踩同一个坑。支持在线模型语义增强重排(rerank)。",
+    description: '【已知故障与避坑检索】遇到报错、排查故障或准备执行关键操作前调用：检索已知症状、错误信息、技术根因与已验证解法，支持在线大模型语义重排与全局避坑穿透。',
     args: {
       type: "object",
       properties: {
@@ -2286,7 +2289,7 @@ const TOOLS = {
 
   ncb_check: {
     description:
-      "检测当前配置的 NoCodeBackend MCP Key 是否有效，并检查目标数据库是否存在以及核心表结构完整度。只读检测，不修改任何数据或结构。",
+      '【数据库诊断】只读检测当前配置的 NoCodeBackend MCP 连通性与密钥有效性，检查目标数据库是否存在以及核心表/列/索引完整度。',
     args: {
       type: "object",
       properties: {
@@ -2298,7 +2301,7 @@ const TOOLS = {
   },
 
   db_status: {
-    description: "检查记忆库结构是否就绪：报告缺哪些表/列/索引，以及库里有没有插件不认识的外来表（外来表只报告、绝不触碰）。只读，可随意调用。",
+    description: '【表结构差集检查】只读检查数据库表结构：对比当前实际结构与期望 schema 的差异（缺失表、缺失列、缺失索引），报告 Schema 版本号。',
     args: {
       type: "object",
       properties: {
@@ -2309,7 +2312,7 @@ const TOOLS = {
   },
 
   db_provision: {
-    description: "【一键全自动】只填 MCP key 即可：自动创建记忆库与全部表/字段/索引。会先检查同名数据库——NoCodeBackend 遇到重名会静默加后缀另建一个新库（导致数据被劈开），所以这里强制先查再建：默认 on_exist=reuse 复用已有库（只补结构、不破坏数据），也可选 fail（报错让用户改名）或 auto_rename（允许新建带后缀的库）。新建库时会自动保存返回的 Secret Key；复用已有库则无法读取，需手动填写。",
+    description: '【一键全自动建库】使用 MCP 凭据自动完成数据库创建与全量表结构初始化，内置重名冲突保护（默认 reuse 复用已有库不破坏数据）。',
     args: {
       type: "object",
       properties: {
@@ -2328,7 +2331,7 @@ const TOOLS = {
   },
 
   db_init: {
-    description: "幂等初始化记忆库：自动创建缺失的表、列、唯一索引。只做 CREATE/ADD，绝不修改或删除既有列与数据，库里已有的数据和外来的表完全不受影响；重复调用是安全的（无差异时不产生任何语句）。首次装好插件、或换库后调用一次即可。",
+    description: '【幂等初始化】自动增量补齐缺失的核心表（memories/pitfalls/schema_meta）、字段与唯一索引。只增不删，库内已有数据和外来表完全不受影响。',
     args: {
       type: "object",
       properties: {
@@ -2340,7 +2343,7 @@ const TOOLS = {
   },
 
   db_reset: {
-    description: "【破坏性】清空记忆库：删除插件自己的三张表（memories / pitfalls / schema_meta），表结构与全部数据一并删除，不可恢复；库中其它表不受影响。必须二次确认——直接调用只会返回确认提示，确认时须显式传 confirm=\"RESET\"。",
+    description: "【破坏性清库】清空插件的三张核心表结构与全部数据（需传 confirm=\"RESET\" 二次确认，非管理员日常请勿调用）。",
     args: {
       type: "object",
       properties: {
@@ -2355,7 +2358,7 @@ const TOOLS = {
 
   r2_check: {
     description:
-      "检测当前配置的 Cloudflare R2 凭据真实可用性：不修改任何设置，通过上传并删除一个极小探针文件进行端到端验证。返回 VERIFIED 或 FAILED，并在失败时给出可操作的排查指引。",
+      '【R2 连通性探针】通过上传并立即清理一个极小临时探针文件，只读检测 Cloudflare R2 对象存储通道与凭据真实可用性。',
     args: {
       type: "object",
       properties: {
@@ -2371,7 +2374,7 @@ const TOOLS = {
   },
 
   storage_setup: {
-    description: "为当前数据库配置 Cloudflare R2 文件存储：创建 bucket 并配置 CORS。⚠️ 关键：NoCodeBackend 会在**实际失败时也返回 ok:true**，所以本工具**不采信它的返回值**，而是紧接着做一次真实上传探测；请以返回的 verdict 为准（VERIFIED=真的可用 / FAILED_VERIFY=NCB 说成功但实际没生效）。挂载时会把插件里保存的 R2 凭据**显式传给 NCB**——若你在 Cloudflare 轮换过密钥，必须先在设置页填好新凭据并点「保存 R2 设置」，否则 NCB 会用缓存的旧连接导致 TLS 握手被拒。失败时返回的 diagnosis 里有可操作的处理步骤。",
+    description: '【挂载 R2 存储桶】为数据库配置并挂载 Cloudflare R2 对象存储，自动创建 bucket 并配置 CORS 规则，挂载后紧接端到端真实上传探测验证。',
     args: {
       type: "object",
       properties: {
@@ -2384,7 +2387,7 @@ const TOOLS = {
   },
 
   storage_upload: {
-    description: "把文件上传到 R2 并返回公开 URL。传 content 则直接上传（文本默认按 UTF-8，或指定 encoding=base64）；不传 content 则返回 presigned 上传 URL，供大文件由客户端直传。建议上传后用 memory_save 把 URL 存成 category=file 的记忆，方便日后检索。",
+    description: '【上传文件到 R2】把文本或二进制文件上传至 R2 存储桶并获取公开访问 URL。建议上传后将所得 URL 存为 category="fact" 的记忆。',
     args: {
       type: "object",
       properties: {
@@ -2400,7 +2403,7 @@ const TOOLS = {
   },
 
   storage_list: {
-    description: "列出该数据库 R2 桶内的文件（key / 大小 / 修改时间 / 公开 URL）。走数据库 Secret Key 的 REST 接口——NoCodeBackend 的 MCP 没有提供列文件能力。",
+    description: '【列出 R2 文件】列出当前数据库 R2 存储桶内的对象列表（包括文件名、大小、修改时间与公开访问链接）。',
     args: {
       type: "object",
       properties: { limit: { type: "integer", description: "最多返回几条，默认 100" } },
@@ -2409,7 +2412,7 @@ const TOOLS = {
   },
 
   storage_delete: {
-    description: "【破坏性】删除 R2 桶内的一个文件，不可恢复。必须二次确认——直接调用只返回确认提示，确认时须显式传 confirm=\"DELETE\"。key 用 storage_list 拿到的那个 key（不是完整 URL）。",
+    description: "【删除 R2 文件】从 R2 存储桶中删除指定 key 的对象文件（不可恢复，需传 confirm=\"DELETE\" 确认）。",
     args: {
       type: "object",
       properties: {
@@ -2422,13 +2425,13 @@ const TOOLS = {
   },
 
   storage_guide: {
-    description: "说明 R2 存储的可用能力（上传 storage_upload、列举 storage_list、删除 storage_delete、公网读取）与不可用能力（平台未提供服务端生成下载用 presigned URL、无法修改 NCB 账号层凭据），以及推荐的「上传 + 存入记忆」工作流。不确定怎么用 R2 时先调这个。",
+    description: '【R2 使用能力指引】查询 R2 存储的工作机制、凭据拆分规则（MCP 建桶 vs Secret Key 上传/删除）以及常见故障排查说明。',
     args: { type: "object", properties: {} },
     run: (args, ctx) => storageGuide(ctx._cfg),
   },
 
   harvest_gateway: {
-    description: "增量扫描 Magpie 网关录制的对话落盘（GatewayConversations），使用在线大模型提炼环境事实、架构决策与故障规避经验存入记忆库。⚠️ 关键前置条件：必须在插件设置中配置在线提炼模型（extract_model）或在参数中指定 extract_model；未配置时将安全跳过提炼，不会产出记忆。可在 Magpie 设置中开启或关闭 GatewayConversations 录制。",
+    description: '【录制日志增量提炼】增量扫描 Magpie 网关录制的历史对话落盘文件，调用在线模型提炼其中的环境事实、架构决策与故障经验存入库。',
     args: {
       type: "object",
       properties: {

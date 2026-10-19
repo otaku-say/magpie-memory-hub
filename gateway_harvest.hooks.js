@@ -1035,7 +1035,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     " queue=" + (typeof readHarvestQueue === "function" ? (readHarvestQueue() || []).length : "?"));
 
   // 若传入了 client，由唯一受控的消费器统一执行落库（防并发重入与重复插入）
-  if (client) {
+  if (client && !client._isNoCredentials) {
     try {
       const drainRes = await triggerBackgroundDrain(client);
       _diag("drain", JSON.stringify(drainRes).slice(0, 200));

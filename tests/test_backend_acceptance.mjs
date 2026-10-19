@@ -45,6 +45,11 @@ try {
     console.log(JSON.stringify(res, null, 2));
     assert.strictEqual(res.ok, false, "1.2 错误 MCP key 时 ok 应为 false");
     assert.strictEqual(res.verdict, "FAILED", "1.2 verdict 应为 FAILED");
+    if (res.diagnosis?.kind === "NETWORK_ERROR") {
+      console.log("[SKIP] 网络断开，跳过依赖远端连通性的测试项");
+      await env.cleanup();
+      process.exit(77);
+    }
     assert.strictEqual(res.diagnosis?.kind, "INVALID_MCP_KEY", "1.2 diagnosis.kind 应为 INVALID_MCP_KEY");
     console.log("  ✓ 故意写错 MCP key 断言通过\n");
   }
