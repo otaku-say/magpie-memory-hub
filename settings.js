@@ -780,6 +780,7 @@
             try {
               var next = collect();
               next.memories = card.memories;
+              next.memories_version = Date.now();
               delete next._action;
               queuedOptionsSet(next, true);
             } catch (_) {}

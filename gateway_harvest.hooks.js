@@ -33,6 +33,9 @@ import {
   semanticFingerprint,
   isSemanticallySimilar,
   findSemanticDuplicate,
+  tokenize,
+  overlapCoefficient,
+  jaccardSimilarity,
 } from "./semantic_dedup.js";
 import { makeMcpClient, buildSelect, buildInsert, sqlValue } from "./mcp_client.js";
 import {
@@ -496,7 +499,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
   const endpointSetting = String(options.classify_endpoint || "auto").trim().toLowerCase();
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.classify_timeout_ms) || 5000;
+  const timeoutMs = Number(options.classify_timeout_ms) || 15000;
   const threshold = typeof options.classify_threshold === "number" ? options.classify_threshold : 0.5;
   const doFetch = options._fetch || globalThis.fetch;
 
@@ -693,7 +696,7 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.harvest_timeout_ms) || 12000;
+  const timeoutMs = Number(options.harvest_timeout_ms) || 30000;
   const doFetch = options._fetch || globalThis.fetch;
 
   // 调用预算熔断（v6.20.0 事故修复）：超限则直接跳过提炼（返回 null = 安全跳过），
@@ -1311,16 +1314,33 @@ export async function triggerBackgroundDrain(client, options = {}) {
             const pitKey = `p:${project}:${fp}`;
             const existing = await client.list("pitfalls", {
               project,
-              content_fingerprint: fp,
-              limit: 1,
+              limit: 50,
             });
-            const isDupe = Array.isArray(existing?.data) && existing.data.length > 0;
-            if (isDupe) {
-              const row = existing.data[0];
-              const next = (Number(row.recurrence) || 1) + (Number(item.data?.recurrence) || 1);
+            const existingRows = (Array.isArray(existing?.data) ? existing.data : []).filter((r) => !r.invalid_at);
+            let dup = existingRows.find((r) => r.content_fingerprint === fp);
+            if (!dup) {
+              const symptom = item.data?.symptom || "";
+              const solution = item.data?.solution || "";
+              const rootCause = item.data?.root_cause || "";
+              dup = existingRows.find((r) => {
+                const rSym = normalizeSemanticText(r.symptom);
+                const curSym = normalizeSemanticText(symptom);
+                if (rSym && curSym && (rSym === curSym || rSym.includes(curSym) || curSym.includes(rSym))) {
+                  return true;
+                }
+                const rTok = tokenize(r.symptom);
+                const sTok = tokenize(symptom);
+                if (overlapCoefficient(rTok.tokens, sTok.tokens) >= 0.5 || jaccardSimilarity(rTok.tokens, sTok.tokens) >= 0.3) {
+                  return true;
+                }
+                return isSemanticallySimilar(symptom, solution || rootCause, r.symptom, r.solution || r.root_cause);
+              });
+            }
+            if (dup) {
+              const next = (Number(dup.recurrence) || 1) + (Number(item.data?.recurrence) || 1);
               const now = new Date().toISOString().slice(0, 19).replace("T", " ");
               try {
-                await client.update("pitfalls", row.id, {
+                await client.update("pitfalls", dup.id, {
                   recurrence: next,
                   last_occurred_at: now,
                   updated_at: now,
@@ -1344,6 +1364,15 @@ export async function triggerBackgroundDrain(client, options = {}) {
               const msg = String(createErr?.message || createErr || "");
               if (/duplicate|ER_DUP_ENTRY|already exists|1062/i.test(msg)) {
                 // 已存在则视为成功去重消费
+                try {
+                  const dupRows = await client.list("pitfalls", { project, content_fingerprint: fp, limit: 1 });
+                  const hit = Array.isArray(dupRows?.data) ? dupRows.data.find((r) => !r.invalid_at) : null;
+                  if (hit) {
+                    const next = (Number(hit.recurrence) || 1) + (Number(item.data?.recurrence) || 1);
+                    const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+                    await client.update("pitfalls", hit.id, { recurrence: next, last_occurred_at: now, updated_at: now });
+                  }
+                } catch (_) {}
               } else {
                 // 非 1062 报错：累加 retries
                 const currentRetries = (Number(item.retries) || 0) + 1;
