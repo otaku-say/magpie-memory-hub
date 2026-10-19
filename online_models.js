@@ -93,6 +93,32 @@ export const QUERY_REWRITE_SYSTEM_PROMPT = `你是一个专业的长期记忆检
 4. 输出 2~5 个最重要的关键词，用空格分隔。
 5. 严禁输出任何解释、标点符号或前缀说明，仅输出空格分隔的关键词文本。`;
 
+/**
+ * 深度清洗查询词：剥除可能附带在 query 内部的注入脚手架、记忆上下文或派发模板
+ * 防止 3000+ 字符的历史上下文被重新送入改写/重排模型，杜绝 499 超时
+ */
+export function cleanQuery(query) {
+  if (!query || typeof query !== "string") return "";
+  let s = String(query).trim();
+  // 剥除自身注入的持久记忆上下文
+  s = s.replace(/\[Persistent Memory Context\][\s\S]*?(?=\n\n|\n\[user\]|\n用户查询|$)/gi, "");
+  // 剥除自身注入的引导
+  s = s.replace(/\[Memory Agent Guide[\s\S]*?(?=\n\n|\n\[user\]|\n用户查询|$)/gi, "");
+  s = s.replace(/\[Memory Context\][\s\S]*?(?=\n\n|\n\[user\]|\n用户查询|$)/gi, "");
+  // 剥离子代理委托脚手架
+  s = s.replace(/---\s*Context from the delegating agent\s*---[\s\S]*$/gi, "");
+  // 剥除常见用户前缀提示
+  s = s.replace(/^\[user\]:\s*/i, "");
+  s = s.replace(/^用户查询[：:]\s*/i, "");
+  // 提取如果末尾带有「用户查询：xxx」的实质内容
+  const m = s.match(/(?:^|\n)用户查询[：:]\s*([^\n]+)/i);
+  if (m && m[1] && m[1].trim()) {
+    s = m[1].trim();
+  }
+  return s.trim();
+}
+
+
 import {
   modelBudgetCheck,
   modelBudgetRecord,
@@ -154,7 +180,7 @@ export async function explainUnknownErrorWithModel({
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.diagnose_timeout_ms) || 8000;
+  const timeoutMs = Number(options.diagnose_timeout_ms) || 15000;
   const doFetch = options._fetch || globalThis.fetch;
 
   // 调用预算熔断（v6.20.0 事故修复）：错误诊断属于后台辅助调用，超限直接跳过。
@@ -274,7 +300,7 @@ export async function rewriteSearchQuery({
   query,
   options = {},
 }) {
-  const rawQuery = String(query || "").trim();
+  const rawQuery = cleanQuery(query);
   if (!rawQuery) return null;
 
   // 开关检查：允许用户在设置中关闭改写
@@ -290,7 +316,7 @@ export async function rewriteSearchQuery({
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.search_rewrite_timeout_ms) || 3500;
+  const timeoutMs = Number(options.search_rewrite_timeout_ms) || 12000;
   const doFetch = options._fetch || globalThis.fetch;
 
   // 调用预算熔断（v6.20.0 事故修复）：搜索改写超限直接跳过，调用方回落纯词面检索。
@@ -400,7 +426,7 @@ export async function auditMemoriesWithModel({
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.audit_timeout_ms) || 12000;
+  const timeoutMs = Number(options.audit_timeout_ms) || 25000;
   const doFetch = options._fetch || globalThis.fetch;
 
   if (!modelBudgetCheck(options).allowed) return null;
@@ -505,7 +531,7 @@ export async function rerankSearchResultsWithModel({
   options = {},
   maxTop = 5,
 }) {
-  const rawQuery = String(query || "").trim();
+  const rawQuery = cleanQuery(query);
   if (!rawQuery || !Array.isArray(candidates) || candidates.length === 0) {
     return null;
   }
@@ -523,7 +549,7 @@ export async function rerankSearchResultsWithModel({
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.rerank_timeout_ms) || 4500;
+  const timeoutMs = Number(options.rerank_timeout_ms) || 15000;
   const doFetch = options._fetch || globalThis.fetch;
 
   // 调用预算熔断守卫
