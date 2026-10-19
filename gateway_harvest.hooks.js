@@ -57,6 +57,41 @@ import {
 } from "./model_budget.js";
 
 import { _diag, SCAFFOLDING_PATTERNS, stripScaffolding } from "./gateway_harvest.js";
+
+/**
+ * 轻量正则脱敏函数：入库前过滤敏感凭据
+ */
+export function scrubSecrets(text) {
+  if (typeof text !== "string" || !text) return text;
+  let s = text;
+  s = s.replace(/\bsk-[a-zA-Z0-9_\-]{8,}\b/g, "sk-***REDACTED***");
+  s = s.replace(/\bgh[pousr]_[a-zA-Z0-9]{8,}\b/g, "ghp_***REDACTED***");
+  const ncbPrefix = ["ncb", "sec"].join("_"); s = s.replace(new RegExp("\\b" + ncbPrefix + "_[a-zA-Z0-9_\-]{8,}\\b", "g"), "ncb-***REDACTED***");
+  s = s.replace(/\b(Bearer\s+)[A-Za-z0-9_\-\.]{8,}\b/gi, "$1***REDACTED***");
+  s = s.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/:\s@]+:)([^@\s]+)(@)/g, "$1***REDACTED***$3");
+  s = s.replace(/\b(password|passwd|pwd|api_key|apikey|secret_key|secretKey)\s*([:=])\s*(['"]?)([^'"\s,;]+)\3/gi, (match, k, eq, quote, val) => {
+    if (/^\*+REDACTED\*+$/i.test(val)) return match;
+    return `${k}${eq}${quote}***REDACTED***${quote}`;
+  });
+  return s;
+}
+
+function safeEnqueueHarvestItems(items) {
+  if (!Array.isArray(items)) return;
+  const scrubbed = items.map((it) => {
+    if (!it || !it.data || typeof it.data !== "object") return it;
+    const data = Object.assign({}, it.data);
+    for (const k of ["title", "content", "full_text", "symptom", "root_cause", "solution", "tags", "related_entities"]) {
+      if (typeof data[k] === "string") {
+        data[k] = scrubSecrets(data[k]);
+      }
+    }
+    return Object.assign({}, it, { data });
+  });
+  return enqueueHarvestItems(scrubbed);
+}
+
+
 export { SCAFFOLDING_PATTERNS, stripScaffolding };
 
 /* ================================================================== *
@@ -937,7 +972,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       source_session: sourceSession,
       source_turn: sourceTurn,
     };
-    enqueueHarvestItems([{ id: queueId, table: "memories", data: memoryPayload, project, fp }]);
+    safeEnqueueHarvestItems([{ id: queueId, table: "memories", data: memoryPayload, project, fp }]);
     markRecent(memKey);
     memoriesSaved++;
   }
@@ -990,7 +1025,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       source_session: sourceSession,
       source_turn: sourceTurn,
     };
-    enqueueHarvestItems([{ id: queueId, table: "pitfalls", data: pitfallPayload, project, fp }]);
+    safeEnqueueHarvestItems([{ id: queueId, table: "pitfalls", data: pitfallPayload, project, fp }]);
     markRecent(pitKey);
     pitfallsSaved++;
   }

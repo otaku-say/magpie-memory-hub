@@ -453,3 +453,212 @@ true !== false
 - **文档文件**: `checkpoint_adversarial_v629.md`
 - **Git 目标分支**: `origin qa/adversarial-v629-gate`
 - **门禁验收令**: 开发 Agent 1 与前端 Agent 2 完成修复后，必须在沙箱内运行 `node tests/adversarial_v629_gate.mjs` 达成 6/6 靶场全绿（GREEN）且 exit code 0，方准发起主线合并！
+
+
+---
+
+## 十五、P0/P1 缺陷修复、测试用例清理与读操作防写放大整改报告
+
+# P0/P1 缺陷修复、测试用例清理与读操作防写放大整改报告 (NOTES_v6291_bugfixes.md)
+
+## 1. 任务背景与执行环境基线
+- **报告生成时间**: 2026-10-19
+- **执行角色**: Agent 1 (缺陷修复、测试清理与防写放大整改)
+- **代码分支**: `feat/v6291-bugfixes`
+- **沙箱环境**:
+  - 沙箱 ID: `1abf0407baf441fa86804455390b21c8`
+  - 沙箱工作目录: `/workspace/magpie-memory-hub`
+  - 运行时环境: Node.js `v24.18.1` (Linux aarch64 musl)
+
+---
+
+## 2. 6 大核心整改清单执行结果 (100% 完成)
+
+### 2.1 P0-1: page_actions.js 与 settings.js 快照同步与卡片回传规范化
+- **page_actions.js**:
+  - `formatCardStatus` 在快速返回与常规构建两条返回路径上均严格拷贝 `memories` 字段：`if (Array.isArray(res.memories)) card.memories = res.memories;`，防止快照数组在格式化时丢失。
+  - 增加 `key === "inject"` 分支：`title = res.title || "记忆快照已就绪"; lines = Array.isArray(res.lines) ? res.lines.slice() : ["活跃记忆快照已提取完成"];`。
+- **settings.js**:
+  - `cardOfOp("sync_snapshot")` 稳定映射至 `"inject"`，状态容器绑定 `#inject_action_status`。
+  - 轮询拿到更新且成功的结果时，若 `card.op === "sync_snapshot"`（或 `opHint === "sync_snapshot"`）且包含 `card.memories` 数组，安全同步至 `next.memories` 并调用 `queuedOptionsSet(next, true)` 立即回盘，且安全清理 `_action` 标记。
+
+### 2.2 P0-2: 测试清理与遗留探针清理
+- **物理删除失效用例**:
+  - 使用 `git rm` 彻底删除 `tests/test_compress_template_dedup.mjs` 与 `tests/verify_sub2.mjs`，根除缺少 `compress.js` 导致的 `ERR_MODULE_NOT_FOUND` 报错。
+- **tests/test_meta.mjs**:
+  - 活跃测试文件总数断言从 44 个调整为 42 个（42/42 PASS）。
+- **memory.middleware.js:563**:
+  - 彻底删除存活探针 `__MEMHUB_PROBE__` 中 `compress: opts.compress === true` 遗留探针属性。
+  - 同步更新 `tests/test_hardening.mjs`，断言探针返回数据中 `data.compress === undefined`。
+- **settings.html:18**:
+  - 移除副标题中的“上下文压缩”字样，订正为“内置踩坑库、R2 存储。”。
+
+### 2.3 P1-3: tools.js 客户端构建归一化与防 null 崩溃
+- **tools.js: makeClient(cfg, signal)**:
+  - 归一化输入参数：`const o = (cfg && cfg.instance && typeof cfg.secret === "string" && typeof cfg.mcpKey === "string") ? cfg : readOptions(cfg);`。
+  - `makeRestClient` 中提取库名与密钥支持别名回退：`instance = cfg.instance || cfg.ncb_instance`，`secret = cfg.secret || cfg.ncb_secret`。
+  - **防 null 崩溃 Stub 客户端**:
+    当无任何可用凭据（无 MCP Key 且无 Secret Key）时，构建并返回一个包含 `list`, `create`, `update`, `remove`, `raw` 等方法的 Proxy Stub 客户端，调用任意方法时抛出明确的人话异常：
+    `"NO_CREDENTIALS: 未配置有效的 NoCodeBackend 凭据"`，
+    彻底消除 `TypeError: Cannot read properties of null (reading 'list')`。
+
+### 2.4 P1-4: local_state.js 与 gateway_harvest.hooks.js 组件名软匹配
+- **local_state.js:595**:
+  - 移除硬编码的 `if (curComp && candComp && curComp !== candComp) continue;` 阻断拦截。
+  - 改为将 component 作为前缀拼入 symptom 传给 `isSemanticallySimilar`:
+    `isSemanticallySimilar(`${curComp ? curComp + ' ' : ''}${curSym}`, curSol, `${candComp ? candComp + ' ' : ''}${candSym}`, candSol)`，实现组件名称的语义级容错软匹配。
+- **gateway_harvest.hooks.js:959**:
+  - 在调用 `recordPendingEvidence(pitKey, ...)` 时，传入 payload 显式补齐归一化后的 `component` 与 `symptom`，确保 pending 判定拥有完整的技术组件语义。
+
+### 2.5 P1-5: tools.js 读操作绝不篡改 updated_at 与防写放大
+- **tools.js: trackMemoryRetrievals**:
+  - 只更新 `{ retrieval_count: (Number(r.retrieval_count) || 0) + 1, last_used_at: now }`，彻底删除 `updated_at: now` 覆写，坚决保障读操作不改变记忆修改时间戳。
+  - 限制批量写入条数最多取前 5 条 (`rows.filter(r => r && r.id).slice(0, 5)`)，消除全量检索时的批量写放大。
+- **freshness(row)**:
+  - 优先读取 `row.last_used_at || row.updated_at || row.created_at`，保持时间衰减权重计算精确。
+- **tests/test_schema_defaults.mjs**:
+  - 对检索频次追踪 `trackMemoryRetrievals` 显式放行，对齐读操作不篡改 `updated_at` 的铁律。
+
+### 2.6 P2-6: 仓库卫生与网络容错
+- **DEVNOTES.md & checkpoint_adversarial_v629.md**:
+  - 将根目录 `checkpoint_adversarial_v629.md` 完整归档入 `DEVNOTES.md` 第十五章，并通过 `git rm` 从仓库根目录物理移除。
+- **settings.html 文案订正**:
+  - 第 530 行、552 行、585 行文案订正为基于/采用在线模型抽取（消除已废弃的“本地规则引擎/零云端模型成本”遗留文案）。
+- **package.json:45**:
+  - 将 `ccr_cards` 默认值设为 `false`，与前端设置页及测试规范完全对齐。
+- **网络容错优雅退出**:
+  - `tests/test_backend_acceptance.mjs` 与 `tests/test_mcp_only.mjs` 增加网络错误与断网异常捕获，在检测到 `NETWORK_ERROR` 或连接断开时安全调用 `env.cleanup()` 并执行 `process.exit(77)` 优雅跳过。
+
+---
+
+## 3. 测试验证与门禁全绿实录
+
+1. **测试元检查规范 (`node tests/test_meta.mjs`)**:
+   - 扫描全部 42 个测试文件，通过所有反证门、写库隔离、强制清理与非 0 退出断言。
+   - 结果：**42/42 PASS**。
+
+2. **红队独立质检门禁 (`node tests/adversarial_v629_gate.mjs`)**:
+   - 靶子 1 (P0-1 字段投影漏洞): PASS (GREEN)
+   - 靶子 2 (P0-2 游标跨表独立管理): PASS (GREEN)
+   - 靶子 3 (P0-3 语义比对与晋升): PASS (GREEN)
+   - 靶子 4 (P1-5 并发互斥锁): PASS (GREEN)
+   - 靶子 5 (P1-8 架构准则无条件置顶): PASS (GREEN)
+   - 靶子 6 (P0-4 快照异常安全 Fail-Closed): PASS (GREEN)
+   - 结果：**6/6 GREEN，0 反证漏洞**。
+
+3. **设置页全量行为验收 (`node tests/settings_page_test.mjs && node tests/verify_settings.mjs`)**:
+   - 静态检查、真实交互、信标保留、单卡片保存、状态回传等全部通过，残余为 0。
+
+4. **全量自动化测试扫描 (42 套件)**:
+   - 结果：**38 PASS，4 SKIP (77, 远端真实网络测试项正常优雅跳过)，0 FAIL**。
+
+
+---
+
+## 十六、主动查存记忆、一站式检索、安全脱敏与超时兜底报告
+
+# 记忆中枢主动查存、一站式检索、安全脱敏与超时兜底整改检查点报告
+
+## 1. 任务背景与执行环境
+- **任务代号**: feat/v6291-proactive-memory-ux
+- **执行角色**: Agent 2 (主动记忆与检索增强)
+- **沙箱 ID**: `7561fceb4f414daf8565c56d35f12227`
+- **沙箱工作路径**: `/workspace/magpie-memory-hub`
+- **当前分支**: `feat/v6291-proactive-memory-ux`
+- **运行时环境**: Node.js `v24.18.1` (Linux aarch64)
+
+---
+
+## 2. 核心整改清单与落地实现
+
+### 1) 动态嗅探真实工具名 + 意图感知引导 (`memory.middleware.js`)
+- **动态工具名嗅探 (`sniffToolNames`)**:
+  - 从 `body.tools` / `body.functions` 动态检测符合 `/memory_save$/`, `/pitfall_save$/`, `/memory_context$/`, `/memory_search$/`, `/pitfall_search$/` 的真实工具名，全面兼容客户端前缀（如 `mcp__magpie__...`、`custom_agent_...`）或直接工具名；
+  - 嗅探不到时安全回退至标准插件注册名（`magpie-memory-hub_...`）。
+- **意图感知引导注入 (`[Memory Agent Guide]`)**:
+  - **排障意图** (`/Error:|Exception|Traceback|panic:|ENOENT|ECONN|报错|失败|不生效|踩坑|异常|bug/i`):
+    - 注入 `[Memory Agent Guide —— 排障与避坑]`；
+    - 强化【先查避坑】（引导主动调用 `pitfall_search` 或 `memory_context`）+【修复必存 pitfall_save】（问题解决后必存踩坑）。
+  - **规范意图** (`/记住|以后都|不要再|严禁|禁止|必须用|统一用|默认配置|架构原则|铁律/`):
+    - 注入 `[Memory Agent Guide —— 规范与准则沉淀]`；
+    - 强化【立即调用 memory_save(category="principle")】持久化规范，并提供一站式召回入口。
+  - **首轮与严格模式** (`turnNo <= 1` 或 `extract_strength === "strict"`):
+    - 注入完整 `[Memory Agent Guide —— 检索与沉淀]`，包含【优先检索】+【及时沉淀】。
+  - **普通软模式**:
+    - 注入常规轻量指引，并能被 `cleanText` 彻底清洗，杜绝跨轮次污染。
+
+### 2) 一站式召回入口升级 (`tools.js` - `memory_context`)
+- **避坑经验融入**:
+  - 检索 `pitfalls` 表，将匹配到的 Top 3 踩坑记录以 `- [pitfall/组件] 症状 → 解法` 格式拼入 `[Persistent Memory Context]`；
+- **跨项目准则穿透合并**:
+  - 当指定了非 "global" 的 project 时，自动合并当前 project 与 "global" 下的 principle 准则，优先排列当前项目准则，全局准则兜底，彻底杜绝全局规范在子项目中丢失；
+- **入口描述更新**:
+  - `TOOLS.memory_context.description` 更新为推荐的首选一站式检索入口描述。
+
+### 3) 写入门槛放宽与 `_agent_hint` 闭环引导 (`tools.js`)
+- **参数放宽**:
+  - `TOOLS.pitfall_save.args.required` 放宽为 `["symptom", "solution"]`；
+  - `pitfallSave` 内部对缺失的 `component` 默认设为 `"general"`，缺失的 `root_cause` 默认设为 `symptom`，极大降低 Agent 报错时的记录成本；
+- **Schema 瘦身**:
+  - 从 `TOOLS.memory_save.args.properties` 中隐藏内部专属参数（`origin`, `source_session`, `source_turn`, `content_fingerprint`），对外 Schema 保持轻量；
+- **闭环引导 (`_agent_hint`)**:
+  - 在 `memorySearch`、`memoryContext`、`pitfallSearch` 的 JSON 响应中统一追加 `_agent_hint: "若本次任务产出了新结论、配置变更或排障解法，请在结束前调用 memory_save 或 pitfall_save 沉淀。"`。
+
+### 4) 跨项目全局穿透检索支持 (`tools.js`)
+- 在 `memorySearch`、`memoryContext`、`pitfallSearch` 中，当 `args.project` 非 "global" 时，支持检索 `project IN (args.project, 'global')`；
+- 排序与呈现严格遵守「当前项目专属优先，全局准则/避坑兜底」，既不遗漏全局沉淀，又优先匹配当前项目专属上下文。
+
+### 5) 入库前敏感凭据自动脱敏 (`tools.js` & `gateway_harvest.hooks.js`)
+- 实现轻量正则脱敏函数 `scrubSecrets(text)`：
+  - 自动过滤 `sk-...` 为 `sk-***REDACTED***`；
+  - 自动过滤 `ghp_...`（及 gho/ghu/ghs/ghr）为 `ghp_***REDACTED***`；
+  - 自动过滤 `Bearer ...` 为 `Bearer ***REDACTED***`；
+  - 自动过滤 `scheme://user:password@host` 数据库连接串密码为 `***REDACTED***`；
+  - 自动过滤 key-value 中的 `password / api_key` 等敏感字段；
+- 在 `saveMemory`、`pitfallSave` 以及 `enqueueHarvestItems` 入口处执行强制脱敏，确保敏感凭据绝不落库、绝不上报。
+
+### 6) 默认网络超时兜底 (`mcp_client.js` & `ncb_mcp.js` & `tools.js`)
+- `ncb_mcp.js` 的 `DEFAULT_TIMEOUT` 调整为 `15000` (15s)；
+- `ncb_mcp.js` 与 `tools.js` 的 `fetch` 调用均使用 `signal: effectiveSignal || AbortSignal.timeout(15000)`，彻底杜绝挂死。
+
+---
+
+## 3. 测试与验证实录
+
+### 3.1 专项单测 (`tests/test_proactive_memory_ux.mjs`)
+编写并执行了 6 大维度全覆盖的单元测试，包含：
+1. `memory.middleware.js` 动态前缀工具名嗅探（`mcp__magpie__...`、`custom_agent_...`）；
+2. 排障意图感知、规范原则意图感知、首轮完整引导注入断言；
+3. `TOOLS.memory_context.description` 描述校验；
+4. `TOOLS.pitfall_save` 放宽参数入库与自动兜底校验；
+5. `_agent_hint` 在三大检索接口中的闭环返回校验；
+6. `memory_context` 一站式召回（Top 3 避坑经验 + 全局与项目准则合并 + 事实记忆）；
+7. `memory_search` 跨项目全局穿透与专属优先排序校验；
+8. `scrubSecrets` 正则脱敏在 `memory_save` 与 `pitfall_save` 的入库脱敏校验；
+9. `NcbMcp` 15000ms 默认超时与 AbortError 干净中断校验；
+10. 测试环境 cleanup 与残余为 0 校验。
+
+**执行结果**: 全部通过（6 大项全部 PASS）。
+
+### 3.2 规范与门禁验证
+1. **导出面合规 (`tests/test_exports.mjs`)**:
+   - `tools.js` 与 `memory.middleware.js` 导出严格符合白名单，无多余未授权导出，100% PASS。
+2. **静态工具名断言 (`tests/test_tool_names_static.mjs`)**:
+   - 所有在代码中出现的工具标识符均为已注册工具或合法白名单符号，100% PASS。
+3. **架构同步与模式校验 (`tests/check_schema_sync.mjs`, `tests/test_schema.mjs`)**:
+   - 表结构声明与代码写入字段严格对齐，100% PASS。
+4. **中断与退出安全 (`tests/test_abort.mjs`)**:
+   - `ctx.abort` 中断与超时拦截正常，100% PASS。
+5. **网关异步采集与流式保真 (`tests/test_gateway_harvest_hooks.mjs`)**:
+   - 11 项全功能与逐字节保真测试，100% PASS。
+6. **红队靶场门禁 (`tests/adversarial_v629_gate.mjs`)**:
+   - 6 大核心缺陷反证靶场全部 GREEN 放行。
+7. **测试元规范审查 (`tests/test_meta.mjs`)**:
+   - 全库 45 个测试文件静态合规审查，无 DB 泄露、无假过，100% PASS。
+
+---
+
+## 4. 安全合规保证
+- 代码库及测试用例中严禁硬编码任何真实密钥或敏感凭据；
+- 所有敏感凭据在入库前均经过 `scrubSecrets` 正则脱敏；
+- 测试用例使用内存 Mock 桩与隔离命名空间，测试结束后残留确认为 0。

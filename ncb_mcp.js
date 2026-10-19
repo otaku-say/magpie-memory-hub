@@ -19,7 +19,7 @@
 export const MCP_ENDPOINT = "https://app.nocodebackend.com/api/mcp/http";
 
 /** 默认超时（毫秒）。DDL 可能较慢，给足余量。 */
-const DEFAULT_TIMEOUT = 30000;
+const DEFAULT_TIMEOUT = 15000;
 
 /** 把可能为 SSE 的响应体解析成 JSON-RPC 结果。 */
 function parseRpcBody(text) {
@@ -116,14 +116,36 @@ NcbMcp.prototype.rpc = async function (method, params, isNotification, callOpts)
   };
   if (this._sessionId) headers["Mcp-Session-Id"] = this._sessionId;
 
-  var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  var effectiveSignal = externalSignal || null;
+  var fetchSignal = null;
+  var ctrl = null;
   var timer = null;
   var abortListener = null;
-  if (ctrl) {
-    timer = setTimeout(function () { ctrl.abort(); }, this.timeout);
-    if (externalSignal) {
-      abortListener = function () { ctrl.abort(); };
-      externalSignal.addEventListener("abort", abortListener, { once: true });
+
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    var timeoutSig = AbortSignal.timeout(this.timeout || 15000);
+    if (effectiveSignal) {
+      if (typeof AbortSignal.any === "function") {
+        fetchSignal = AbortSignal.any([effectiveSignal, timeoutSig]);
+      } else {
+        ctrl = new AbortController();
+        abortListener = function () { ctrl.abort(); };
+        effectiveSignal.addEventListener("abort", abortListener, { once: true });
+        timeoutSig.addEventListener("abort", abortListener, { once: true });
+        fetchSignal = ctrl.signal;
+      }
+    } else {
+      fetchSignal = timeoutSig;
+    }
+  } else {
+    ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    if (ctrl) {
+      timer = setTimeout(function () { ctrl.abort(); }, this.timeout || 15000);
+      if (effectiveSignal) {
+        abortListener = function () { ctrl.abort(); };
+        effectiveSignal.addEventListener("abort", abortListener, { once: true });
+      }
+      fetchSignal = ctrl.signal;
     }
   }
 
@@ -133,7 +155,7 @@ NcbMcp.prototype.rpc = async function (method, params, isNotification, callOpts)
       method: "POST",
       headers: headers,
       body: JSON.stringify(body),
-      signal: ctrl ? ctrl.signal : undefined,
+      signal: fetchSignal || effectiveSignal || (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(15000) : undefined),
     });
   } catch (e) {
     if (timer) clearTimeout(timer);
