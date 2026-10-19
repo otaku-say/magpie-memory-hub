@@ -225,7 +225,7 @@ export function isSemanticallySimilar(title1, content1, title2, content2) {
 
   // 5. 判定门限：
   // 5.1 标题高度相似（同义词、语序倒装、修饰变体）且内容具备相关性
-  const titleVeryClose = (tOverlap >= 0.75 && tJaccard >= 0.45) || tLev >= 0.7;
+  const titleVeryClose = (tOverlap >= 0.75 && tJaccard >= 0.45) || tLev >= 0.68;
   if (titleVeryClose && contentRelevant) return true;
 
   // 5.2 标题与内容双向高重合

@@ -1433,6 +1433,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
       success: true,
       data_changed: false,
       skipped: true,
+      reason: "audit_in_progress",
       status: "跳过", // db-col-ok: 去重任务运行状态
       note: "去重任务正在执行中，已跳过并发重入请求",
     });
