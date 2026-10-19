@@ -2,17 +2,15 @@
 
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有 agent 提供记忆工具。
 
-## 两种运行模式
+## 记忆工作模式与运行架构
 
-| | 零外部模型（推荐） | 外部提炼模型 |
+| 环节 | 运行时机制 | 协作方式与说明 |
 |---|---|---|
-| 事实提炼 | **内联抽取**：让正在跑的那个模型自己在回复末尾产出 `<memory>` 块 | 额外调一次提炼模型 |
-| 仲裁 | **规则**（置信度 + 信息量 + 相似度） | clef 模型 |
-| 额外调用 | **0** | 每轮 1~2 次 |
-| 额外成本 | **0** | 按模型计费 |
-| 配置 | `inline_extract` 开 + `extract_model` 留空 + `classify_endpoint=auto` | 填模型 ID |
-
-零外部模型模式的机制来自 [Headroom](https://github.com/headroomlabs-ai/headroom)：**提炼不需要另起一个模型，让本来就要跑的那个顺势完成**。中间件在请求里注入一条提炼指令，回复末尾的 `<memory>` 块被解析入库、并从用户可见输出里剥掉。
+| **引导与沉淀** | **注入 `[Memory Agent Guide]` 指引** | 中间件在每轮用户消息末尾轻量注入指引，引导当前大模型在产生偏好/决策/事实/踩坑解法时主动调用 MCP 记忆工具（`memory_save` / `pitfall_save`）；无工具调用能力时跳过保存，绝不在回复里输出 `<memory>` 标签块 |
+| **实时检索** | **MCP 实时检索直连** | 遇项目背景、历史规范或报错时，模型主动调用 `memory_context`、`memory_search` 或 `pitfall_search` 检索记忆与避坑经验 |
+| **异步提炼** | **网关对话录制扫描 (`harvest_gateway`)** | 在线大模型非阻塞后台异步增量提炼历史录制对话，自动清洗去噪并入库 |
+| **体检与去重** | **全自动去重与审计 (`memory_audit`)** | 语义级去重合并（支持定时调度 daily/weekly/monthly 与指定时间点快照还原） |
+| **离线兜底** | **快照缓存 (`options.memories`)** | 设置页受控手动刷新 Top 活跃记忆快照，供网关在离线无网络时兜底准则置顶 |
 
 ## 架构
 
@@ -21,7 +19,7 @@ Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记�
    Agent ──请求──▶  │ moejs 中间件（memory.middleware.js）                │
                     │   ① 静态准则置顶与快照检索（零 I/O 兜底）           │
                     │   ② 尾消息双向引导（主动检索+及时沉淀，保 KV-Cache） │
-                    │   ③ 剥离模型回复里的 <memory> 块（改善前端呈现）   │
+                    │   ③ 注入 [Memory Agent Guide] 引导主动工具调用   │
                     └───────────────────────┬───────────────────────────┘
                                             │ 本地录制 / 异步网关钩子
                                             ▼
@@ -31,7 +29,7 @@ Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记�
                     │ ③ 写入 NoCodeBackend（memories / pitfalls）         │
                     └───────────────────────────────────────────────────┘
 
-   Agent ◄──MCP── /mcp/magpie/tools （Magpie 内置，聚合本插件 20 个工具，实现全量实时检索）
+   Agent ◄──MCP── /mcp/magpie/tools （Magpie 内置，聚合本插件 21 个工具，实现全量实时检索）
 ```
 
 > **读链路闭环设计说明**：
@@ -40,8 +38,8 @@ Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记�
 > - **辅助读链路（快照）**：在设置页点击「刷新记忆快照」，由前端受控调用宿主桥接 API 将最新 Top 活跃记忆与准则同步至 `options.memories` 供中间件离线兜底注入。
 
 **自动记忆机制说明**：
-- **用户体验保全**：中间件负责在流式 `onEvent` 与非流式 `onResponse` 中无损剥离 `<memory>` 标签，确保模型可能产出的提炼标记不泄露至终端呈现。
-- **自动采集入库**：真实部署环境下，自动记忆通过 **网关对话录制增量扫描（`harvest_gateway`）** 与 **异步网关请求钩子（`gateway_harvest.hooks.js`）** 运行在具备完整网络与 I/O 能力的 Bun 宿主中，完全非阻塞，实现零外部模型开销的经验与踩坑提炼入库。
+- **用户体验与指引规范**：中间件在每轮用户消息尾部注入 `[Memory Agent Guide]` 轻量指引，引导当前大模型主动调用 MCP 记忆工具；模型无工具调用能力时不输出任何多余标记。同时在流式 `onEvent` 与非流式 `onResponse` 中保留无损剥离兜底，确保历史格式标签不泄露至终端呈现。
+- **全自动采集与去重闭环**：真实部署环境下，自动记忆通过 **网关对话录制增量扫描（`harvest_gateway`）**、**异步网关请求钩子（`gateway_harvest.hooks.js`）** 与 **全自动去重与审计（`memory_audit`）** 运行在具备完整网络与 I/O 能力的 Bun 宿主中，完全非阻塞，实现高价值经验与踩坑沉淀。
 
 ## 安装
 
@@ -137,7 +135,7 @@ CREATE UNIQUE INDEX idx_schema_meta_k ON schema_meta(k);
 
 > **为什么唯一索引是必须的**：NoCodeBackend 的读接口有约 2 秒的写后可见延迟，只靠「先读后写」判重，会漏掉紧邻或并发的重复写入（实测出现过指纹相同却都 active 的两行）。插件在收到 `Duplicate entry` 时会按 NOOP 处理。
 
-## MCP 工具（20 个）
+## MCP 工具（21 个）
 
 | 工具 | 说明 |
 |------|------|
@@ -161,6 +159,7 @@ CREATE UNIQUE INDEX idx_schema_meta_k ON schema_meta(k);
 | `storage_delete` | 删除 R2 bucket 中的文件（需 confirm: "DELETE"） |
 | `storage_guide` | 说明 R2 存储的可用能力与推荐工作流 |
 | `harvest_gateway` | 增量扫描 Magpie 网关录制的对话落盘（GatewayConversations），使用在线模型提炼经验存入记忆库（需配置 extract_model） |
+| `memory_audit` | 全自动去重与撤销：分批全自动语义查重合并（只软失效写 invalid_at，绝不物理删），支持定时去重与时间点回滚 |
 
 ## 对话录制扫描与记忆提炼管线
 
@@ -286,16 +285,11 @@ sslv3 alert handshake failure (SSL alert number 40)
 
 ### 网关中间件（moejs，纯同步、每请求零 O(n)）
 - **记忆注入**：倒排索引 + RRF 融合（词法/新鲜度/热度/作用域四路排名），艾宾浩斯双时态衰减，行为准则无条件置顶
-- **请求压缩**：
-  - JSON 结构化压缩（照抄 Headroom SmartCrusher 阈值：`min_items_to_analyze=5`、`max_items_after_crush=15`、`variance_threshold=2.0`、`first_fraction=0.3`、`last_fraction=0.15`）
-  - **反常保命**：error 项 / 数值异常 / 长度异常 / 变化点 **加法式保留，超出配额也不丢**；输出前有 `audit_safe` 审计，少任何一项就整体放弃压缩
-  - 日志压缩（致命行优先保命）、散文语义压缩、**Git status / diff 无损直通**
-  - **跨轮逐字去重**：agent 反复重显同一文件时折成指针，遵守「前缀单调性」与「keep-earliest」两条不变量
-  - **绝不压缩**：用户自己写的散文（`skip_user_messages`）、system prompt（KV-Cache 热区）、最近一轮
-- **流式剥离**：回复里的 `<memory>` 块在 `onEvent` 上逐块剥离；超 20KB 未闭合则原样吐出（fail-open）
+- **保 KV-Cache 不变性**：坚决遵守保 KV-Cache 铁律，历史前缀消息与 system prompt 逐字节未改，保证上游推理缓存命中率，降低费用与延迟
+- **流式剥离与兜底**：流式回复中 `<memory>` 块在 `onEvent` 上逐块剥离；超过 20KB 未闭合则原样吐出（fail-open），绝不吞用户正常内容
 
-### 工具层（Bun 宿主，20 个 MCP 工具）
-- 记忆：`memory_save` / `memory_search` / `memory_list` / `memory_context` / `memory_get` / `memory_forget`
+### 工具层（Bun 宿主，21 个 MCP 工具）
+- 记忆：`memory_save` / `memory_search` / `memory_list` / `memory_context` / `memory_get` / `memory_forget` / `memory_audit`
 - 踩坑：`pitfall_save` / `pitfall_search`
 - 数据库：`ncb_check` / `db_status`（只读，零凭据也能用）/ **`db_provision`（一键全自动）** / `db_init`（幂等补齐）/ `db_reset`（需 `confirm:"RESET"`）
 - R2：`r2_check` / `storage_setup` / `storage_upload` / `storage_list` / `storage_delete`（需 `confirm:"DELETE"`）/ `storage_guide`
@@ -310,7 +304,7 @@ sslv3 alert handshake failure (SSL alert number 40)
     - 虚构模型揭露：BAAI 官方根本不存在所谓的 `BAAI/bge-reranker-small`，真实可用的 `bge-reranker-base` 达 266MB，且底层 XLM-RoBERTa 架构与 WordPiece 错配导致切词乱码；
   - 该方案在配置中**默认关闭 (`cross_encoder_enabled: false`)，且强烈不建议开启**，相关代码仅作为实验记录留存，绝非可用功能。
 - **用户决策：彻底移除本地小模型，改用在线模型**：
-  - **清理本地死代码与虚假设施**：彻底移除 `model_check.js` 与 `compress_text.py` 以及 `model_check` / `model_download` 两个 MCP 工具（工具总数 22 → 20）。生产环境运行在 Distroless 容器中无 Python 解释器，本地压缩链从未真正执行过推理；原 `model_check` 仅比对文件大小无真实推理逻辑，纯属包袱；
+  - **清理本地死代码与虚假设施**：彻底移除 `model_check.js` 与 `compress_text.py` 以及 `model_check` / `model_download` 两个 MCP 工具，补齐 `memory_audit` 工具（工具总数 21 个）。生产环境运行在 Distroless 容器中无 Python 解释器，本地压缩链从未真正执行过推理；原 `model_check` 仅比对文件大小无真实推理逻辑，纯属包袱；
   - 本地小模型在轻量网关环境中隐性成本极高（Distroless 镜像无 Python/C++ 依赖易崩溃、WASM 单句 200~380ms、266MB 内存与带宽负担）；
   - 架构已切换为在线模型调用（Model-in-the-Loop，详见 `NOTES_model_in_loop.md` 与 `NOTES_model_ux.md`）：
     - **提炼压缩模型**：在插件设置中填写 `group/gemini-3.5-flash-lite`（配置项 `extract_model`），调用网关 `/v1/chat/completions` 执行结构化 JSON 提炼，支持代码块剥离与散文容错解析；

@@ -123,3 +123,81 @@ v6.19 曾发生内部提炼请求进入 `onRequest` / `onResponse` 形成循环�
    - 禁止在测试或生产代码中硬编码第三方商业模型名。
 3. **版本号同步门禁**：
    - `check_schema_sync.mjs` 强制校验 `package.json` 的 `version` 与 `settings.html` 的版本徽标必须 100% 逐字一致。
+
+---
+
+## 八、流式剥离吞响应致 499 故障根治 (v6.24.0)
+
+### 1. 事故复盘
+在长对话及 Agent 频繁输出场景中，客户端常偶发 499 断连异常。深入排查发现：
+- 在 `memory.middleware.js` 的流式 `onEvent` 处理中，当剥离 `<memory>` 标签的缓冲区 `memoryBuffer` 达到 20KB 安全上限时，虽执行了截断直通，但未能完整重置内部状态标记 `inMemoryTag`；
+- 在非流式 `onResponse` 管道中存在二次解析争用，导致网关陷入持续等待直至客户端超时断开（499）。
+
+### 2. 治理与不变量
+1. **严格 20KB Fail-Open 保护**：流式缓冲区达到 20KB 强制直通输出并原子重置所有标签状态；
+2. **流式与非流式通道完全解耦**：流式已处理请求设置防重入标记，禁止 `onResponse` 重复处理；
+3. **响应保全第一准则**：任何情况下绝不因辅助标签剥离而吞没、延迟或截断用户正常对话内容。
+
+---
+
+## 九、R2 检测顺序解耦与探针防堆积治理 (v6.25.0)
+
+### 1. 痛点根因
+过去 Cloudflare R2 检测信标（`r2_check`）深度绑定在数据库创建链路中，若用户尚未创建 NoCodeBackend 数据库即无法检测 R2 凭据；且每次检测向 R2 写入探针文件后，若缺少 Secret Key 则无法执行删除，导致用户存储桶内残留大量 `probe-*` 临时文件。
+
+### 2. 架构整改
+1. **检测链路完全解耦**：`r2_check` 只要填写 R2 凭据即可独立向 R2 发起真实连通性探测（上传探针、下载验证并尝试删除），不强制依赖数据库存在；
+2. **探针残留提示与一键清理**：设置页检测到缺少 Secret Key 导致探针无法自动清理时，向用户展示友好提示框，并提供「清理探针文件」（`clean_probe`）信标支持一键批量删除历史探针；
+3. **状态路由隔离**：建立 `containerOfOp` 状态路由机制，NCB、R2、模型与网关操作的状态反馈严格归入各卡片独立容器，严禁跨卡片串台。
+
+---
+
+## 十、内联提炼开关与默认选项回填治理
+
+### 1. 默认值割裂陷阱
+`inline_extract`、`inject_principles`、`search_rewrite`、`search_rerank` 等关键开关在 `package.json` 中的推荐默认值均为 `true`。若设置页前端 `fill(o)` 简单使用 `el.checked = !!o[k]`，在用户首次打开设置页时（`o` 为空或未显式定义该键），开关将呈现为未勾选，用户点击保存时该字段即被写入为 `false`，造成非预期的功能关闭。
+
+### 2. 回填对齐准则
+`fill(o)` 中对所有默认 `true` 的配置项，统一采用 `(o[k] !== false)` 进行判定与回填，确保未定义时保持默认开启，彻底消除初次保存导致配置误降级隐患。
+
+---
+
+## 十一、Magpie 客户端标识定制与固定探针调用 (v6.26.0)
+
+### 1. 上游机制与默认 Bun 问题
+Magpie 网关依据 HTTP 请求头的 `User-Agent` 与 `callerKey` 识别客户端名。在 Bun 容器环境中发起的内部请求默认带 `User-Agent: Bun/<version>`，导致 Magpie 用量面板将所有插件内部模型调用均记录为 `Bun`，无法与用户实际调用或其它 Agent 隔离审计。
+
+### 2. 定制客户端标识规范
+- 在所有内部模型调用（提炼、分类、审计、错误解释、查询改写）中，统一显式注入请求头 `User-Agent: Memory/<version>`（动态跟随 `package.json.version`）；
+- 内部请求附加固定标记头 `x-magpie-internal: memory-hub`，网关据此识别内部请求并绝对豁免二次拦截，从根源切断自激风暴。
+
+---
+
+## 十二、定时去重表单改造与后台异步化 (v6.28.0 - v6.28.3)
+
+### 1. 同步阻塞与超时痛点
+全自动语义去重（`memory_audit`）需要对全库记忆进行分批比对并调用大模型仲裁，耗时通常达数十秒。若在 `runPendingAction` 中同步 await 执行，会导致 Magpie 宿主加载插件时因超时触发健康检查失败并杀掉进程。
+
+### 2. 异步化架构与时间点回滚
+1. **信标极速返回**：`runPendingAction` 接收到 `memory_audit` 时，记录任务状态后立即返回「已启动」信标（耗时 <20ms），由后台事件循环异步执行全量去重任务；
+2. **自然语言实时表单**：定时去重表单支持 daily / weekly / monthly 灵活调度，前端实现实时自然语言调度预览；
+3. **可追溯时间点回滚**：支持通过 `undo_before` 参数将记忆库还原至指定时刻（如 `2026-10-19 02:00`）之前的健康状态；所有去重操作严格采用软失效（写 `invalid_at` 与 `invalid_reason`），绝不物理硬删数据，保证审计链完整。
+
+---
+
+## 十三、前端 UI、快照同步通道修复、卡片 ⑤ 下线与打包规范整改 (v6.28.4)
+
+### 1. 快照同步通道修复 (P0-4)
+- 对齐槽位路由：`page_actions.js` 中的 `CARD_OF_OP["sync_snapshot"]` 与 `settings.js` 中的 `cardOfOp("sync_snapshot")` 统一映射为 `"inject"`；
+- 容器规范挂载：在设置页卡片 ④ 内 `<button id="btn_sync_snapshot">` 下方挂载独立状态容器 `<div class="action-status-box" id="inject_action_status">`，由 `containerOfOp` 统一派发；
+- 异常安全返回：拉取快照异常时严格返回 `ok: false, op: "sync_snapshot", title: "记忆快照拉取失败", lines: [err.message]`，杜绝返回假成功伪数据；
+- 安全合并写回：前端接收到成功结果后，通过 `var next = collect(); next.memories = card.memories; delete next._action; queuedOptionsSet(next, true);` 执行安全合并，坚决避免覆盖清空其它卡片配置。
+
+### 2. 悬空卡片 ⑤ 与 compress.js 彻底下线 (P2-11)
+- 经多轮实机压测与架构评估，生产环境运行在轻量容器中，本地所谓的压缩链从未执行真正推理，且改写历史消息破坏了上游大模型 KV-Cache 前缀单调性；
+- 物理移除整个卡片 ⑤（上下文压缩与去重）及 `settings.js` 中所有 compress 关联 ID 与监听；
+- 物理删除 `compress.js`（削减 43KB 死代码），坚决保全 KV-Cache。
+
+### 3. 仓库卫生治理与打包白名单 (P3-16)
+- 根目录残留的所有历史单项设计笔记（`NOTES_*.md`）全部合并归档进 `DEVNOTES.md`，并在 git 仓库中物理清除；
+- 在 `package.json` 中规范配置 `"files": ["*.js", "settings.html", "settings.css", "icon.svg", "README.md", "LICENSE"]` 白名单，确保只打包生产必要文件。

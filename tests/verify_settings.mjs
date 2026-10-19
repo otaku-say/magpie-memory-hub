@@ -71,10 +71,7 @@ const REMOTE = {
   max_budget_chars: 3333,
   max_principles: 2,
   disabled: false,
-  compress: true,
-  cross_turn_dedup: true,
-  compress_max_chars: 3000,
-  compress_min_chars: 1200,
+
   extract_model: "",
   classify_model: "",
   classify_endpoint: "auto",
@@ -241,7 +238,6 @@ console.log("\n=== 6. 静态检查：卡片标题与表格逐字一致 ===");
     "Cloudflare R2 对象存储",
     "记忆提炼与入库门槛",
     "网关注入与上下文预算",
-    "上下文压缩与去重",
     "MCP 接入地址",
   ];
   for (const title of expectedTitles) {
@@ -258,7 +254,6 @@ console.log("\n=== 7. 静态检查：全部可配置项均包含推荐值或必�
     "auto_harvest",
     "inline_extract", "min_confidence",
     "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
-    "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars",
     "harvest_max_per_min", "harvest_max_total"
   ];
   let allHaveBadge = true;
@@ -289,7 +284,6 @@ console.log("\n=== 8. 独立卡片保存测试（只改本卡片字段，其它�
     check(lastSet.min_confidence === 0.95, "卡片 3 min_confidence 已更新为 0.95");
     check(lastSet.ncb_instance === REMOTE.ncb_instance, "卡片 1 ncb_instance 未被改动");
     check(lastSet.mcp_key === REMOTE.mcp_key, "卡片 1 mcp_key 未被改动");
-    check(lastSet.compress === REMOTE.compress, "卡片 5 compress 未被改动");
     check(!lastSet._action, "单卡片保存不触发任何 _action 信标");
     check(JSON.stringify(lastSet.memories) === JSON.stringify(REMOTE.memories), "memories 快照完全保留");
     check(lastSet.some_future_field === REMOTE.some_future_field, "未知扩展字段保留");
@@ -312,7 +306,6 @@ console.log("\n=== 9. 底部整体保存测试（全部字段都在）===");
       "auto_harvest", "gatewayTimeoutMs",
       "inline_extract", "min_confidence",
       "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
-      "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars",
       "harvest_max_per_min", "harvest_max_total"
     ];
     let allPresent = true;
