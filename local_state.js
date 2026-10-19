@@ -49,7 +49,7 @@ export function _resetStateCacheForTests() {
   _cachedPath = null;
 }
 
-/** 读状态。带进程内 mtime 缓存，仅在文件修改时间变化时才重新读取与解析；任何异常都退化为空状态。 */
+/** 读状态。带进程内 mtime 缓存，损坏自愈与防抹平保护。 */
 export function readState() {
   const p = statePath();
   if (!p) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: false };
@@ -64,8 +64,108 @@ export function readState() {
     if (_cachedState && _cachedPath === p && stat.mtimeMs === _cachedMtime && stat.size === _cachedSize && stat.ino === _cachedIno) {
       return JSON.parse(JSON.stringify(_cachedState));
     }
-    const o = JSON.parse(fs.readFileSync(p, "utf8"));
-    if (!o || typeof o !== "object") return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: true };
+
+    let raw = "";
+    try {
+      raw = fs.readFileSync(p, "utf8");
+    } catch (readErr) {
+      throw readErr;
+    }
+
+    let o;
+    try {
+      o = JSON.parse(raw);
+    } catch (jsonErr) {
+      // JSON 解析失败：损坏自愈与防抹平保护
+      const corruptPath = `${p}.corrupt.${Date.now()}`;
+      try {
+        fs.renameSync(p, corruptPath);
+      } catch (_) {}
+
+      // 尝试加载 state.json.bak 备份
+      const bakPath = `${p}.bak`;
+      if (fs.existsSync(bakPath)) {
+        try {
+          const bakObj = JSON.parse(fs.readFileSync(bakPath, "utf8"));
+          if (bakObj && typeof bakObj === "object") {
+            const recovered = {
+              current: typeof bakObj.current === "string" ? bakObj.current : "",
+              secrets: bakObj.secrets && typeof bakObj.secrets === "object" ? bakObj.secrets : {},
+              actions: bakObj.actions && typeof bakObj.actions === "object" ? bakObj.actions : {},
+              audit: bakObj.audit && typeof bakObj.audit === "object" ? bakObj.audit : {},
+              gateway_harvest: bakObj.gateway_harvest && typeof bakObj.gateway_harvest === "object" ? bakObj.gateway_harvest : {},
+              pending_patterns: bakObj.pending_patterns && typeof bakObj.pending_patterns === "object" ? bakObj.pending_patterns : {},
+              r2_mounts: bakObj.r2_mounts && typeof bakObj.r2_mounts === "object" ? bakObj.r2_mounts : {},
+              harvest_queue: Array.isArray(bakObj.harvest_queue) ? bakObj.harvest_queue : [],
+              _ok: true,
+              _recovered_from_bak: true,
+            };
+            try {
+              fs.copyFileSync(bakPath, p);
+              const restat = fs.statSync(p);
+              _cachedState = recovered;
+              _cachedMtime = restat.mtimeMs;
+              _cachedSize = restat.size;
+              _cachedIno = restat.ino;
+              _cachedPath = p;
+            } catch (_) {}
+            return JSON.parse(JSON.stringify(recovered));
+          }
+        } catch (_) {}
+      }
+
+      _cachedState = null;
+      _cachedMtime = 0;
+      _cachedPath = null;
+      return {
+        secrets: {},
+        actions: {},
+        gateway_harvest: {},
+        pending_patterns: {},
+        r2_mounts: {},
+        harvest_queue: [],
+        _ok: false,
+        _corrupt: true,
+        _err: String(jsonErr && jsonErr.message || jsonErr),
+      };
+    }
+
+    if (!o || typeof o !== "object") {
+      const corruptPath = `${p}.corrupt.${Date.now()}`;
+      try { fs.renameSync(p, corruptPath); } catch (_) {}
+      const bakPath = `${p}.bak`;
+      if (fs.existsSync(bakPath)) {
+        try {
+          const bakObj = JSON.parse(fs.readFileSync(bakPath, "utf8"));
+          if (bakObj && typeof bakObj === "object") {
+            const recovered = {
+              current: typeof bakObj.current === "string" ? bakObj.current : "",
+              secrets: bakObj.secrets && typeof bakObj.secrets === "object" ? bakObj.secrets : {},
+              actions: bakObj.actions && typeof bakObj.actions === "object" ? bakObj.actions : {},
+              audit: bakObj.audit && typeof bakObj.audit === "object" ? bakObj.audit : {},
+              gateway_harvest: bakObj.gateway_harvest && typeof bakObj.gateway_harvest === "object" ? bakObj.gateway_harvest : {},
+              pending_patterns: bakObj.pending_patterns && typeof bakObj.pending_patterns === "object" ? bakObj.pending_patterns : {},
+              r2_mounts: bakObj.r2_mounts && typeof bakObj.r2_mounts === "object" ? bakObj.r2_mounts : {},
+              harvest_queue: Array.isArray(bakObj.harvest_queue) ? bakObj.harvest_queue : [],
+              _ok: true,
+              _recovered_from_bak: true,
+            };
+            try {
+              fs.copyFileSync(bakPath, p);
+              const restat = fs.statSync(p);
+              _cachedState = recovered;
+              _cachedMtime = restat.mtimeMs;
+              _cachedSize = restat.size;
+              _cachedIno = restat.ino;
+              _cachedPath = p;
+            } catch (_) {}
+            return JSON.parse(JSON.stringify(recovered));
+          }
+        } catch (_) {}
+      }
+      return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: false, _corrupt: true };
+    }
+
     const parsed = {
       current: typeof o.current === "string" ? o.current : "",
       secrets: o.secrets && typeof o.secrets === "object" ? o.secrets : {},
@@ -88,10 +188,14 @@ export function readState() {
   }
 }
 
-/** 原子写状态（紧凑无缩进序列化，立省 30%~40% 体积；先写临时文件再 rename；同步更新进程内缓存）。返回是否成功。 */
+/** 原子写状态（紧凑无缩进序列化；保留 .bak 备份；先写临时文件再 rename；防抹平保护）。返回是否成功。 */
 export function writeState(state) {
   const p = statePath();
   if (!p) return false;
+  // 防抹平保护：严禁写入损坏状态或异常抹平状态
+  if (!state || state._ok === false || state._corrupt === true) {
+    return false;
+  }
   let tmp = null;
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -109,6 +213,8 @@ export function writeState(state) {
     delete out._ok;
     delete out._missing;
     delete out._err;
+    delete out._corrupt;
+    delete out._recovered_from_bak;
 
     // 自动 Compact 保护：若 pending_patterns 存在已达标项（count>=2）或超量，自动清洗
     if (out.pending_patterns && typeof out.pending_patterns === "object") {
@@ -128,6 +234,13 @@ export function writeState(state) {
     tmp = `${p}.tmp.${nonce}`;
     // 紧凑序列化：绝不使用 null, 2，直接写入紧凑 JSON
     fs.writeFileSync(tmp, JSON.stringify(out), { mode: 0o600 });
+    // 写入前保留备份 state.json.bak
+    const bak = `${p}.bak`;
+    try {
+      if (fs.existsSync(p)) {
+        fs.copyFileSync(p, bak);
+      }
+    } catch (_) {}
     fs.renameSync(tmp, p);
     try { fs.chmodSync(p, 0o600); } catch (e) { /* 某些文件系统不支持，忽略 */ }
     try {

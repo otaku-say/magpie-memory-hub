@@ -374,7 +374,8 @@ function freshness(row) {
 }
 
 function rankMemory(row) {
-  const conf = (Number(row.confidence_score) || 100) / 100;
+  const rawScore = Number(row.confidence_score);
+  const conf = (!isNaN(rawScore) ? rawScore : 100) / 100;
   const acc = Math.min(Number(row.retrieval_count) || 0, 10);
   return conf * (1 + 0.1 * acc) * (0.5 + 0.5 * freshness(row));
 }
@@ -416,19 +417,30 @@ function isMemoryValid(row, nowMs = Date.now()) {
 function scrubSecrets(text) {
   if (typeof text !== "string" || !text) return text;
   let s = text;
+  // AWS Access Key
+  s = s.replace(/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "***REDACTED***");
+  // Slack/Discord Bot Token
+  s = s.replace(/\b(xox[baprs]-)[0-9A-Za-z-]{10,}\b/g, "$1***REDACTED***");
+  // 长 JWT（三段式）
+  s = s.replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "***REDACTED***");
   // OpenAI / Anthropic / Generic API keys
   s = s.replace(/\bsk-[a-zA-Z0-9_\-]{8,}\b/g, "sk-***REDACTED***");
   // GitHub Tokens
   s = s.replace(/\bgh[pousr]_[a-zA-Z0-9]{8,}\b/g, "ghp_***REDACTED***");
   // NoCodeBackend secret key
-  const ncbPrefix = ["ncb", "sec"].join("_"); s = s.replace(new RegExp("\\b" + ncbPrefix + "_[a-zA-Z0-9_\-]{8,}\\b", "g"), "ncb-***REDACTED***");
+  const ncbPrefix = ["ncb", "sec"].join("_"); s = s.replace(new RegExp("\\b" + ncbPrefix + "_[a-zA-Z0-9_\\-]{8,}\\b", "g"), "ncb-***REDACTED***");
   // Bearer tokens
   s = s.replace(/\b(Bearer\s+)[A-Za-z0-9_\-\.]{8,}\b/gi, "$1***REDACTED***");
   // Database connection strings: scheme://user:password@host
   s = s.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/:\s@]+:)([^@\s]+)(@)/g, "$1***REDACTED***$3");
+  // 中文口令描述
+  s = s.replace(/(密码|密钥|口令|token|secret|apikey|api_key)\s*[是为:：=]\s*['"]?([^\s'"]{8,})['"]?/gi, (match, k, val) => {
+    if (/\*+REDACTED\*+/i.test(val)) return match;
+    return `${k}=***REDACTED***`;
+  });
   // Key-value pairs for passwords and API keys
   s = s.replace(/\b(password|passwd|pwd|api_key|apikey|secret_key|secretKey)\s*([:=])\s*(['"]?)([^'"\s,;]+)\3/gi, (match, k, eq, quote, val) => {
-    if (/^\*+REDACTED\*+$/i.test(val)) return match;
+    if (/\*+REDACTED\*+/i.test(val)) return match;
     return `${k}${eq}${quote}***REDACTED***${quote}`;
   });
   return s;
@@ -456,9 +468,11 @@ async function saveMemory(client, cfg, m, ctx) {
     : content;
   const tags = scrubSecrets(String(m.tags || "").trim().toLowerCase());
   const relatedEntities = scrubSecrets(String(m.related_entities || "").trim());
-  let confidence = Number(m.confidence);
-  if (!confidence || confidence <= 1) confidence = Math.round((confidence || 1) * 100);
-  confidence = Math.max(0, Math.min(100, Math.round(confidence || 100)));
+  const rawConf = typeof m.confidence === "number"
+    ? m.confidence
+    : (m.confidence !== undefined && m.confidence !== null && m.confidence !== "" && !isNaN(Number(m.confidence)) ? Number(m.confidence) : 1);
+  let confidence = rawConf <= 1 ? Math.round(rawConf * 100) : Math.round(rawConf);
+  confidence = Math.max(0, Math.min(100, confidence));
 
   /* 来源可追溯性（空值语义说明）：
    * source_session 与 source_turn 为 NULL 是完全合法且符合设计的正常行为：

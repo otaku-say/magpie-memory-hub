@@ -81,12 +81,46 @@ export function stripScaffolding(text) {
  *   5. /config/magpie/gateway-conversations（Docker 容器持久卷官方标准路径）
  *   6. ~/.config/magpie/gateway-conversations（宿主机/本地安装默认路径）
  */
+export const FORBIDDEN_DIRS = new Set([
+  "/",
+  "/root",
+  "/bin",
+  "/sbin",
+  "/etc",
+  "/usr",
+  "/lib",
+  "/lib64",
+  "/var",
+  "/proc",
+  "/sys",
+  "/dev",
+  "/boot",
+  "/home",
+]);
+
+export function validateGatewayDir(customDir) {
+  if (typeof customDir !== "string" || !customDir.trim()) {
+    throw new Error("[SECURITY_BLOCKED] 对话录制目录路径非法或为空");
+  }
+  const resolved = path.resolve(customDir.trim());
+  const root = path.parse(resolved).root;
+  if (resolved === root || FORBIDDEN_DIRS.has(resolved)) {
+    throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录或根路径: ${resolved}`);
+  }
+  for (const prefix of ["/proc", "/sys", "/dev", "/etc", "/boot"]) {
+    if (resolved === prefix || resolved.startsWith(prefix + path.sep)) {
+      throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${resolved}`);
+    }
+  }
+  return resolved;
+}
+
 export function resolveGatewayDir(customDir) {
   if (customDir && typeof customDir === "string" && customDir.trim()) {
-    return path.resolve(customDir.trim());
+    return validateGatewayDir(customDir);
   }
   if (process.env.MEMHUB_GATEWAY_CONV_DIR && process.env.MEMHUB_GATEWAY_CONV_DIR.trim()) {
-    return path.resolve(process.env.MEMHUB_GATEWAY_CONV_DIR.trim());
+    return validateGatewayDir(process.env.MEMHUB_GATEWAY_CONV_DIR.trim());
   }
 
   const candidates = [];
@@ -173,9 +207,12 @@ function sig(s) {
  * 3. 递归文件扫描与解析
  * ================================================================== */
 
-function collectConversationFiles(dir) {
+const MAX_SCAN_DEPTH = 3;
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+function collectConversationFiles(dir, maxDepth = MAX_SCAN_DEPTH) {
   const files = [];
-  function walk(current) {
+  function walk(current, depth) {
     let entries = [];
     try {
       entries = fs.readdirSync(current, { withFileTypes: true });
@@ -185,23 +222,37 @@ function collectConversationFiles(dir) {
     for (const ent of entries) {
       const full = path.join(current, ent.name);
       if (ent.isDirectory()) {
-        walk(full);
+        if (depth < maxDepth) {
+          walk(full, depth + 1);
+        }
       } else if (ent.isFile()) {
         if (ent.name.endsWith(".jsonl") || ent.name.endsWith(".json")) {
           if (!ent.name.includes(".tmp") && !ent.name.includes(".bad") && !ent.name.endsWith(".lock")) {
-            files.push(full);
+            try {
+              const st = fs.statSync(full);
+              if (st.size <= MAX_FILE_SIZE) {
+                files.push(full);
+              } else {
+                console.warn(`[gateway_harvest] 忽略超过 10MB 的超大文件: ${full} (${st.size} bytes)`);
+              }
+            } catch (_) {}
           }
         }
       }
     }
   }
-  walk(dir);
+  walk(dir, 0);
   return files;
 }
 
 function parseTurnsFromFile(filePath) {
   let content = "";
   try {
+    const st = fs.statSync(filePath);
+    if (st.size > MAX_FILE_SIZE) {
+      console.warn(`[gateway_harvest] 忽略超过 10MB 的超大文件: ${filePath} (${st.size} bytes)`);
+      return [];
+    }
     content = fs.readFileSync(filePath, "utf8");
   } catch (_) {
     return [];

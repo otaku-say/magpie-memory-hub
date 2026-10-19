@@ -64,13 +64,30 @@ import { _diag, SCAFFOLDING_PATTERNS, stripScaffolding } from "./gateway_harvest
 export function scrubSecrets(text) {
   if (typeof text !== "string" || !text) return text;
   let s = text;
+  // AWS Access Key
+  s = s.replace(/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "***REDACTED***");
+  // Slack/Discord Bot Token
+  s = s.replace(/\b(xox[baprs]-)[0-9A-Za-z-]{10,}\b/g, "$1***REDACTED***");
+  // 长 JWT（三段式）
+  s = s.replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "***REDACTED***");
+  // OpenAI / Anthropic / Generic API keys
   s = s.replace(/\bsk-[a-zA-Z0-9_\-]{8,}\b/g, "sk-***REDACTED***");
+  // GitHub Tokens
   s = s.replace(/\bgh[pousr]_[a-zA-Z0-9]{8,}\b/g, "ghp_***REDACTED***");
-  const ncbPrefix = ["ncb", "sec"].join("_"); s = s.replace(new RegExp("\\b" + ncbPrefix + "_[a-zA-Z0-9_\-]{8,}\\b", "g"), "ncb-***REDACTED***");
+  // NoCodeBackend secret key
+  const ncbPrefix = ["ncb", "sec"].join("_"); s = s.replace(new RegExp("\\b" + ncbPrefix + "_[a-zA-Z0-9_\\-]{8,}\\b", "g"), "ncb-***REDACTED***");
+  // Bearer tokens
   s = s.replace(/\b(Bearer\s+)[A-Za-z0-9_\-\.]{8,}\b/gi, "$1***REDACTED***");
+  // Database connection strings: scheme://user:password@host
   s = s.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/:\s@]+:)([^@\s]+)(@)/g, "$1***REDACTED***$3");
+  // 中文口令描述
+  s = s.replace(/(密码|密钥|口令|token|secret|apikey|api_key)\s*[是为:：=]\s*['"]?([^\s'"]{8,})['"]?/gi, (match, k, val) => {
+    if (/\*+REDACTED\*+/i.test(val)) return match;
+    return `${k}=***REDACTED***`;
+  });
+  // Key-value pairs for passwords and API keys
   s = s.replace(/\b(password|passwd|pwd|api_key|apikey|secret_key|secretKey)\s*([:=])\s*(['"]?)([^'"\s,;]+)\3/gi, (match, k, eq, quote, val) => {
-    if (/^\*+REDACTED\*+$/i.test(val)) return match;
+    if (/\*+REDACTED\*+/i.test(val)) return match;
     return `${k}${eq}${quote}***REDACTED***${quote}`;
   });
   return s;

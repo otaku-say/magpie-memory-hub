@@ -197,6 +197,16 @@ export async function dbInit(cfg, args) {
  * db_reset —— 清空：删除插件自己的三张表（结构 + 数据）
  * ------------------------------------------------------------------ */
 export async function dbReset(cfg, args) {
+  const configuredDb = String((cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
+  if (args && args.database) {
+    const passedDb = String(args.database).trim();
+    if (!configuredDb || passedDb !== configuredDb) {
+      const err = new Error(`安全防护拦截：拒绝清空外来数据库或系统表！目标数据库 "${passedDb}" 与当前配置的目标实例 "${configuredDb}" 不匹配。`);
+      err.code = "FORBIDDEN_DATABASE";
+      throw err;
+    }
+  }
+
   const rawDb = dbOf(cfg, args);
   const db = (await resolveRealDatabase(cfg, rawDb)) || rawDb;
   const confirm = (args && args.confirm) || "";
