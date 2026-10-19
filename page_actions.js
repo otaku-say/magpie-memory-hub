@@ -303,17 +303,23 @@ async function execute(action, cfg, fs, sp, state, options) {
           limit: 50,
         });
         memories = Array.isArray(resList?.data) ? resList.data : (Array.isArray(resList) ? resList : []);
+        result = {
+          ok: true,
+          at: Date.now(),
+          op: "sync_snapshot",
+          title: "记忆快照拉取就绪",
+          lines: [`成功拉取 ${memories.length} 条活跃记忆快照供前端同步`],
+          memories,
+        };
       } catch (err) {
-        memories = [];
+        result = {
+          ok: false,
+          at: Date.now(),
+          op: "sync_snapshot",
+          title: "记忆快照拉取失败",
+          lines: [err.message],
+        };
       }
-      result = {
-        ok: true,
-        at: Date.now(),
-        op: "sync_snapshot",
-        title: "记忆快照拉取就绪",
-        lines: [`成功拉取 ${memories.length} 条活跃记忆快照供前端同步`],
-        memories,
-      };
     }
     else if (action.op === "memory_audit") {
       const isUndo = !!action.undo;
@@ -412,7 +418,7 @@ async function execute(action, cfg, fs, sp, state, options) {
       model_check: "model",
       memory_audit: "audit",
       harvest_gateway: "gateway",
-      sync_snapshot: "db",
+      sync_snapshot: "inject",
     };
     const cardKey = CARD_OF_OP[action.op] || "ncb";
     writeCardStatus(cardKey, result, action.op);
@@ -733,8 +739,8 @@ export function parseDbInfo(rawName, fallbackLogical) {
  *   - 静默降级：只读目录或写文件报错时不抛异常，只在 console.error 里打日志
  */
 export function writeCardStatus(key, payloadOrResult, opHint, customStatusPath) {
-  if (key !== "ncb" && key !== "r2" && key !== "model" && key !== "gateway" && key !== "db" && key !== "audit") {
-    console.error(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2", "model", "gateway", "audit" or "db"`);
+  if (key !== "ncb" && key !== "r2" && key !== "model" && key !== "gateway" && key !== "db" && key !== "audit" && key !== "inject") {
+    console.error(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2", "model", "gateway", "audit", "db" or "inject"`);
     return false;
   }
 

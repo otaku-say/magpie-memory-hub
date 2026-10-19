@@ -713,6 +713,7 @@
       <div class="btn-row" style="margin-top: 10px;">
         <button type="button" id="btn_sync_snapshot">刷新记忆快照到中间件</button>
       </div>
+      <div class="action-status-box" id="inject_action_status" style="display:none;"></div>
       <div class="hint-desc" style="margin-top: 6px; font-size: 12px; color: var(--magpie-text-muted, #888);">
         中间件依赖离线快照实现准则置顶与离线兜底注入（低频受控单次刷新）；智能体实时检索由内置 MCP 工具直连数据库执行。
       </div>
@@ -720,81 +721,6 @@
       <div class="card-save-row">
         <button type="button" class="btn-card-save" id="btn_save_card_inject">保存本卡片</button>
         <span class="status" id="status_card_inject" role="status" aria-live="polite"></span>
-      </div>
-    </div>
-  </details>
-
-  <!-- ⑤ 上下文压缩与去重 -->
-  <details class="card">
-    <summary>
-      <span class="chev"></span>
-      <span class="t">上下文压缩与去重</span>
-      <span class="sub">历史工具输出压缩 · 跨轮文件指纹去重</span>
-    </summary>
-    <div class="body">
-      <div class="row split">
-        <div class="main">
-          <div class="row-head">
-            <label for="compress">请求压缩</label>
-            <span class="badge">默认 关</span>
-          </div>
-          <div class="hint">
-            <div class="hint-desc">压掉历史消息中冗余的工具调用输出与过长文本块（绝不动 system prompt 与最后一条用户消息）。</div>
-            <div class="hint-diff"><strong>开</strong>：压缩历史工具调用输出；<strong>关（推荐，保 KV-Cache）</strong>：历史消息逐字节未改，保证上游推理缓存命中率，降低费用与延迟。</div>
-          </div>
-        </div>
-        <div class="side">
-          <label class="switch"><input type="checkbox" id="compress"><span></span></label>
-        </div>
-      </div>
-
-      <div class="row split">
-        <div class="main">
-          <div class="row-head">
-            <label for="cross_turn_dedup">跨轮去重</label>
-            <span class="badge rec">推荐 开</span>
-          </div>
-          <div class="hint">
-            <div class="hint-desc">Agent 反复重显同一文件或工具输出时折成指针，只回指更早轮次（前缀缓存不失效）。</div>
-            <div class="hint-diff"><strong>开</strong>：消除长会话中重复出现的工具输出，避免上下文暴涨；<strong>关</strong>：每次工具返回均保留独立副本。</div>
-          </div>
-        </div>
-        <div class="side">
-          <label class="switch"><input type="checkbox" id="cross_turn_dedup"><span></span></label>
-        </div>
-      </div>
-
-      <div class="row">
-        <div class="row-head">
-          <label for="compress_max_chars">单块压缩上限</label>
-          <span class="badge rec">推荐 3000</span>
-        </div>
-        <div class="hint">
-          <div class="hint-desc">单个工具输出或历史文本块压缩后允许保留的最大字符数。</div>
-          <div class="hint-diff"><strong>调大</strong>：保留更完整的单次工具输出细节；<strong>调小</strong>：对超大块输出施加更激进的截断与提炼，节省空间。</div>
-        </div>
-        <div class="control">
-          <input type="number" id="compress_max_chars" min="500" max="20000" step="100" value="3000">
-        </div>
-      </div>
-
-      <div class="row">
-        <div class="row-head">
-          <label for="compress_min_chars">小于此长度不动</label>
-          <span class="badge rec">推荐 1200</span>
-        </div>
-        <div class="hint">
-          <div class="hint-desc">触发离线文本压缩的最小字符数阈值，短于此值的块保持原样。</div>
-          <div class="hint-diff"><strong>调大</strong>：短小和中等输出绝不压缩，保护完整性；<strong>调小</strong>：较短文本也会参与轻度规整与去噪。</div>
-        </div>
-        <div class="control">
-          <input type="number" id="compress_min_chars" min="200" max="10000" step="100" value="1200">
-        </div>
-      </div>
-
-      <div class="card-save-row">
-        <button type="button" class="btn-card-save" id="btn_save_card_compress">保存本卡片</button>
-        <span class="status" id="status_card_compress" role="status" aria-live="polite"></span>
       </div>
     </div>
   </details>

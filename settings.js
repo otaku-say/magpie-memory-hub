@@ -17,8 +17,7 @@
     model: ["extract_model", "classify_model", "audit_model", "dedup_schedule", "dedup_time", "dedup_weekday", "dedup_day", "dedup_batch_size", "classify_endpoint", "search_rewrite", "search_rerank", "harvest_max_per_min", "harvest_max_total"],
     harvest: ["auto_harvest", "gatewayTimeoutMs"],
     extract: ["inline_extract", "min_confidence"],
-    inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"],
-    compress: ["compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"]
+    inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"]
   };
 
   var TEXT = [
@@ -32,8 +31,6 @@
     min_confidence: 0.6,
     max_inject_count: 5,
     max_budget_chars: 2048,
-    compress_max_chars: 3000,
-    compress_min_chars: 1200,
     max_principles: 2,
     gatewayTimeoutMs: 8000,
     harvest_max_per_min: 20,
@@ -46,8 +43,6 @@
     "auto_harvest",
     "inline_extract",
     "disabled",
-    "compress",
-    "cross_turn_dedup",
     "ccr_cards",
     "inject_principles",
     "search_rewrite",
@@ -290,7 +285,7 @@
     });
     BOOL.forEach(function (k) {
       var el = $(k); if (!el) return;
-      if (k === "search_rewrite" || k === "search_rerank") {
+      if (k === "inline_extract" || k === "inject_principles" || k === "search_rewrite" || k === "search_rerank") {
         el.checked = o[k] !== false;
         return;
       }
@@ -406,11 +401,6 @@
     parts.push("内联提炼 " + (o.inline_extract !== false ? "开" : "关"));
     var conf = (o.min_confidence != null && !isNaN(parseFloat(o.min_confidence))) ? o.min_confidence : 0.6;
     parts.push("入库门槛 " + conf);
-    if (o.compress === true) {
-      parts.push("请求压缩开");
-    } else {
-      parts.push("请求压缩关");
-    }
     if (o.disabled) parts.push("网关注入已停用");
     return parts.join(" · ");
   }
@@ -437,8 +427,6 @@
     if (!o.ncb_secret && !o.mcp_key) return "未填 Secret Key 或 MCP Key：新建库请填写 MCP Key";
     if (o.min_confidence != null && (o.min_confidence < 0 || o.min_confidence > 1))
       return "最低入库置信度应在 0~1 之间";
-    if (o.compress && o.compress_min_chars >= o.compress_max_chars)
-      return "压缩阈值不合理：『小于此长度不动』应小于『单块压缩后上限』";
     if (o.harvest_max_per_min != null && (o.harvest_max_per_min < 1 || o.harvest_max_per_min > 600))
       return "每分钟调用上限应在 1~600 之间";
     if (o.harvest_max_total != null && (o.harvest_max_total < 10 || o.harvest_max_total > 100000))
@@ -457,7 +445,8 @@
     ncb: "db_action_status",
     r2: "r2_action_status",
     model: "model_action_status",
-    gateway: "harvest_action_status"
+    gateway: "harvest_action_status",
+    inject: "inject_action_status"
   };
 
   /**
@@ -478,6 +467,9 @@
     }
     if (s === "gateway" || s === "harvest" || s === "harvest_gateway") {
       return "gateway";
+    }
+    if (s === "inject" || s === "sync_snapshot") {
+      return "inject";
     }
     return "ncb";
   }
@@ -615,7 +607,7 @@
     if (statusData.db) {
       renderDbPrefix(statusData.db);
     }
-    var cardKeys = ["ncb", "r2", "model", "gateway"];
+    var cardKeys = ["ncb", "r2", "model", "gateway", "inject"];
     for (var i = 0; i < cardKeys.length; i++) {
       var key = cardKeys[i];
       var cid = containerOfOp(key);
@@ -784,9 +776,12 @@
             return;
           }
           // 拿到比提交时间更新且已完成的结果 → 停止一切计时
-          if (card.op === "sync_snapshot" && Array.isArray(card.memories) && window.magpie && window.magpie.options) {
+          if (card.op === "sync_snapshot" && card.ok && Array.isArray(card.memories) && window.magpie && window.magpie.options) {
             try {
-              window.magpie.options.set({ memories: card.memories });
+              var next = collect();
+              next.memories = card.memories;
+              delete next._action;
+              queuedOptionsSet(next, true);
             } catch (_) {}
           }
           clearInterval(pollingTimer); pollingTimer = null;
@@ -870,7 +865,8 @@
         init: "初始化数据库",
         reset: "清空数据库",
         status: "检查结构状态",
-        harvest_gateway: "立即扫描对话录制"
+        harvest_gateway: "立即扫描对话录制",
+        sync_snapshot: "刷新记忆快照"
       };
       var opName = opLabels[act.op] || act.op;
       var timeStr = act.at ? new Date(act.at).toLocaleString("zh-CN", { hour12: false }) : "未知时间";
@@ -996,6 +992,8 @@
             msg = "已提交清空数据库任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "harvest_gateway") {
             msg = "已提交扫描对话录制任务（ID: " + action.id + "）。正在等待宿主执行…";
+          } else if (op === "sync_snapshot") {
+            msg = "已提交刷新记忆快照任务（ID: " + action.id + "）。正在等待宿主执行…";
           }
           paintDbStatus(action, msg, "ok", op);
           say("信标已提交", "ok");
@@ -1293,13 +1291,6 @@
       });
     }
 
-    var saveCardCompressBtn = $("btn_save_card_compress");
-    if (saveCardCompressBtn) {
-      saveCardCompressBtn.addEventListener("click", function () {
-        saveCard("compress", "btn_save_card_compress", "status_card_compress");
-      });
-    }
-
     var saveCardModelBtn = $("btn_save_card_model");
     if (saveCardModelBtn) {
       saveCardModelBtn.addEventListener("click", function () {
@@ -1490,7 +1481,7 @@
       });
     }
 
-    ["compress", "disabled", "inline_extract", "auto_harvest", "ncb_instance", "mcp_key", "ncb_secret", "min_confidence"].forEach(function (k) {
+    ["disabled", "inline_extract", "auto_harvest", "ncb_instance", "mcp_key", "ncb_secret", "min_confidence"].forEach(function (k) {
       var el = $(k);
       if (el) el.addEventListener("change", function () { paintMode(collect()); });
       if (el && (el.type === "text" || el.type === "password" || el.type === "number")) {

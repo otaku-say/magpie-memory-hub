@@ -141,9 +141,7 @@ function createDOMStub(initialOptions) {
   }
 
   // 初始类型
-  if (elements.compress) elements.compress.type = "checkbox";
-  if (elements.cross_turn_dedup) elements.cross_turn_dedup.type = "checkbox";
-  if (elements.inline_extract) elements.inline_extract.type = "checkbox";
+    if (elements.inline_extract) elements.inline_extract.type = "checkbox";
   if (elements.disabled) elements.disabled.type = "checkbox";
   if (elements.ccr_cards) elements.ccr_cards.type = "checkbox";
   if (elements.inject_principles) elements.inject_principles.type = "checkbox";
@@ -230,10 +228,7 @@ async function runTests() {
     r2_bucket_name: "",
     r2_public_url: "",
     min_confidence: 0.8,
-    compress: true,
-    cross_turn_dedup: true,
-    compress_max_chars: 3000,
-    compress_min_chars: 1200,
+
     max_inject_count: 5,
     max_budget_chars: 2048,
     inline_extract: true,
@@ -302,7 +297,6 @@ async function runTests() {
   assert.strictEqual(provisionPayload.on_exist, "reuse");
   assert.strictEqual(provisionPayload.auto_init, false);
   assert.strictEqual(provisionPayload.min_confidence, 0.8);
-  assert.strictEqual(provisionPayload.compress, true);
   assert.strictEqual(provisionPayload.custom_external_field, "do_not_lose_me", "外部自定义字段不能被冲掉");
   assert.deepStrictEqual(provisionPayload.memories, [{ id: 101, title: "important memory" }], "memories 数组不能被冲掉");
 
@@ -586,14 +580,13 @@ async function runTests() {
   // 测试 10: 静态校验全部可配置项独立徽章完整性
   // ==========================================
   console.log("\n--- 测试 10: 全部可配置项独立徽章校验 ---");
-  const all23Fields = [ // v6.20.0 新增 harvest_max_per_min / harvest_max_total 后共 25 项
+  const all23Fields = [ // 卡片 ⑤ 下线后共 21 项可配置项
     "ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init",
     "r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url",
     "auto_harvest",
     "harvest_max_per_min", "harvest_max_total",
     "inline_extract", "min_confidence",
-    "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled",
-    "compress", "cross_turn_dedup", "compress_max_chars", "compress_min_chars"
+    "inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"
   ];
   for (const f of all23Fields) {
     const rowRegex = new RegExp(`for=["']${f}["'][\\s\\S]*?<span class="badge (?:rec|req)"`, "i");
@@ -636,7 +629,6 @@ async function runTests() {
   assert.strictEqual(cardSavePayload.mcp_key, "mcp_sec_key_xyz", "卡片 1 mcp_key 逐字段未改动");
   assert.strictEqual(cardSavePayload.r2_account_id, "acc-check-001", "卡片 2 r2_account_id 逐字段未改动");
   assert.strictEqual(cardSavePayload.inline_extract, true, "卡片 3 inline_extract 逐字段未改动");
-  assert.strictEqual(cardSavePayload.compress, true, "卡片 5 compress 逐字段未改动");
   assert.strictEqual(cardSavePayload.custom_external_field, "do_not_lose_me", "外部扩展字段完全保留");
   assert.deepStrictEqual(cardSavePayload.memories, [{ id: 101, title: "important memory" }], "memories 快照逐字段不变");
   assert.ok(!cardSavePayload._action, "保存卡片不应触发任何 _action 信标");
