@@ -309,6 +309,7 @@ function trackMemoryRetrievals(client, rows) {
 
 /** 分页取回（NCB 默认每页 10 条，默认 order_by: updated_at DESC） */
 export async function fetchAll(client, table, params, maxPagesArg) {
+  if (!client || typeof client.list !== "function") return [];
   const p = Object.assign({}, params || {});
   const rawMax = maxPagesArg != null ? maxPagesArg : p.max_pages;
   delete p.max_pages;
