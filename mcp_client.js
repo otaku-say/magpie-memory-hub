@@ -18,6 +18,7 @@
 import { TABLES } from "./schema.js";
 import { NcbMcp } from "./ncb_mcp.js";
 import { lookupRealDatabase } from "./local_state.js";
+import { resolveRealDatabase } from "./r2.js";
 
 /** 表名白名单 */
 const ALLOWED_TABLES = Object.keys(TABLES);
@@ -210,12 +211,35 @@ export function buildDelete(table, id) {
  */
 export function makeMcpClient(cfg, signal) {
   const rawDb = (cfg && (cfg.instance || cfg.ncb_instance)) || "";
-  const db = lookupRealDatabase(rawDb) || rawDb;
+  let db = lookupRealDatabase(rawDb) || rawDb;
   const sig = signal || (cfg && cfg.signal) || null;
   const mcp = new NcbMcp({ apiKey: (cfg && (cfg.mcpKey || cfg.mcp_key)) || "", signal: sig });
 
+  let resolvedDbPromise = null;
+  const resolveDb = () => {
+    if (!resolvedDbPromise) {
+      if (/^\d+_/.test(db)) {
+        resolvedDbPromise = Promise.resolve(db);
+      } else {
+        resolvedDbPromise = resolveRealDatabase(cfg, rawDb).then((real) => {
+          if (real && /^\d+_/.test(real)) {
+            db = real;
+          }
+          return db;
+        }).catch(() => db);
+      }
+    }
+    return resolvedDbPromise;
+  };
+
+  // 冷启动自动触发前缀解析缓存
+  if (!/^\d+_/.test(db) && (cfg && (cfg.mcpKey || cfg.mcp_key))) {
+    resolveDb();
+  }
+
   async function run(sql) {
-    const out = await mcp.executeSql(db, sql);
+    const targetDb = await resolveDb();
+    const out = await mcp.executeSql(targetDb, sql);
     return firstResult(out);
   }
 

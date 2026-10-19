@@ -30,7 +30,7 @@ import {
   DEFAULT_MIN_EVIDENCE,
 } from "./local_state.js";
 import { writeCardStatus } from "./page_actions.js";
-import { harvestWithOnlineModel } from "./gateway_harvest.hooks.js";
+import { harvestWithOnlineModel, classifyDialogueWithOnlineModel } from "./gateway_harvest.hooks.js";
 import { semanticFingerprint } from "./semantic_dedup.js";
 
 /* 诊断：把静默吞掉的错误说出来（每类只打一次，不含对话内容） */
@@ -56,6 +56,12 @@ export const SCAFFOLDING_PATTERNS = [
   /#\s*agents\.md\s+instructions\s+for[^\n]*/gi,
   /another language model started to solve[^\n]*/gi,
   /\[developer instructions\][\s\S]*?(?:\n\n|$)/gi,
+  /\[Persistent Memory Context[\s\S]*?(?=\n\n|\n\[user\]|$)/gi,
+  /\[Memory Instruction[\s\S]*?(?=\n\n|\n\[user\]|$)/gi,
+  /\[Memory Check[^\n\]]*\][\s\S]*?(?=\n\n|\n\[user\]|$)/gi,
+  /\[Memory Agent Guide[\s\S]*?(?=\n\n|\n\[user\]|$)/gi,
+  /\[Memory Context\][\s\S]*?(?=\n\n|\n\[user\]|$)/gi,
+  /---\s*Context from the delegating agent\s*---[\s\S]*?(?:\n\n|$)/gi,
 ];
 
 export function stripScaffolding(text) {
@@ -81,12 +87,46 @@ export function stripScaffolding(text) {
  *   5. /config/magpie/gateway-conversations（Docker 容器持久卷官方标准路径）
  *   6. ~/.config/magpie/gateway-conversations（宿主机/本地安装默认路径）
  */
+export const FORBIDDEN_DIRS = new Set([
+  "/",
+  "/root",
+  "/bin",
+  "/sbin",
+  "/etc",
+  "/usr",
+  "/lib",
+  "/lib64",
+  "/var",
+  "/proc",
+  "/sys",
+  "/dev",
+  "/boot",
+  "/home",
+]);
+
+export function validateGatewayDir(customDir) {
+  if (typeof customDir !== "string" || !customDir.trim()) {
+    throw new Error("[SECURITY_BLOCKED] 对话录制目录路径非法或为空");
+  }
+  const resolved = path.resolve(customDir.trim());
+  const root = path.parse(resolved).root;
+  if (resolved === root || FORBIDDEN_DIRS.has(resolved)) {
+    throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录或根路径: ${resolved}`);
+  }
+  for (const prefix of ["/proc", "/sys", "/dev", "/etc", "/boot"]) {
+    if (resolved === prefix || resolved.startsWith(prefix + path.sep)) {
+      throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${resolved}`);
+    }
+  }
+  return resolved;
+}
+
 export function resolveGatewayDir(customDir) {
   if (customDir && typeof customDir === "string" && customDir.trim()) {
-    return path.resolve(customDir.trim());
+    return validateGatewayDir(customDir);
   }
   if (process.env.MEMHUB_GATEWAY_CONV_DIR && process.env.MEMHUB_GATEWAY_CONV_DIR.trim()) {
-    return path.resolve(process.env.MEMHUB_GATEWAY_CONV_DIR.trim());
+    return validateGatewayDir(process.env.MEMHUB_GATEWAY_CONV_DIR.trim());
   }
 
   const candidates = [];
@@ -173,9 +213,12 @@ function sig(s) {
  * 3. 递归文件扫描与解析
  * ================================================================== */
 
-function collectConversationFiles(dir) {
+const MAX_SCAN_DEPTH = 3;
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+function collectConversationFiles(dir, maxDepth = MAX_SCAN_DEPTH) {
   const files = [];
-  function walk(current) {
+  function walk(current, depth) {
     let entries = [];
     try {
       entries = fs.readdirSync(current, { withFileTypes: true });
@@ -185,23 +228,37 @@ function collectConversationFiles(dir) {
     for (const ent of entries) {
       const full = path.join(current, ent.name);
       if (ent.isDirectory()) {
-        walk(full);
+        if (depth < maxDepth) {
+          walk(full, depth + 1);
+        }
       } else if (ent.isFile()) {
         if (ent.name.endsWith(".jsonl") || ent.name.endsWith(".json")) {
           if (!ent.name.includes(".tmp") && !ent.name.includes(".bad") && !ent.name.endsWith(".lock")) {
-            files.push(full);
+            try {
+              const st = fs.statSync(full);
+              if (st.size <= MAX_FILE_SIZE) {
+                files.push(full);
+              } else {
+                console.warn(`[gateway_harvest] 忽略超过 10MB 的超大文件: ${full} (${st.size} bytes)`);
+              }
+            } catch (_) {}
           }
         }
       }
     }
   }
-  walk(dir);
+  walk(dir, 0);
   return files;
 }
 
 function parseTurnsFromFile(filePath) {
   let content = "";
   try {
+    const st = fs.statSync(filePath);
+    if (st.size > MAX_FILE_SIZE) {
+      console.warn(`[gateway_harvest] 忽略超过 10MB 的超大文件: ${filePath} (${st.size} bytes)`);
+      return [];
+    }
     content = fs.readFileSync(filePath, "utf8");
   } catch (_) {
     return [];
@@ -467,6 +524,36 @@ export async function harvestGateway(args, context) {
       if (!dialogueText || dialogueText.length < 15) {
         processedFpSet.add(fp);
         continue;
+      }
+
+      // v6.30.0: 无价值短路（< 60 字符且无技术信号直接跳过，零模型调用前置拦截）
+      if (!isExplicitUserMemory(dialogueText)) {
+        const _probe = String(dialogueText).slice(0, 400);
+        const _hasTechSignalCI = /[a-z_]{2,}\.[a-z]{2,}|[\\/][\w.-]+|```|\b(error|报错|异常|配置|端口|bug|fix|deploy|api|sql|cors|token|key|安装|依赖|版本|数据库|架构|选型|规范|偏好|记住|踩坑)\b/i.test(_probe);
+        const _hasTechSignalCS = /[A-Z][A-Z0-9_]{2,}/.test(_probe);
+        if (dialogueText.length < 60 && !_hasTechSignalCI && !_hasTechSignalCS) {
+          processedFpSet.add(fp);
+          turnsProcessed++;
+          processedInThisFile++;
+          continue;
+        }
+      }
+
+      // 1. 分类模型快速过滤（若用户配置）
+      try {
+        const classRes = await classifyDialogueWithOnlineModel(dialogueText, {
+          ...cfg,
+          ...options,
+        });
+        if (classRes && !classRes.shouldHarvest) {
+          _diag("offline_classify_negative", `score=${classRes.score}`);
+          processedFpSet.add(fp);
+          turnsProcessed++;
+          processedInThisFile++;
+          continue;
+        }
+      } catch (_) {
+        // fail-open
       }
 
       // 双轨制：用户显式知识沉淀指令穿透门禁直接入库

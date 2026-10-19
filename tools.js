@@ -308,10 +308,14 @@ function trackMemoryRetrievals(client, rows) {
 }
 
 /** 分页取回（NCB 默认每页 10 条，默认 order_by: updated_at DESC） */
-async function fetchAll(client, table, params) {
+export async function fetchAll(client, table, params, maxPagesArg) {
+  const p = Object.assign({}, params || {});
+  const rawMax = maxPagesArg != null ? maxPagesArg : p.max_pages;
+  delete p.max_pages;
+  const maxPages = Math.max(1, Math.min(Number(rawMax) || 5, 20));
   const out = [];
-  for (let page = 1; page <= 20; page++) {
-    const res = await client.list(table, Object.assign({ limit: FETCH_LIMIT, page, order_by: "updated_at DESC" }, params || {}));
+  for (let page = 1; page <= maxPages; page++) {
+    const res = await client.list(table, Object.assign({ limit: FETCH_LIMIT, page, order_by: "updated_at DESC" }, p));
     const batch = rowsOf(res);
     if (!batch.length) break;
     out.push(...batch);
@@ -324,7 +328,11 @@ async function fetchAll(client, table, params) {
 
 /* ---------------- 检索打分 ---------------- */
 
-function termsOf(q) {
+export const CJK_STOP_BIGRAMS = new Set([
+  "怎么", "如何", "什么", "为什", "么办", "请问", "帮我", "一下", "这个", "那个"
+]);
+
+export function termsOf(q) {
   const raw = String(q || "").toLowerCase().trim();
   if (!raw) return [];
   const parts = raw.split(/[\s,，、;；]+/).map((s) => s.trim()).filter((s) => s.length >= 2);
@@ -332,6 +340,19 @@ function termsOf(q) {
   // 提取英文/数字专有标识（如 r2, redis, mysql, v6, api 等）
   const words = raw.match(/[a-z0-9_-]{2,}/g) || [];
   for (const w of words) terms.add(w);
+  // 对中文连续串提取 2-gram 并过滤 CJK_STOP_BIGRAMS
+  const cjkRuns = raw.match(/[一-鿿]+/g) || [];
+  for (const run of cjkRuns) {
+    for (let i = 0; i + 2 <= run.length; i++) {
+      const bg = run.slice(i, i + 2);
+      if (!CJK_STOP_BIGRAMS.has(bg)) {
+        terms.add(bg);
+      }
+    }
+  }
+  for (const stop of CJK_STOP_BIGRAMS) {
+    terms.delete(stop);
+  }
   return [...terms];
 }
 
@@ -374,7 +395,8 @@ function freshness(row) {
 }
 
 function rankMemory(row) {
-  const conf = (Number(row.confidence_score) || 100) / 100;
+  const rawScore = Number(row.confidence_score);
+  const conf = (!isNaN(rawScore) ? rawScore : 100) / 100;
   const acc = Math.min(Number(row.retrieval_count) || 0, 10);
   return conf * (1 + 0.1 * acc) * (0.5 + 0.5 * freshness(row));
 }
@@ -416,19 +438,30 @@ function isMemoryValid(row, nowMs = Date.now()) {
 function scrubSecrets(text) {
   if (typeof text !== "string" || !text) return text;
   let s = text;
+  // AWS Access Key
+  s = s.replace(/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "***REDACTED***");
+  // Slack/Discord Bot Token
+  s = s.replace(/\b(xox[baprs]-)[0-9A-Za-z-]{10,}\b/g, "$1***REDACTED***");
+  // 长 JWT（三段式）
+  s = s.replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "***REDACTED***");
   // OpenAI / Anthropic / Generic API keys
   s = s.replace(/\bsk-[a-zA-Z0-9_\-]{8,}\b/g, "sk-***REDACTED***");
   // GitHub Tokens
   s = s.replace(/\bgh[pousr]_[a-zA-Z0-9]{8,}\b/g, "ghp_***REDACTED***");
   // NoCodeBackend secret key
-  const ncbPrefix = ["ncb", "sec"].join("_"); s = s.replace(new RegExp("\\b" + ncbPrefix + "_[a-zA-Z0-9_\-]{8,}\\b", "g"), "ncb-***REDACTED***");
+  const ncbPrefix = ["ncb", "sec"].join("_"); s = s.replace(new RegExp("\\b" + ncbPrefix + "_[a-zA-Z0-9_\\-]{8,}\\b", "g"), "ncb-***REDACTED***");
   // Bearer tokens
   s = s.replace(/\b(Bearer\s+)[A-Za-z0-9_\-\.]{8,}\b/gi, "$1***REDACTED***");
   // Database connection strings: scheme://user:password@host
   s = s.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/:\s@]+:)([^@\s]+)(@)/g, "$1***REDACTED***$3");
+  // 中文口令描述
+  s = s.replace(/(密码|密钥|口令|token|secret|apikey|api_key)\s*[是为:：=]\s*['"]?([A-Za-z0-9_!@#$%^&*\-+=.~]{6,})['"]?/gi, (match, k, val) => {
+    if (/\*+REDACTED\*+/i.test(val)) return match;
+    return `${k}=***REDACTED***`;
+  });
   // Key-value pairs for passwords and API keys
   s = s.replace(/\b(password|passwd|pwd|api_key|apikey|secret_key|secretKey)\s*([:=])\s*(['"]?)([^'"\s,;]+)\3/gi, (match, k, eq, quote, val) => {
-    if (/^\*+REDACTED\*+$/i.test(val)) return match;
+    if (/\*+REDACTED\*+/i.test(val)) return match;
     return `${k}${eq}${quote}***REDACTED***${quote}`;
   });
   return s;
@@ -456,9 +489,11 @@ async function saveMemory(client, cfg, m, ctx) {
     : content;
   const tags = scrubSecrets(String(m.tags || "").trim().toLowerCase());
   const relatedEntities = scrubSecrets(String(m.related_entities || "").trim());
-  let confidence = Number(m.confidence);
-  if (!confidence || confidence <= 1) confidence = Math.round((confidence || 1) * 100);
-  confidence = Math.max(0, Math.min(100, Math.round(confidence || 100)));
+  const rawConf = typeof m.confidence === "number"
+    ? m.confidence
+    : (m.confidence !== undefined && m.confidence !== null && m.confidence !== "" && !isNaN(Number(m.confidence)) ? Number(m.confidence) : 1);
+  let confidence = rawConf <= 1 ? Math.round(rawConf * 100) : Math.round(rawConf);
+  confidence = Math.max(0, Math.min(100, confidence));
 
   /* 来源可追溯性（空值语义说明）：
    * source_session 与 source_turn 为 NULL 是完全合法且符合设计的正常行为：
@@ -938,10 +973,33 @@ async function memoryList(client, cfg, args) {
 async function memoryContext(client, cfg, args) {
   const maxItems = Number(args.max_items) || cfg.maxInject || 5;
   const budget = Number(args.max_chars) || cfg.maxBudget || 2048;
-  const terms = termsOf(args.query);
+  const rawQuery = String(args.query || "").trim();
+  const origTerms = termsOf(rawQuery);
   const projectArg = args.project ? String(args.project).trim() : "";
 
-  const fetchParams = { lifecycle_status: "active" };
+  const fetchParams = {
+    lifecycle_status: "active",
+    columns: [
+      "id",
+      "project",
+      "category",
+      "scope_level",
+      "client",
+      "origin",
+      "title",
+      "content",
+      "tags",
+      "related_entities",
+      "confidence_score",
+      "recurrence",
+      "retrieval_count",
+      "last_used_at",
+      "updated_at",
+      "lifecycle_status",
+      "invalid_at",
+      "expires_at",
+    ],
+  };
 
   // 1. 获取 memories（支持跨项目全局穿透：project + global）
   let pool = [];
@@ -989,10 +1047,48 @@ async function memoryContext(client, cfg, args) {
     })
     .slice(0, maxPrinciples);
 
+  // 双路词面扩展打分：在线提炼模型改写自然语言查询（fail-open）
+  let rewrittenInfo = null;
+  let rewrittenTerms = [];
+  if (rawQuery) {
+    try {
+      rewrittenInfo = await rewriteSearchQuery({
+        query: rawQuery,
+        options: cfg,
+      });
+      if (rewrittenInfo && rewrittenInfo.rewrittenQuery) {
+        rewrittenTerms = termsOf(rewrittenInfo.rewrittenQuery);
+      }
+    } catch (_) {
+      rewrittenInfo = null;
+      rewrittenTerms = [];
+    }
+  }
+
+  const hasOrig = origTerms.length > 0;
+  const hasRewrite = rewrittenTerms.length > 0;
+
   const principleIds = new Set(principles.map((p) => p.id));
   const scored = pool
     .filter((r) => !principleIds.has(r.id))
-    .map((r) => ({ row: r, hit: scoreMemory(r, terms) }))
+    .map((r) => {
+      if (!hasOrig && !hasRewrite) {
+        return { row: r, hit: 1, origHit: 1, rewriteHit: 0 };
+      }
+      const origHit = hasOrig ? scoreMemory(r, origTerms) : 0;
+      const rewriteHit = hasRewrite ? scoreMemory(r, rewrittenTerms) : 0;
+
+      let combinedHit = 0;
+      if (hasOrig && hasRewrite) {
+        combinedHit = origHit + rewriteHit;
+      } else if (hasOrig) {
+        combinedHit = origHit;
+      } else if (hasRewrite) {
+        combinedHit = rewriteHit;
+      }
+
+      return { row: r, hit: combinedHit, origHit, rewriteHit };
+    })
     .filter((x) => x.hit > 0)
     .sort((a, b) => {
       if (projectArg && projectArg !== "global") {
@@ -1006,11 +1102,15 @@ async function memoryContext(client, cfg, args) {
   // 3. 同时拉取 pitfalls 表，支持跨项目穿透，匹配 Top 3 踩坑经验
   let pitfallPool = [];
   try {
+    const pitfallColumns = [
+      "id", "project", "component", "client", "symptom", "root_cause", "solution",
+      "recurrence", "last_occurred_at", "updated_at", "invalid_at"
+    ];
     let rawPitfalls = [];
     if (projectArg && projectArg !== "global") {
       const [projPits, globalPits] = await Promise.all([
-        fetchAll(client, "pitfalls", { project: projectArg }),
-        fetchAll(client, "pitfalls", { project: "global" }),
+        fetchAll(client, "pitfalls", { project: projectArg, columns: pitfallColumns }),
+        fetchAll(client, "pitfalls", { project: "global", columns: pitfallColumns }),
       ]);
       const seenPits = new Set();
       for (const r of projPits) {
@@ -1028,7 +1128,7 @@ async function memoryContext(client, cfg, args) {
         }
       }
     } else {
-      const pitParams = {};
+      const pitParams = { columns: pitfallColumns };
       if (projectArg) pitParams.project = projectArg;
       rawPitfalls = await fetchAll(client, "pitfalls", pitParams);
     }
@@ -1047,7 +1147,22 @@ async function memoryContext(client, cfg, args) {
   }
 
   const scoredPitfalls = pitfallPool
-    .map((r) => ({ row: r, hit: terms.length ? scorePitfall(r, terms) : 1 }))
+    .map((r) => {
+      if (!hasOrig && !hasRewrite) {
+        return { row: r, hit: 1 };
+      }
+      const origHit = hasOrig ? scorePitfall(r, origTerms) : 0;
+      const rewriteHit = hasRewrite ? scorePitfall(r, rewrittenTerms) : 0;
+      let combinedHit = 0;
+      if (hasOrig && hasRewrite) {
+        combinedHit = origHit + rewriteHit;
+      } else if (hasOrig) {
+        combinedHit = origHit;
+      } else if (hasRewrite) {
+        combinedHit = rewriteHit;
+      }
+      return { row: r, hit: combinedHit };
+    })
     .filter((x) => x.hit > 0)
     .sort((a, b) => {
       if (projectArg && projectArg !== "global") {
@@ -1178,16 +1293,36 @@ async function pitfallSave(client, cfg, args, ctx) {
     // fail-open
   }
 
-  const exist = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT })).filter(
-    (r) => r.content_fingerprint === fp
-  );
-  if (exist.length) {
-    const row = exist[0];
-    const next = (Number(row.recurrence) || 1) + initialRecurrence;
+  const allPitfalls = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT }));
+  const activePitfalls = allPitfalls.filter((r) => !r.invalid_at);
+  let dup = activePitfalls.find((r) => r.content_fingerprint === fp);
+  if (!dup) {
+    dup = activePitfalls.find((r) => {
+      const rSym = normalizeSemanticText(r.symptom);
+      const curSym = normalizeSemanticText(symptom);
+      if (rSym && curSym && (rSym === curSym || rSym.includes(curSym) || curSym.includes(rSym))) {
+        return true;
+      }
+      const rTok = tokenize(r.symptom);
+      const sTok = tokenize(symptom);
+      if (overlapCoefficient(rTok.tokens, sTok.tokens) >= 0.5 || jaccardSimilarity(rTok.tokens, sTok.tokens) >= 0.3) {
+        return true;
+      }
+      return isSemanticallySimilar(symptom, solution || rootCause, r.symptom, r.solution || r.root_cause);
+    });
+  }
+
+  if (dup) {
+    const next = (Number(dup.recurrence) || 1) + initialRecurrence;
     try {
-      await client.update("pitfalls", row.id, { recurrence: next, last_occurred_at: now, updated_at: now });
-      markRecent("p:" + fp);
-      return jsonOut({ action: "NOOP", id: row.id, recurrence: next });
+      await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now });
+      markRecent("p:" + (dup.content_fingerprint || fp));
+      return jsonOut({
+        action: "NOOP",
+        id: dup.id,
+        recurrence: next,
+        note: dup.content_fingerprint === fp ? undefined : "语义相似踩坑去重命中，累加复发计数",
+      });
     } catch (e) {
       if (!/404|not found/i.test(String(e.message))) throw e;
     }
@@ -1207,7 +1342,7 @@ async function pitfallSave(client, cfg, args, ctx) {
     if (/duplicate entry/i.test(String(e.message))) {
       markRecent("p:" + fp);
       const dup = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT })).filter(
-        (r) => r.content_fingerprint === fp
+        (r) => !r.invalid_at && r.content_fingerprint === fp
       )[0];
       if (dup) {
         const next = (Number(dup.recurrence) || 1) + initialRecurrence;
@@ -1585,6 +1720,7 @@ export async function memoryAuditUndo(client, cfg, args) {
 
   for (const c of targetCandidates) {
     try {
+      const dupRec = Number(c.row?.recurrence) || 1;
       if (c.table === "memories") {
         await client.update("memories", c.id, {
           invalid_at: null,
@@ -1593,7 +1729,10 @@ export async function memoryAuditUndo(client, cfg, args) {
           updated_at: now,
         });
         restoredCount++;
-        memPrimaryMap.set(c.primaryId, (memPrimaryMap.get(c.primaryId) || 0) + 1);
+        const cur = memPrimaryMap.get(c.primaryId) || { count: 0, rec: 0 };
+        cur.count += 1;
+        cur.rec += dupRec;
+        memPrimaryMap.set(c.primaryId, cur);
       } else if (c.table === "pitfalls") {
         await client.update("pitfalls", c.id, {
           invalid_at: null,
@@ -1601,29 +1740,32 @@ export async function memoryAuditUndo(client, cfg, args) {
           updated_at: now,
         });
         restoredCount++;
-        pitPrimaryMap.set(c.primaryId, (pitPrimaryMap.get(c.primaryId) || 0) + 1);
+        const cur = pitPrimaryMap.get(c.primaryId) || { count: 0, rec: 0 };
+        cur.count += 1;
+        cur.rec += dupRec;
+        pitPrimaryMap.set(c.primaryId, cur);
       }
     } catch (_) {}
   }
 
   async function rollbackPrimaries(table, primaryMap) {
-    for (const [pId, dupCount] of primaryMap.entries()) {
+    for (const [pId, info] of primaryMap.entries()) {
       try {
         const rows = rowsOf(await client.list(table, { project, id: pId }));
         const pRow = rows[0];
         if (!pRow || pRow.invalid_at || pRow.lifecycle_status === "invalid" || pRow.lifecycle_status === "superseded") {
-          skippedCount += dupCount;
+          skippedCount += info.count;
           continue;
         }
         const curRec = Number(pRow.recurrence) || 1;
-        const newRec = Math.max(1, curRec - dupCount);
+        const newRec = Math.max(1, curRec - info.rec);
         await client.update(table, pId, {
           recurrence: newRec,
           updated_at: now,
         });
         undoneRecurrence += (curRec - newRec);
       } catch (_) {
-        skippedCount += dupCount;
+        skippedCount += info.count;
       }
     }
   }
@@ -1894,10 +2036,10 @@ export async function memoryAudit(client, cfg, args, ctx) {
       for (let j = i + 1; j < rows.length; j++) {
         const b = rows[j];
         if (batchDupIds.has(b.id)) continue;
-        const sameComp = normalizeSemanticText(a.component) === normalizeSemanticText(b.component);
+        const sameFp = a.content_fingerprint && b.content_fingerprint && a.content_fingerprint === b.content_fingerprint;
         const sameSym = normalizeSemanticText(a.symptom) === normalizeSemanticText(b.symptom);
         const similar = isSemanticallySimilar(a.symptom, a.solution || a.root_cause, b.symptom, b.solution || b.root_cause);
-        if (sameComp && (sameSym || similar)) {
+        if (sameFp || sameSym || similar) {
           grp.push(b);
           batchDupIds.add(b.id);
         }

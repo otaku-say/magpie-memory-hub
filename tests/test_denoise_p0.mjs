@@ -169,12 +169,30 @@ Project Context: This is an internal AI context.
 <system-reminder>
 Remember to follow instructions.
 </system-reminder>
+[Persistent Memory Context]
+- [principle] 规范准则: 所有的 API 必须写注释
+- [fact] 架构事实: 统一使用 Node 20
+
+[Memory Agent Guide —— 检索与沉淀]
+1. 优先检索记忆...
+2. 及时沉淀...
+
+[Memory Context]
+- [fact] 旧记忆上下文: 某系统配置参数
+
 用户真实提问：如何配置数据库？
+
+--- Context from the delegating agent ---
+云端沙箱 ID：aa8f1812331643068673810a570196ea
 `.trim();
 
   const stripped = stripScaffolding(scaffoldText);
   assert.ok(!stripped.includes("<app-context>"), "必须剔除 <app-context>");
   assert.ok(!stripped.includes("<system-reminder>"), "必须剔除 <system-reminder>");
+  assert.ok(!stripped.includes("[Persistent Memory Context]"), "必须剔除 [Persistent Memory Context]");
+  assert.ok(!stripped.includes("[Memory Agent Guide"), "必须剔除 [Memory Agent Guide]");
+  assert.ok(!stripped.includes("[Memory Context]"), "必须剔除 [Memory Context]");
+  assert.ok(!stripped.includes("Context from the delegating agent"), "必须剔除 Context from the delegating agent");
   assert.ok(stripped.includes("用户真实提问：如何配置数据库？"), "必须保留用户真实内容");
 
   // system / tool 消息丢弃测试

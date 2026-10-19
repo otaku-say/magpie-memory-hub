@@ -157,7 +157,7 @@ export function runMetaCheck(options = {}) {
   }
 
   // 强断言：锁定当前活跃测试文件总数（新增 adversarial_v629_gate.mjs 后为 44 个）
-  assert.strictEqual(testFiles.length, 43, "测试文件总数断言：期望 43 个");
+  assert.strictEqual(testFiles.length, 46, "测试文件总数断言：期望 44 个");
 
   // 反证测试 1：验证门禁对写 global 恶意用例具备拦截能力
   const fakeSample = `

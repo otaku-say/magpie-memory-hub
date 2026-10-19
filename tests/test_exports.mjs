@@ -12,7 +12,7 @@ const toolsMod = await import("../tools.js");
 const toolsKeys = Object.keys(toolsMod);
 console.log("tools.js 导出列表:", toolsKeys);
 assert.strictEqual(typeof toolsMod.MagpieMemoryHub, "function", "tools.js 导出的主入口必须是函数");
-const ALLOWED_EXPORTS = new Set(["MagpieMemoryHub", "makeClient", "memoryAudit", "getDedupTimeWindow", "isDedupDue", "memoryAuditUndo"]);
+const ALLOWED_EXPORTS = new Set(["MagpieMemoryHub", "makeClient", "memoryAudit", "getDedupTimeWindow", "isDedupDue", "memoryAuditUndo", "termsOf", "CJK_STOP_BIGRAMS", "fetchAll"]);
 for (const k of toolsKeys) {
   assert(ALLOWED_EXPORTS.has(k), `未授权的导出项: ${k}`);
 }

@@ -300,12 +300,61 @@ async function execute(action, cfg, fs, sp, state, options) {
           const { makeClient } = await import("./tools.js");
           client = makeClient(cfg);
         }
-        const resList = await client.list("memories", {
-          lifecycle_status: "active",
-          order_by: "updated_at DESC",
-          limit: 50,
-        });
-        memories = Array.isArray(resList?.data) ? resList.data : (Array.isArray(resList) ? resList : []);
+        const prj = String(action.project || (cfg && cfg.project) || (options && options.project) || "").trim();
+        if (prj && prj !== "global") {
+          // 在有 project 上下文时支持按 project + global 过滤，杜绝跨项目混淆
+          const [projRes, globalRes] = await Promise.all([
+            client.list("memories", {
+              project: prj,
+              lifecycle_status: "active",
+              order_by: "updated_at DESC",
+              limit: 50,
+            }),
+            client.list("memories", {
+              project: "global",
+              lifecycle_status: "active",
+              order_by: "updated_at DESC",
+              limit: 50,
+            }),
+          ]);
+          const projRows = Array.isArray(projRes?.data) ? projRes.data : (Array.isArray(projRes) ? projRes : []);
+          const globalRows = Array.isArray(globalRes?.data) ? globalRes.data : (Array.isArray(globalRes) ? globalRes : []);
+          const seen = new Set();
+          const combined = [];
+          for (const r of projRows) {
+            const uid = r.id != null ? r.id : `${r.project}:${r.title}`;
+            if (!seen.has(uid)) {
+              seen.add(uid);
+              combined.push(r);
+            }
+          }
+          for (const r of globalRows) {
+            const uid = r.id != null ? r.id : `${r.project}:${r.title}`;
+            if (!seen.has(uid)) {
+              seen.add(uid);
+              combined.push(r);
+            }
+          }
+          // 专属项目优先排序，其次按 updated_at 倒序
+          combined.sort((a, b) => {
+            const aIsProj = String(a.project || "") === prj ? 1 : 0;
+            const bIsProj = String(b.project || "") === prj ? 1 : 0;
+            if (aIsProj !== bIsProj) return bIsProj - aIsProj;
+            return Date.parse(b.updated_at || b.created_at || 0) - Date.parse(a.updated_at || a.created_at || 0);
+          });
+          memories = combined.slice(0, 50);
+        } else {
+          const queryParams = {
+            lifecycle_status: "active",
+            order_by: "updated_at DESC",
+            limit: 50,
+          };
+          if (prj === "global") {
+            queryParams.project = "global";
+          }
+          const resList = await client.list("memories", queryParams);
+          memories = Array.isArray(resList?.data) ? resList.data : (Array.isArray(resList) ? resList : []);
+        }
         result = {
           ok: true,
           at: Date.now(),

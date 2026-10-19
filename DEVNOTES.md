@@ -662,3 +662,166 @@ true !== false
 - 代码库及测试用例中严禁硬编码任何真实密钥或敏感凭据；
 - 所有敏感凭据在入库前均经过 `scrubSecrets` 正则脱敏；
 - 测试用例使用内存 Mock 桩与隔离命名空间，测试结束后残留确认为 0。
+
+
+---
+
+## 十七、数据状态机、中文分词Bigram、一站式投影与衰减算法整改报告
+
+# 检查点：v6300 状态机与中文分词检索整改任务
+
+## 角色与分支
+- 角色：数据状态机与中文分词检索增强 Agent（沙箱 1）
+- 分支：feat/v6300-state-and-retrieval
+- 沙箱 ID：aa8f1812331643068673810a570196ea
+
+## 任务拆解与整改完成情况
+1. [x] tools.js: termsOf(q) 中文 Bigram 分词与常见疑问虚词剥离（CJK_STOP_BIGRAMS 过滤）
+   - 对中文连续串提取 2-gram 并过滤 CJK_STOP_BIGRAMS = new Set(["怎么", "如何", "什么", "为什", "么办", "请问", "帮我", "一下", "这个", "那个"])。
+   - 彻底解决无空格自然中文问句（如“端口冲突怎么处理”）召回率为 0 的严重问题。
+2. [x] tools.js: memoryContext 精简投影白名单（排除 full_text），接入 rewriteSearchQuery 双路词面扩展打分
+   - memoryContext 补齐 columns 精简投影白名单，防止穿透拉取庞大 full_text。
+   - 接入 rewriteSearchQuery 双路词面扩展与打分机制，大幅提升上下文召回语义覆盖度。
+3. [x] tools.js & gateway_harvest.hooks.js: pitfallSave 增加 !r.invalid_at 过滤，接入 Layer ② isSemanticallySimilar 语义比对
+   - 杜绝软删除踩坑被复活并卡死。
+   - 接入 Layer ② isSemanticallySimilar 语义比对，支持语义相似踩坑去重合并累加。
+4. [x] tools.js: memoryAuditUndo 撤销去重按 dupRec 真实值扣减主记录 recurrence，数学守恒
+   - 按 dupRec (Number(c.row.recurrence) || 1) 真实累加值扣减主记录 recurrence，确保数学守恒，杜绝主记录计数膨胀。
+5. [x] tools.js: memoryAudit 踩坑规则去重放宽 sameComp 限制，支持跨组件语义合并
+   - 放宽 sameComp 限制，支持跨组件相同现象或语义相似的踩坑合并软失效。
+6. [x] memory.middleware.js: 艾宾浩斯衰减 retention 修复短路：Math.max(tUsed, tUpd)
+   - retention 修复时间戳短路：tUsed 与 tUpd 取 Math.max(tUsed, tUpd)，使检索命中后更新的 last_used_at 真实参与衰减加权。
+7. [x] settings.js: sync_snapshot 回写设置 next.memories_version = Date.now()，配合 O(1) 索引快速缓存
+   - sync_snapshot 收到快照结果后回写 next.memories_version = Date.now()，配合中间件实现 O(1) 索引快速缓存。
+8. [x] tools.js: fetchAll 支持 max_pages 参数（默认 5，上限 20），消除穿透查询 RPC 放大
+   - 支持 max_pages 控制拉取上限（默认 5 页，上限 20 页），防止穿透查询时的串行 RPC 放大。
+9. [x] gateway_harvest.js: 离线扫描增加 < 60 字符短路与 classifyDialogueWithOnlineModel 前置分类过滤
+   - 增加 < 60 字符短路与 classifyDialogueWithOnlineModel 前置分类过滤，防止打满模型预算。
+10. [x] 加塞紧急修复：SCAFFOLDING_PATTERNS 补充上下文/提示词剥离，调整超时上限（提炼 30s，分类 15s），防 499 客户端取消异常
+   - SCAFFOLDING_PATTERNS 增加 [Persistent Memory Context]、[Memory Agent Guide]、[Memory Context]、--- Context from the delegating agent --- 清洗规则；
+   - harvestWithOnlineModel 默认超时放宽至 30000ms；classifyDialogueWithOnlineModel 默认超时放宽至 15000ms；
+   - test_denoise_p0.mjs 补全相应剥离断言。
+
+## 验证结论
+- tests/test_v6300_state_and_retrieval.mjs: 100% 通过
+- tests/test_auto_dedup_and_undo.mjs: 100% 通过
+- tests/test_search_enhancement_and_scale.mjs: 100% 通过
+- tests/test_denoise_p0.mjs: 100% 通过
+- tests/test_gateway_harvest.mjs: 100% 通过
+- tests/test_gateway_harvest_hooks.mjs: 100% 通过
+- tests/test_dedup_and_audit.mjs: 100% 通过
+- 全流程隔离环境零残留断言通过。
+
+
+---
+
+## 十八、安全防御、租户隔离与凭据脱敏整改报告
+
+# feat(v6300): 安全防御、租户隔离与凭据脱敏整改检查点记录
+
+## 1. 整改背景与目标
+沙箱 ID: 59a254a04c78437ba68a29425d474b87
+分支: feat/v6300-security-and-isolation
+目标: 针对 Magpie 记忆中枢系统的安全边界、租户隔离、凭据脱敏与状态保护进行全面加固，杜绝密钥泄露、租户数据混淆、跨库清空与异常状态抹平。
+
+## 2. 核心整改任务清单与执行规划
+
+### 任务 1: tools.js & gateway_harvest.hooks.js: scrubSecrets 正则脱敏库全量扩充
+- [x] AWS Access Key 过滤: \b(AKIA|ASIA)[0-9A-Z]{16}\b -> ***REDACTED***
+- [x] Slack/Discord Bot Token: \b(xox[baprs]-)[0-9A-Za-z-]{10,}\b -> $1***REDACTED***
+- [x] 长 JWT (三段式): \beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b -> ***REDACTED***
+- [x] 数据库连接串密码脱敏: [a-z]+:\/\/[^:\s]+:[^@\s]+@[^\s]+ -> scheme://user:***REDACTED***@host
+- [x] 中文口令描述脱敏: /(密码|密钥|口令|token|secret|apikey|api_key)\s*[是为:：=]\s*['"]?([^\s'"]{8,})['"]?/gi -> $1=***REDACTED***
+- [x] 保持 tools.js 与 gateway_harvest.hooks.js 脱敏逻辑一致。
+
+### 任务 2: local_state.js: readState() 损坏自愈与防抹平保护
+- [x] readState() 损坏容灾：JSON 解析失败或损坏时，严禁写入空 {} 抹平历史状态（防止丢失 secret key 缓存与游标）。
+- [x] 损坏文件重命名备份为 state.json.corrupt.<timestamp>，并尝试加载 state.json.bak 备份。
+- [x] writeState 备份机制：在原子写入成功前保留 state.json.bak。若传入损坏状态 (_ok === false || _corrupt === true) 禁止落盘。
+
+### 任务 3: db_tools.js: db_reset 目标数据库强制保护
+- [x] 强校验 args.database === (cfg.instance || cfg.ncb_instance)，拒绝清空外来数据库或系统表。
+- [x] 违规请求抛出 FORBIDDEN_DATABASE 错误并中止。
+
+### 任务 4: gateway_harvest.js: harvest_gateway 路径穿越与越界遍历防护
+- [x] 强校验 dir 参数：禁止遍历 / 或 /root 等系统根路径与敏感系统目录，解析绝对路径确保在安全目录内。
+- [x] 限制目录递归最大深度为 3。
+- [x] 单文件体积上限限制为 10MB。
+
+### 任务 5: tools.js: memorySave: 修复 confidence_score 值为 0 时的 JS 短路 Bug
+- [x] 修正 confidence || 1 短路判断，支持 0 分置信度合法存储：typeof args.confidence === "number" ? args.confidence : 1。
+
+### 任务 6: mcp_client.js: makeMcpClient 冷启动自动库名前缀解析缓存
+- [x] 在仅提供逻辑库名时，冷启动自动调用前缀解析，将账号前缀（如 41694_xxx）解析并缓存至 local_state。
+
+### 任务 7: page_actions.js: sync_snapshot 在有 project 上下文时支持按 project + global 过滤
+- [x] sync_snapshot 读取记忆快照时，根据 project 上下文按 project + global 过滤，专属项目优先，杜绝跨项目混淆。
+
+## 3. 验收标准与测试执行结果
+- 新增验收测试套件 `tests/test_v6300_security_and_isolation.mjs`，包含 7 大核心整改项专项测试，100% 通过。
+- 历史核心回归测试全量通过：
+  - `tests/test_exports.mjs`: 导出面白名单合规性复核通过。
+  - `tests/test_proactive_memory_ux.mjs`: 主动记忆查存与脱敏验收全部通过。
+  - `tests/test_secret_stale_eviction.mjs`: 失效密钥清理与反证测试全部通过。
+  - `tests/test_sql_escape.mjs`: SQL 转义与注入对抗全部通过。
+  - `tests/test_gateway_harvest.mjs`: 录制扫描与增量提炼全部通过。
+  - `tests/test_gateway_harvest_hooks.mjs`: 异步请求钩子 11 项严谨性测试全部通过。
+  - `tests/test_state_bloat_and_dead_letter.mjs`: 状态膨胀与死信淘汰全部通过。
+  - `tests/adversarial_v629_gate.mjs`: 红队 6 大靶场门禁 100% 放行 (GREEN)。
+  - `tests/test_failopen.mjs`: 畸形输入 fail-open 保护全部通过。
+  - `tests/test_denoise_p0.mjs`: 去噪门禁与生命周期测试全部通过。
+  - `tests/test_multi_protocol.mjs`: 多协议流式剥离与保真测试全部通过。
+- 零敏感凭据输出到控制台与日志。
+- 代码无破坏性回归。
+
+
+---
+
+## 十九、v6.30.0 里程碑红队对抗门禁与发版集成报告
+
+# NOTES_v6300_qa_and_docs.md
+# v6.30.0 里程碑红队门禁与发版集成检查点记录
+
+## 1. 角色与任务定位
+- 角色：红队门禁与 v6.30.0 里程碑发版套件 Agent（沙箱 3）
+- 沙箱 ID：832efdf46c8b46a6891eea0a42afeb6d
+- 当前分支：feat/v6300-qa-and-docs
+- 上游特性分支：
+  - Agent 1: `feat/v6300-state-and-retrieval` (沙箱 aa8f1812331643068673810a570196ea)
+  - Agent 2: `feat/v6300-security-and-isolation` (沙箱 59a254a04c78437ba68a29425d474b87)
+
+## 2. 红队对抗靶场套件规划 (tests/test_v6300_milestone_gate.mjs)
+覆盖 7 大核心反证靶场：
+1. **靶子 1 (中文无空格自然问句检索)**:
+   - 输入 query: "端口冲突怎么处理"
+   - 目标命中: 标题为 "Nginx 端口冲突解决方案" 的记忆
+   - 验证点: Bigram 双字切词与常见中文疑问虚词剥离生效，杜绝中文问句零召回。
+2. **靶子 2 (软失效踩坑防死循环复活)**:
+   - 目标: 验证已标记 invalid_at 的踩坑记录绝不能被 pitfall_save 命中为 NOOP 且不清除 invalid_at。
+   - 验证点: 软失效记录在语义比对与复发累加时必须被排除或正确复活，杜绝死循环卡死。
+3. **靶子 3 (memoryAuditUndo 复发计数数学守恒)**:
+   - 构造: 合并副本 recurrence=3
+   - 验证点: 撤销去重后主记录 recurrence 必须准确扣减 3，而不是只扣减 1，保持数学守恒。
+4. **靶子 4 (scrubSecrets 全格式脱敏靶场)**:
+   - 构造包含:
+     - AWS Access Key (AKIA...)
+     - 长 JWT (eyJ...)
+     - Slack Token (xoxb-...)
+     - Postgres 连接串明文密码 (postgres://user:password@host/db)
+   - 验证点: 100% 替换为 ***REDACTED***，杜绝任何敏感凭据落库。
+5. **靶子 5 (db_reset 越权跨库防御靶场)**:
+   - 传入非当前配置的目标数据库名 (如 rogue_database)
+   - 验证点: 必须抛错拦截，拒绝越权跨库破坏。
+6. **靶子 6 (harvest_gateway 根目录路径穿越拦截)**:
+   - 传入 dir: "/" 或 dir: "/etc"
+   - 验证点: 必须安全拦截抛错，禁止遍历根路径与敏感系统路径。
+7. **靶子 7 (state.json 损坏自愈靶场)**:
+   - 故意写入非法 JSON 损坏 state.json
+   - 验证点: readState() 绝不能抹平为空对象 {}，必须生成 .corrupt 备份并尝试从 .bak 恢复。
+
+## 3. 规范遵从与发版计划
+- 更新 tests/test_meta.mjs: 活跃测试总数断言由 43 升级为 44。
+- 监听并汇聚 Agent 1 (`feat/v6300-state-and-retrieval`) 与 Agent 2 (`feat/v6300-security-and-isolation`)。
+- 全量回归测试：全库 44 个单测与红队反证套件 100% GREEN。
+- 版本升级：package.json、settings.html、README.md 同步升级至 v6.30.0。
+- 最终 commit 并 push origin feat/v6300-qa-and-docs。

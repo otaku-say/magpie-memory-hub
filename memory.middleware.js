@@ -108,8 +108,21 @@ function retention(m, now) {
   var rc = parseInt(m.retrieval_count, 10);
   if (!rc || rc !== rc) rc = 0;
   var S = 1.0 * (1 + 1.5 * Math.log(1 + rc));
-  var t = parseTime(m.updated_at || m.last_used_at || m.created_at || "");
-  if (isNaN(t)) return 1;
+  var tUpd = parseTime(m.updated_at || "");
+  var tUsed = parseTime(m.last_used_at || "");
+  var validUpd = !isNaN(tUpd) && tUpd > 0;
+  var validUsed = !isNaN(tUsed) && tUsed > 0;
+  var t;
+  if (validUpd && validUsed) {
+    t = Math.max(tUsed, tUpd);
+  } else if (validUsed) {
+    t = tUsed;
+  } else if (validUpd) {
+    t = tUpd;
+  } else {
+    t = parseTime(m.created_at || "");
+  }
+  if (isNaN(t) || !t) return 1;
   var days = (now - t) / DAY_MS;
   if (days <= 0) return 1;
   return Math.exp(-days / S);
