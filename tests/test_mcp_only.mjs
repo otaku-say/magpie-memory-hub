@@ -95,8 +95,9 @@ try {
   try {
     st = P(await S.db_status.execute({}));
   } catch (err) {
-    if (String(err?.message || "").includes("Could not determine user email")) {
-      console.log("\n[SKIP] 远程 NoCodeBackend Token 无效或未授权，跳过依赖真实鉴权的测试项");
+    const m = String(err?.message || "");
+    if (m.includes("Could not determine user email") || /fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|network|EAI_AGAIN/i.test(m)) {
+      console.log("\n[SKIP] 远程 NoCodeBackend Token 无效或未授权，或网络断开，跳过依赖真实鉴权的测试项");
       await env.cleanup();
       process.exit(77);
     }
@@ -110,6 +111,14 @@ try {
     const isEqual = (back && String(back.content) === tamperedContent);
     check(!isEqual, "反证通过：篡改 1 字节后，等值比对成功判定为 false，不会静默放行");
   }
+} catch (err) {
+  const msg = String(err && (err.message || err.cause || err));
+  if (msg.includes("Could not determine user email") || /fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|network|EAI_AGAIN/i.test(msg)) {
+    console.log("\n[SKIP] 网络断开或远程 NoCodeBackend Token 无效，优雅跳过测试:", msg);
+    await env.cleanup();
+    process.exit(77);
+  }
+  throw err;
 } finally {
   console.log("\n--- 9. 强制清理与残留为 0 断言 ---");
   const cleanRes = await env.cleanup();

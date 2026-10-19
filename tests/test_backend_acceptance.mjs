@@ -54,8 +54,12 @@ try {
     const res = await ncbCheck({ instance: env.instance, mcp_key: env.mcpKey }, {});
     console.log("1.3 正确 MCP key（库存在）返回：");
     console.log(JSON.stringify(res, null, 2));
-    if (res.diagnosis?.kind === "INVALID_MCP_KEY" && (res.lines?.[1] || "").includes("Could not determine user email")) {
-      console.log("\n[SKIP] 远程 NoCodeBackend Token 无效或未授权，跳过依赖真实鉴权的测试项");
+    if (
+      res.diagnosis?.kind === "NETWORK_ERROR" ||
+      (res.diagnosis?.kind === "INVALID_MCP_KEY" && (res.lines?.[1] || "").includes("Could not determine user email")) ||
+      /fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|network|EAI_AGAIN/i.test(String(res.error || res.diagnosis?.detail || ""))
+    ) {
+      console.log("\n[SKIP] 远程 NoCodeBackend Token 无效或未授权，或网络断开，跳过依赖真实鉴权的测试项");
       await env.cleanup();
       process.exit(77);
     }
@@ -231,6 +235,14 @@ try {
     console.log("  ✓ 反证测试通过：伪造凭据与格式缺陷均被严密拦截！");
   }
 
+} catch (err) {
+  const msg = String(err && (err.message || err.cause || err));
+  if (msg.includes("Could not determine user email") || /fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|network|EAI_AGAIN|NETWORK_ERROR/i.test(msg)) {
+    console.log("\n[SKIP] 网络断开或远程 NoCodeBackend Token 无效，优雅跳过测试:", msg);
+    await env.cleanup();
+    process.exit(77);
+  }
+  throw err;
 } finally {
   console.log("\n=================================================================");
   console.log("执行彻底清理");

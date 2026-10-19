@@ -490,11 +490,12 @@ export function formatCardStatus(key, rawResult, opHint) {
       lines: res.lines.map(String).slice(0, 5),
     };
     if (res.progress) card.progress = res.progress;
+    if (Array.isArray(res.memories)) card.memories = res.memories;
     return card;
   }
 
   let title = "";
-  const lines = [];
+  let lines = [];
 
   if (key === "ncb") {
     if (op === "provision") {
@@ -657,6 +658,9 @@ export function formatCardStatus(key, rawResult, opHint) {
     } else {
       lines.push(ok ? "在线模型配置有效且响应正常" : "在线模型未配置或检测未通过");
     }
+  } else if (key === "inject") {
+    title = res.title || "记忆快照已就绪";
+    lines = Array.isArray(res.lines) ? res.lines.slice() : ["活跃记忆快照已提取完成"];
   } else if (key === "audit") {
     title = res.title || (ok ? "全自动去重完成" : "全自动去重未完成");
     if (Array.isArray(res.lines) && res.lines.length) {
@@ -681,6 +685,7 @@ export function formatCardStatus(key, rawResult, opHint) {
   };
   if (res.progress) outCard.progress = res.progress;
   if (Array.isArray(res.logs)) outCard.logs = res.logs;
+  if (Array.isArray(res.memories)) outCard.memories = res.memories;
   return outCard;
 }
 

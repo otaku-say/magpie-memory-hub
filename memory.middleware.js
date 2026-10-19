@@ -560,7 +560,6 @@ function onRequestInner(body, ctx) {
       version: "5.0", // db-col-ok: 存活探针版本
       disabled: !!opts.disabled,
       memories_count: (opts.memories && Array.isArray(opts.memories)) ? opts.memories.length : 0,
-      compress: opts.compress === true,
       protocol: proto,
       turn_no: (Number(ctx.state.turnNo) || 0) + 1,
       timestamp: Date.now ? Date.now() : 0

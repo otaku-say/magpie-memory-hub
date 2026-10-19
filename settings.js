@@ -776,7 +776,7 @@
             return;
           }
           // 拿到比提交时间更新且已完成的结果 → 停止一切计时
-          if (card.op === "sync_snapshot" && card.ok && Array.isArray(card.memories) && window.magpie && window.magpie.options) {
+          if ((card.op === "sync_snapshot" || opHint === "sync_snapshot") && card.ok && Array.isArray(card.memories) && window.magpie && window.magpie.options) {
             try {
               var next = collect();
               next.memories = card.memories;

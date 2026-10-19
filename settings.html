@@ -15,7 +15,7 @@
     <h1>记忆中枢</h1>
     <span class="version-tag">v6.29.0</span>
   </div>
-  <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、上下文压缩、R2 存储。</p>
+  <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、R2 存储。</p>
 
   <!-- 介绍与快速上手区（克制可折叠设计，不挤占首屏操作） -->
   <details class="intro-guide" id="intro_guide">
@@ -527,7 +527,7 @@
             <span class="badge rec">推荐 关</span>
           </div>
           <div class="hint">
-            <div class="hint-desc">开启后网关上每次模型交互都会由异步钩子自动提炼事实、架构决策与避坑经验入库，零云端模型成本，不占磁盘。</div>
+            <div class="hint-desc">开启后网关上每次模型交互都会由异步钩子自动提炼事实、架构决策与避坑经验入库，基于在线模型抽取，不占磁盘。</div>
             <div class="hint-diff"><strong>开</strong>：网关上每次模型交互都会被提炼入库；<strong>关（默认）</strong>：关闭自动记忆，关闭则零影响。</div>
           </div>
         </div>
@@ -549,7 +549,7 @@
         <p>
           <strong>本地落盘与隐私保护说明：</strong><br>
           1. 开启录制意味着对话内容会写到本地磁盘（<code>/config/magpie/gateway-conversations</code>，受官方 7 天 / 256 MiB 配额限制）。<br>
-          2. 插件<strong>只把提炼后的结构化记忆入库，绝不把对话原文入库</strong>；提炼采用本地规则引擎，无任何外部云端调用。<br>
+          2. 插件<strong>只把提炼后的结构化记忆入库，绝不把对话原文入库</strong>；提炼采用在线模型抽取。<br>
           3. 若未开启录制或暂无录制文件，点击扫描将显示友好提示，不会报错。
         </p>
       </div>
@@ -582,7 +582,7 @@
             <span class="badge rec">推荐 开</span>
           </div>
           <div class="hint">
-            <div class="hint-desc">让正在对话的当前模型在回复末尾通过特定格式顺手产出记忆，零外部模型调用。</div>
+            <div class="hint-desc">让正在对话的当前模型在回复末尾通过特定格式顺手产出记忆，基于在线模型抽取。</div>
             <div class="hint-diff"><strong>开</strong>：零模型免额外 API 成本，提炼随对话顺手完成；<strong>关</strong>：彻底关闭自动提炼，仅依赖手动录入或外部工具。</div>
           </div>
         </div>

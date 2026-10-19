@@ -42,7 +42,7 @@
       "max_budget_chars": 2048,
       "min_confidence": 0.6,
       "memories": [],
-      "ccr_cards": true,
+      "ccr_cards": false,
       "inject_principles": true,
       "max_principles": 2,
       "mcp_key": "",

@@ -164,27 +164,50 @@ function fingerprint(text) {
  * 只有在【没有 MCP key、但有 Secret Key】时才退回原来的 REST 客户端，
  * 让已经配好 Secret Key 的老用户不至于中断。
  */
+const NO_CRED_ERR_MSG = "NO_CREDENTIALS: 未配置有效的 NoCodeBackend 凭据";
+
+function makeNoCredentialsClient() {
+  const throwNoCred = () => {
+    throw new Error(NO_CRED_ERR_MSG);
+  };
+  const target = {
+    list: async () => throwNoCred(),
+    create: async () => throwNoCred(),
+    update: async () => throwNoCred(),
+    remove: async () => throwNoCred(),
+    raw: async () => throwNoCred(),
+  };
+  return new Proxy(target, {
+    get(t, prop) {
+      if (prop in t) return t[prop];
+      if (prop === "then") return undefined;
+      return async () => throwNoCred();
+    },
+  });
+}
+
 export function makeClient(cfg, signal) {
-  if (!cfg) return null;
-  const o = typeof cfg.mcpKey !== "undefined" || typeof cfg.secret !== "undefined" ? cfg : readOptions(cfg);
+  const o = (cfg && cfg.instance && typeof cfg.secret === "string" && typeof cfg.mcpKey === "string") ? cfg : readOptions(cfg);
   const sig = signal || (cfg && cfg.signal) || (o && o.signal) || null;
-  if (o.mcpKey) {
+  if (o && (o.mcpKey || o.mcp_key)) {
     return makeMcpClient(o, sig);
   }
-  if (o.secret || o.ncb_secret) {
+  if (o && (o.secret || o.ncb_secret)) {
     return makeRestClient(o, sig);
   }
-  return null;
+  return makeNoCredentialsClient();
 }
 
 function makeRestClient(cfg, signal) {
+  const instance = (cfg && (cfg.instance || cfg.ncb_instance)) || "";
+  const secret = (cfg && (cfg.secret || cfg.ncb_secret)) || "";
   async function call(method, action, table, { data, params, id, signal: callSignal } = {}) {
-    const qs = new URLSearchParams(Object.assign({ Instance: cfg.instance }, params || {}));
+    const qs = new URLSearchParams(Object.assign({ Instance: instance }, params || {}));
     const suffix = id === undefined || id === null ? "" : "/" + encodeURIComponent(id);
     const url = `${NCB_BASE}/${action}/${table}${suffix}?${qs.toString()}`;
 
     const headers = { "Content-Type": "application/json" };
-    if (cfg.secret) headers.Authorization = "Bearer " + cfg.secret;
+    if (secret) headers.Authorization = "Bearer " + secret;
 
     const effectiveSignal = callSignal || signal || (cfg && cfg.signal) || null;
     if (effectiveSignal && effectiveSignal.aborted) {
@@ -271,11 +294,11 @@ function trackMemoryRetrievals(client, rows) {
   const now = nowSql();
   const updates = rows
     .filter((r) => r && r.id)
+    .slice(0, 5)
     .map((r) =>
       client.update("memories", r.id, {
         retrieval_count: (Number(r.retrieval_count) || 0) + 1,
         last_used_at: now,
-        updated_at: now,
       })
     );
   Promise.allSettled(updates).catch(() => {});
@@ -341,7 +364,7 @@ function scorePitfall(row, terms) {
 
 /** Headroom 式时序新鲜度：越新越靠前（对数衰减，避免压倒命中分） */
 function freshness(row) {
-  const t = Date.parse(String(row.updated_at || row.created_at || "").replace(" ", "T") + "Z");
+  const t = Date.parse(String(row.last_used_at || row.updated_at || row.created_at || "").replace(" ", "T") + "Z");
   if (!t || isNaN(t)) return 0;
   const days = (Date.now() - t) / 86400000;
   return days <= 0 ? 1 : 1 / (1 + Math.log10(1 + days));

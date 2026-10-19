@@ -62,7 +62,7 @@ console.log("=================================================================")
   assert.strictEqual(data.version, "5.0", "中间件版本匹配");
   assert.strictEqual(data.disabled, false, "disabled 状态匹配");
   assert.strictEqual(data.memories_count, 1, "记忆数量应为 1");
-  assert.strictEqual(data.compress, true, "压缩开关应为 true");
+  assert.strictEqual(data.compress, undefined, "压缩探针已废弃应为 undefined");
   assert.strictEqual(data.protocol, "chat", "协议识别为 chat");
   assert.strictEqual(data.turn_no, 3, "turn_no 正确递增");
   assert.ok(typeof data.timestamp === "number" && data.timestamp > 0, "带有效时间戳");

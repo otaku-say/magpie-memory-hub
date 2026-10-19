@@ -592,10 +592,9 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
         const candProject = String(candPayload.project || "").trim();
         if (curProject && candProject && curProject !== candProject) continue;
         const candComp = String(candPayload.component || "").trim().toLowerCase();
-        if (curComp && candComp && curComp !== candComp) continue;
         const candSym = String(candPayload.symptom || candPayload.title || "").trim();
         const candSol = String(candPayload.solution || candPayload.root_cause || "").trim();
-        if (candSym && isSemanticallySimilar(curSym, curSol, candSym, candSol)) {
+        if (candSym && isSemanticallySimilar(`${curComp ? curComp + ' ' : ''}${curSym}`, curSol, `${candComp ? candComp + ' ' : ''}${candSym}`, candSol)) {
           entry = cand;
           targetKey = k;
           break;

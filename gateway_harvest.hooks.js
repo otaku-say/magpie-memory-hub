@@ -956,7 +956,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     let recurrence = 1;
     // P0 证据门禁：非显式表达必须在 pending 累计达到 minEvidencePitfall（同一轮次 turnKey 去重）
     if (!isExplicit && minEvidencePitfall > 1) {
-      const pendingRes = recordPendingEvidence(pitKey, { ...item, project, agent }, {
+      const pendingRes = recordPendingEvidence(pitKey, { ...item, project, agent, component, symptom }, {
         kind: "pitfall",
         minEvidence: minEvidencePitfall,
         turnKey,

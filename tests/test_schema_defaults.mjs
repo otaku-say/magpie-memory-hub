@@ -136,6 +136,8 @@ for (const b of blocks) {
   const hasCreated = /created_at/.test(b.text);
   const hasUpdated = /updated_at/.test(b.text);
   // 更新载荷只需 updated_at；创建载荷两者都要
+  // P1-5: 读操作防写放大铁律 —— trackMemoryRetrievals 只更新 retrieval_count 和 last_used_at，绝不覆写 updated_at
+  if (b.text.includes("retrieval_count") && b.text.includes("last_used_at")) continue;
   const isUpdate = /\.update\s*\(/.test(b.text.split("\n")[0]);
   if (isUpdate ? !hasUpdated : !(hasCreated && hasUpdated)) {
     missingTs.push(`${b.file}:${b.line}  ${isUpdate ? "缺 updated_at" : "缺 created_at/updated_at"}   ${b.text.split("\n")[0].trim().slice(0, 60)}`);
