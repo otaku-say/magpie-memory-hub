@@ -566,7 +566,7 @@ export async function harvestGateway(args, context) {
         for (const p of failures) {
           if (signal && signal.aborted) { aborted = true; break; }
 
-          const pFp = p.content_fingerprint || crypto.createHash("sha256").update(`${targetProject}:${p.component}:${sig(p.symptom)}`).digest("hex").slice(0, 32);
+          const pFp = p.content_fingerprint || semanticFingerprint(targetProject, "pitfall", p.component, p.symptom);
           let recurrence = 1;
 
           // P0 证据累计门禁（显式指令直接穿透；同一轮次通过 turnKey 去重）

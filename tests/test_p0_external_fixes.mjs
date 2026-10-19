@@ -117,6 +117,166 @@ console.log("\n▶ [P0 - #5] 验证 harvest_gateway 信标在 OPS 注册并可�
   }
 }
 
+
+// -------------------------------------------------------------
+// P0 - 1: memorySearch 字段裁剪与 invalid_at / expires_at 过滤防回归断言
+// -------------------------------------------------------------
+console.log("\n▶ [P0 - 1] 验证 Mock Client 严格字段裁剪下列投影补齐与失效/过期过滤...");
+{
+  const { MagpieMemoryHub } = await import("../tools.js");
+  const rawMemories = [
+    {
+      id: 101,
+      project: "test-proj",
+      category: "fact",
+      scope_level: "project",
+      client: "agent",
+      origin: "tool",
+      title: "活跃记忆标题",
+      content: "这是一个有效的活跃记忆",
+      tags: "test",
+      related_entities: "entities",
+      confidence_score: 95,
+      recurrence: 1,
+      retrieval_count: 0,
+      last_used_at: null,
+      updated_at: "2026-10-19 12:00:00",
+      lifecycle_status: "active",
+      invalid_at: null,
+      expires_at: null,
+    },
+    {
+      id: 102,
+      project: "test-proj",
+      category: "fact",
+      scope_level: "project",
+      client: "agent",
+      origin: "tool",
+      title: "已失效记忆标题",
+      content: "这是一条已经 invalid 的记忆",
+      tags: "test",
+      related_entities: "entities",
+      confidence_score: 95,
+      recurrence: 1,
+      retrieval_count: 0,
+      last_used_at: null,
+      updated_at: "2026-10-18 12:00:00",
+      lifecycle_status: "active",
+      invalid_at: "2026-10-19 00:00:00",
+      expires_at: null,
+    },
+    {
+      id: 103,
+      project: "test-proj",
+      category: "fact",
+      scope_level: "project",
+      client: "agent",
+      origin: "tool",
+      title: "已过期记忆标题",
+      content: "这是一条已经 expires 的临时记忆",
+      tags: "test",
+      related_entities: "entities",
+      confidence_score: 95,
+      recurrence: 1,
+      retrieval_count: 0,
+      last_used_at: null,
+      updated_at: "2026-10-01 12:00:00",
+      lifecycle_status: "active",
+      invalid_at: null,
+      expires_at: "2026-10-10 00:00:00",
+    },
+  ];
+
+  // 严格字段裁剪 Mock Client：完全模拟 NCB 只返回 columns 声明的列
+  let requestedColumns = null;
+  const mockClient = {
+    list: async (table, params) => {
+      requestedColumns = params.columns;
+      const clipped = rawMemories.map((row) => {
+        if (!Array.isArray(params.columns)) return { ...row };
+        const out = {};
+        for (const col of params.columns) {
+          if (col in row) out[col] = row[col];
+        }
+        return out;
+      });
+      return { data: clipped };
+    },
+    update: async () => ({ affectedRows: 1 }),
+  };
+
+  const hub = await MagpieMemoryHub({}, { client: mockClient });
+  const searchResRaw = await hub.tool.memory_search.execute({ query: "记忆", project: "test-proj" }, {});
+  const searchRes = typeof searchResRaw === "string" ? JSON.parse(searchResRaw) : searchResRaw;
+
+  assert.ok(requestedColumns, "memory_search 必须传入 columns 投影参数");
+  assert.ok(requestedColumns.includes("invalid_at"), "columns 投影必须包含 invalid_at");
+  assert.ok(requestedColumns.includes("expires_at"), "columns 投影必须包含 expires_at");
+
+  // 字段裁剪断言：只返回有效记忆，失效与过期记忆必须被正确过滤
+  assert.strictEqual(searchRes.returned, 1, "在字段裁剪下必须且仅返回 1 条有效记忆");
+  assert.strictEqual(searchRes.memories[0].id, 101, "返回的必须是活跃有效记忆 101");
+  console.log("  ✓ P0-1 验证通过：columns 投影已补齐 invalid_at/expires_at，Mock Client 严格裁剪下失效/过期记忆被准确过滤！");
+}
+
+// -------------------------------------------------------------
+// P0 - 2: memoryAudit 游标双表独立拆分验证 (last_memory_id / last_pitfall_id)
+// -------------------------------------------------------------
+console.log("\n▶ [P0 - 2] 验证 memoryAudit 游标双表独立拆分与零跨表漏检...");
+{
+  const { memoryAudit } = await import("../tools.js");
+  const { saveAuditCursor, getAuditCursor, clearAuditCursor } = await import("../local_state.js");
+  const testProject = "audit_cursor_split_test";
+  clearAuditCursor(testProject);
+
+  saveAuditCursor(testProject, {
+    last_memory_id: 50,
+    last_pitfall_id: 10,
+    last_id: 50,
+  });
+
+  const cursorRead = getAuditCursor(testProject);
+  assert.strictEqual(cursorRead.last_memory_id, 50, "last_memory_id 必须独立存取");
+  assert.strictEqual(cursorRead.last_pitfall_id, 10, "last_pitfall_id 必须独立存取");
+
+  clearAuditCursor(testProject);
+  console.log("  ✓ P0-2 验证通过：游标双表拆分为 last_memory_id 与 last_pitfall_id，杜绝跨表自增主键漏检！");
+}
+
+// -------------------------------------------------------------
+// P0 - 3: recordPendingEvidence 语义模糊去重与 pitfall 指纹算法统一
+// -------------------------------------------------------------
+console.log("\n▶ [P0 - 3] 验证 recordPendingEvidence 接入 isSemanticallySimilar 语义模糊去重...");
+{
+  const { recordPendingEvidence } = await import("../local_state.js");
+  const { semanticFingerprint } = await import("../semantic_dedup.js");
+
+  const fp1 = semanticFingerprint("test_p03", "pitfall", "mysql_pool", "MySQL 连接池耗尽报 Too many connections");
+  const fp2 = semanticFingerprint("test_p03", "pitfall", "mysql_pool", "数据库连接池满报错 Too many connections");
+
+  // 第一条存入
+  const r1 = recordPendingEvidence(`p:test_p03:${fp1}`, {
+    project: "test_p03",
+    component: "mysql_pool",
+    symptom: "MySQL 连接池耗尽报 Too many connections",
+    solution: "增加连接池最大连接数",
+  }, { kind: "pitfall", minEvidence: 2 });
+  assert.strictEqual(r1.shouldGraduate, false, "首条未达门槛不应毕业");
+  assert.strictEqual(r1.count, 1);
+
+  // 第二条措辞微调但语义相同，即便哈希不同也应模糊命中既有记录并累加至 count: 2 达成门槛毕业
+  const r2 = recordPendingEvidence(`p:test_p03:${fp2}`, {
+    project: "test_p03",
+    component: "mysql_pool",
+    symptom: "数据库连接池满报错 Too many connections",
+    solution: "增大数据库连接池容量",
+  }, { kind: "pitfall", minEvidence: 2 });
+
+  assert.strictEqual(r2.shouldGraduate, true, "第二条语义相近踩坑必须命中模糊去重并累加至 2 次毕业");
+  assert.strictEqual(r2.count, 2, "命中模糊去重后计数必须为 2");
+  console.log("  ✓ P0-3 验证通过：同 project + kind: pitfall 语义模糊去重成功命中，达成门禁毕业！");
+}
+
 console.log("\n=================================================================");
 console.log("✅ 全部 P0 验证测试 100% 通过！");
 console.log("=================================================================");

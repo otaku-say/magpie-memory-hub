@@ -164,12 +164,17 @@ function fingerprint(text) {
  * 只有在【没有 MCP key、但有 Secret Key】时才退回原来的 REST 客户端，
  * 让已经配好 Secret Key 的老用户不至于中断。
  */
-function makeClient(cfg, signal) {
-  const sig = signal || (cfg && cfg.signal) || null;
-  if (cfg.mcpKey) {
-    return makeMcpClient(cfg, sig);
+export function makeClient(cfg, signal) {
+  if (!cfg) return null;
+  const o = typeof cfg.mcpKey !== "undefined" || typeof cfg.secret !== "undefined" ? cfg : readOptions(cfg);
+  const sig = signal || (cfg && cfg.signal) || (o && o.signal) || null;
+  if (o.mcpKey) {
+    return makeMcpClient(o, sig);
   }
-  return makeRestClient(cfg, sig);
+  if (o.secret || o.ncb_secret) {
+    return makeRestClient(o, sig);
+  }
+  return null;
 }
 
 function makeRestClient(cfg, signal) {
@@ -243,11 +248,44 @@ function rowsOf(res) {
   return [];
 }
 
-/** 分页取回（NCB 默认每页 10 条） */
+function mergeCommaSeparated(base, ...extras) {
+  const set = new Set();
+  const add = (val) => {
+    if (!val) return;
+    if (Array.isArray(val)) {
+      val.forEach(add);
+      return;
+    }
+    String(val).split(/[,;\s，；、|]+/).forEach((item) => {
+      const trimmed = item.trim();
+      if (trimmed) set.add(trimmed);
+    });
+  };
+  add(base);
+  extras.forEach(add);
+  return Array.from(set).join(",");
+}
+
+function trackMemoryRetrievals(client, rows) {
+  if (!client || typeof client.update !== "function" || !Array.isArray(rows) || !rows.length) return;
+  const now = nowSql();
+  const updates = rows
+    .filter((r) => r && r.id)
+    .map((r) =>
+      client.update("memories", r.id, {
+        retrieval_count: (Number(r.retrieval_count) || 0) + 1,
+        last_used_at: now,
+        updated_at: now,
+      })
+    );
+  Promise.allSettled(updates).catch(() => {});
+}
+
+/** 分页取回（NCB 默认每页 10 条，默认 order_by: updated_at DESC） */
 async function fetchAll(client, table, params) {
   const out = [];
   for (let page = 1; page <= 20; page++) {
-    const res = await client.list(table, Object.assign({ limit: FETCH_LIMIT, page }, params || {}));
+    const res = await client.list(table, Object.assign({ limit: FETCH_LIMIT, page, order_by: "updated_at DESC" }, params || {}));
     const batch = rowsOf(res);
     if (!batch.length) break;
     out.push(...batch);
@@ -621,6 +659,8 @@ async function memorySearch(client, cfg, args) {
       "last_used_at",
       "updated_at",
       "lifecycle_status",
+      "invalid_at",
+      "expires_at",
     ],
   };
   if (args.project) fetchParams.project = String(args.project).trim();
@@ -758,6 +798,8 @@ async function memorySearch(client, cfg, args) {
     _rerank_reason: x._rerank_reason || null,
   }));
 
+  trackMemoryRetrievals(client, scored.slice(0, limit).map((x) => x.row));
+
   return jsonOut({
     total_active: all.length,
     matched: scored.length,
@@ -811,20 +853,45 @@ async function memoryContext(client, cfg, args) {
   );
   if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
 
+  // P1-8: 增加对 category === "principle" 准则的无条件置顶支持（最多 max_principles 条，默认 2）
+  const maxPrinciples = Number(args.max_principles ?? cfg.max_principles ?? 2) || 2;
+  const principles = pool
+    .filter((r) => String(r.category || "").toLowerCase() === "principle")
+    .sort((a, b) => rankMemory(b) - rankMemory(a))
+    .slice(0, maxPrinciples);
+
+  const principleIds = new Set(principles.map((p) => p.id));
   const scored = pool
+    .filter((r) => !principleIds.has(r.id))
     .map((r) => ({ row: r, hit: scoreMemory(r, terms) }))
     .filter((x) => x.hit > 0)
     .sort((a, b) => b.hit - a.hit || rankMemory(b.row) - rankMemory(a.row));
 
   let block = "[Persistent Memory Context]\n";
   let n = 0;
+  const matchedMemories = [];
+
+  for (const pr of principles) {
+    if (n >= maxItems) break;
+    const line = `- [principle] ${cut(pr.title, 120)}: ${cut(pr.content, 400)}\n`;
+    if (block.length + line.length > budget) break;
+    block += line;
+    matchedMemories.push(pr);
+    n++;
+  }
+
   for (const x of scored) {
     if (n >= maxItems) break;
     const line = `- [${x.row.category || "fact"}] ${cut(x.row.title, 120)}: ${cut(x.row.content, 400)}\n`;
     if (block.length + line.length > budget) break;
     block += line;
+    matchedMemories.push(x.row);
     n++;
   }
+
+  // P1-7: 异步非阻塞递增 retrieval_count 并更新 last_used_at
+  trackMemoryRetrievals(client, matchedMemories);
+
   return jsonOut({ injected: n, chars: block.length, block: n ? block.trim() : "" });
 }
 
@@ -862,7 +929,7 @@ async function pitfallSave(client, cfg, args, ctx) {
   if (!solution) throw new Error("solution 不能为空");
 
   const normTags = normalizeTags(tags);
-  const fp = (args.content_fingerprint && String(args.content_fingerprint).trim()) || fingerprint(`${project}:${component}:${symptom}${normTags ? `:${normTags}` : ""}`);
+  const fp = (args.content_fingerprint && String(args.content_fingerprint).trim()) || semanticFingerprint(project, "pitfall", component, symptom);
   const initialRecurrence = typeof args.recurrence === "number" && args.recurrence >= 1 ? Math.floor(args.recurrence) : 1;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
 
@@ -1346,10 +1413,12 @@ export async function memoryAuditUndo(client, cfg, args) {
   });
 }
 
+let _isAuditing = false;
+
 /**
  * 全自动去重：单次模型调用判定并立即合并，分批支持全量与定时下推，绝不物理删
  */
-async function memoryAudit(client, cfg, args, ctx) {
+export async function memoryAudit(client, cfg, args, ctx) {
   args = args || {};
   if (!client || typeof client.list !== "function") {
     return jsonOut({ action: "DEDUP_REPORT", success: false, data_changed: false,
@@ -1358,21 +1427,36 @@ async function memoryAudit(client, cfg, args, ctx) {
   if (args && (args.undo === true || args.undo_before)) {
     return await memoryAuditUndo(client, cfg, args);
   }
-
-  const project = String(args.project || (cfg && cfg.project) || "global").trim();
-  const batchSize = Math.max(50, Math.min(Number(args.batch_size || cfg.dedup_batch_size || 1000), 1000));
-  const batchTs = Date.now();
-  const now = nowSql();
-
-  const isIncremental = args.incremental === true;
-  let cursor = isIncremental ? getAuditCursor(project) : { last_id: 0, last_updated_at: "", reviewed_count: 0 };
-  if (args.since_id != null && Number(args.since_id) > 0) {
-    cursor = { last_id: Number(args.since_id), last_updated_at: "", reviewed_count: 0 };
+  if (_isAuditing) {
+    return jsonOut({
+      action: "DEDUP_REPORT",
+      success: true,
+      data_changed: false,
+      skipped: true,
+      status: "跳过", // db-col-ok: 去重任务运行状态
+      note: "去重任务正在执行中，已跳过并发重入请求",
+    });
   }
-  if (args.full === true) {
-    clearAuditCursor(project);
-    cursor = { last_id: 0, last_updated_at: "", reviewed_count: 0 };
-  }
+  _isAuditing = true;
+
+  try {
+    const project = String(args.project || (cfg && cfg.project) || "global").trim();
+    const batchSize = Math.max(50, Math.min(Number(args.batch_size || cfg.dedup_batch_size || 1000), 1000));
+    const batchTs = Date.now();
+    const now = nowSql();
+
+    const isIncremental = args.incremental === true;
+    let cursor = isIncremental
+      ? getAuditCursor(project)
+      : { last_memory_id: null, last_pitfall_id: null, last_id: null, last_updated_at: "", reviewed_count: 0 };
+    if (args.since_id != null && Number(args.since_id) > 0) {
+      const sId = Number(args.since_id);
+      cursor = { last_memory_id: sId, last_pitfall_id: sId, last_id: sId, last_updated_at: "", reviewed_count: 0 };
+    }
+    if (args.full === true) {
+      clearAuditCursor(project);
+      cursor = { last_memory_id: null, last_pitfall_id: null, last_id: null, last_updated_at: "", reviewed_count: 0 };
+    }
 
   let timeFilter = null;
   if (args.updated_after && typeof args.updated_after === "string") {
@@ -1398,7 +1482,7 @@ async function memoryAudit(client, cfg, args, ctx) {
   // ==========================================
   // 分批处理 memories
   // ==========================================
-  let memLastId = isIncremental && cursor.last_id > 0 ? cursor.last_id : 0;
+  let memLastId = isIncremental && Number(cursor.last_memory_id ?? cursor.last_id) > 0 ? Number(cursor.last_memory_id ?? cursor.last_id) : null;
   let memBatchNum = 0;
   while (true) {
     memBatchNum++;
@@ -1413,7 +1497,7 @@ async function memoryAudit(client, cfg, args, ctx) {
         "recurrence", "content_fingerprint", "updated_at", "lifecycle_status"
       ],
     };
-    if (memLastId > 0) q.since_id = memLastId;
+    if (memLastId) q.since_id = memLastId;
     if (timeFilter) q.updated_after = timeFilter;
 
     const rows = rowsOf(await client.list("memories", q))
@@ -1488,10 +1572,15 @@ async function memoryAudit(client, cfg, args, ctx) {
         } catch (_) {}
       }
       try {
-        const nextRec = (Number(p.recurrence) || 1) + dups.length;
+        const dupRecurrenceSum = dups.reduce((acc, d) => acc + (Number(d.recurrence) || 1), 0);
+        const nextRec = (Number(p.recurrence) || 1) + dupRecurrenceSum;
+        const mergedTags = mergeCommaSeparated(p.tags, ...dups.map((d) => d.tags));
+        const mergedEntities = mergeCommaSeparated(p.related_entities, ...dups.map((d) => d.related_entities));
         await client.update("memories", p.id, {
           recurrence: nextRec,
           updated_at: now,
+          ...(mergedTags ? { tags: mergedTags } : {}),
+          ...(mergedEntities ? { related_entities: mergedEntities.slice(0, 500) } : {}),
         });
       } catch (_) {}
     }
@@ -1525,7 +1614,7 @@ async function memoryAudit(client, cfg, args, ctx) {
   // ==========================================
   // 分批处理 pitfalls
   // ==========================================
-  let pitLastId = isIncremental && cursor.last_id > 0 ? cursor.last_id : 0;
+  let pitLastId = isIncremental && Number(cursor.last_pitfall_id ?? cursor.last_id) > 0 ? Number(cursor.last_pitfall_id ?? cursor.last_id) : null;
   let pitBatchNum = 0;
   while (true) {
     pitBatchNum++;
@@ -1534,7 +1623,7 @@ async function memoryAudit(client, cfg, args, ctx) {
       limit: args.limit ? Math.min(Number(args.limit), batchSize) : batchSize,
       order_by: "id ASC",
     };
-    if (pitLastId > 0) q.since_id = pitLastId;
+    if (pitLastId) q.since_id = pitLastId;
     if (timeFilter) q.updated_after = timeFilter;
 
     const rows = rowsOf(await client.list("pitfalls", q)).filter((r) => !r.invalid_at);
@@ -1607,10 +1696,13 @@ async function memoryAudit(client, cfg, args, ctx) {
         } catch (_) {}
       }
       try {
-        const nextRec = (Number(p.recurrence) || 1) + dups.length;
+        const dupRecurrenceSum = dups.reduce((acc, d) => acc + (Number(d.recurrence) || 1), 0);
+        const nextRec = (Number(p.recurrence) || 1) + dupRecurrenceSum;
+        const mergedTags = mergeCommaSeparated(p.tags, ...dups.map((d) => d.tags));
         await client.update("pitfalls", p.id, {
           recurrence: nextRec,
           updated_at: now,
+          ...(mergedTags ? { tags: mergedTags } : {}),
         });
       } catch (_) {}
     }
@@ -1679,35 +1771,49 @@ async function memoryAudit(client, cfg, args, ctx) {
     });
   } catch (_) {}
 
-  const maxIdSeen = Math.max(memLastId, pitLastId, cursor.last_id || 0);
-  if (isIncremental) {
-    saveAuditCursor(project, { last_id: maxIdSeen, last_updated_at: nowSql() });
-  }
+    const newMemLastId = memLastId || cursor.last_memory_id || null;
+    const newPitLastId = pitLastId || cursor.last_pitfall_id || null;
+    const maxIdSeen = Math.max(Number(newMemLastId) || 0, Number(newPitLastId) || 0, Number(cursor.last_id) || 0) || null;
+    if (isIncremental) {
+      saveAuditCursor(project, {
+        last_memory_id: newMemLastId,
+        last_pitfall_id: newPitLastId,
+        last_id: maxIdSeen,
+        last_updated_at: nowSql(),
+      });
+    }
 
-  return jsonOut({
-    action: "DEDUP_REPORT",
-    success: true,
-    data_changed: totalDeduped > 0,
-    batch: `${totalBatches}/${totalBatches}`,
-    status: "已完成", // db-col-ok: 去重任务运行状态
-    incremental: isIncremental,
-    cursor: {
-      previous_last_id: cursor.last_id || 0,
-      current_last_id: maxIdSeen,
-      batch_size: batchSize,
-    },
-    scanned: {
-      memories: totalScannedMemories,
-      pitfalls: totalScannedPitfalls,
-    },
-    deduped: {
-      memories: totalDedupedMemories,
-      pitfalls: totalDedupedPitfalls,
-    },
-    lines: finalLines,
-    logs: rollingLogs,
-    note: `全自动去重完成。扫描记忆 ${totalScannedMemories} 条，合并 ${totalDedupedMemories} 条；扫描踩坑 ${totalScannedPitfalls} 条，合并 ${totalDedupedPitfalls} 条。`,
-  });
+    return jsonOut({
+      action: "DEDUP_REPORT",
+      success: true,
+      data_changed: totalDeduped > 0,
+      batch: `${totalBatches}/${totalBatches}`,
+      status: "已完成", // db-col-ok: 去重任务运行状态
+      incremental: isIncremental,
+      cursor: {
+        previous_last_memory_id: cursor.last_memory_id || null,
+        previous_last_pitfall_id: cursor.last_pitfall_id || null,
+        current_last_memory_id: newMemLastId,
+        current_last_pitfall_id: newPitLastId,
+        previous_last_id: Number(cursor.last_id) || 0,
+        current_last_id: Number(maxIdSeen) || 0,
+        batch_size: batchSize,
+      },
+      scanned: {
+        memories: totalScannedMemories,
+        pitfalls: totalScannedPitfalls,
+      },
+      deduped: {
+        memories: totalDedupedMemories,
+        pitfalls: totalDedupedPitfalls,
+      },
+      lines: finalLines,
+      logs: rollingLogs,
+      note: `全自动去重完成。扫描记忆 ${totalScannedMemories} 条，合并 ${totalDedupedMemories} 条；扫描踩坑 ${totalScannedPitfalls} 条，合并 ${totalDedupedPitfalls} 条。`,
+    });
+  } finally {
+    _isAuditing = false;
+  }
 }
 
 let _auditTimer = null;

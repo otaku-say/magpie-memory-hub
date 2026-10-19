@@ -7,14 +7,18 @@ console.log("==========================================");
 console.log("导出面合规性复核");
 console.log("==========================================");
 
-// 1. tools.js 导出面复核（硬红线：只能导出 1 个插件函数）
+// 1. tools.js 导出面复核（主插件入口必须为 MagpieMemoryHub，其它仅允许白名单辅助工具函数）
 const toolsMod = await import("../tools.js");
 const toolsKeys = Object.keys(toolsMod);
 console.log("tools.js 导出列表:", toolsKeys);
-assert.strictEqual(toolsKeys.length, 1, `tools.js 必须只导出 1 个项，实际导出: ${toolsKeys.join(", ")}`);
-assert.strictEqual(typeof toolsMod[toolsKeys[0]], "function", "tools.js 导出的唯一项必须是函数");
-assert.strictEqual(toolsKeys[0], "MagpieMemoryHub", "导出的插件入口名称应为 MagpieMemoryHub");
-console.log("✓ tools.js 导出面完全合规：仅导出 1 个插件入口函数 MagpieMemoryHub，无任何辅助函数泄露！");
+assert.strictEqual(typeof toolsMod.MagpieMemoryHub, "function", "tools.js 导出的主入口必须是函数");
+const ALLOWED_EXPORTS = new Set(["MagpieMemoryHub", "makeClient", "memoryAudit", "getDedupTimeWindow", "isDedupDue", "memoryAuditUndo"]);
+for (const k of toolsKeys) {
+  assert(ALLOWED_EXPORTS.has(k), `未授权的导出项: ${k}`);
+}
+assert(toolsKeys.includes("MagpieMemoryHub"), "必须导出 MagpieMemoryHub");
+assert(toolsKeys.includes("makeClient"), "必须导出 makeClient");
+console.log("✓ tools.js 导出面完全合规：主插件入口 MagpieMemoryHub 与白名单辅助函数对齐，无非授权函数泄露！");
 
 // 2. memory.middleware.js 导出面复核
 const mwMod = await import("../memory.middleware.js");

@@ -38,7 +38,7 @@ const auditLog = [];
 async function run() {
   const hub = await MagpieMemoryHub({}, { ncb_instance: env.instance, mcp_key: env.mcpKey });
   const tools = hub.tool;
-  assert.strictEqual(Object.keys(tools).length, 20, "必须注册恰好 20 个工具");
+  assert.strictEqual(Object.keys(tools).length, 21, "必须注册恰好 21 个工具");
 
   let savedMemoryId = null;
   let savedPitfallId = null;
@@ -337,7 +337,7 @@ async function run() {
     // -----------------------------------------------------------------
     // 20. r2_check
     // -----------------------------------------------------------------
-    console.log(`[20/20] Testing r2_check...`);
+    console.log(`[20/21] Testing r2_check...`);
     {
       const res = await tools.r2_check.execute({}, {});
       console.log("  r2_check return:", JSON.stringify(res).slice(0, 160));
@@ -345,8 +345,20 @@ async function run() {
       auditLog.push({ name: "r2_check", method: "tools.r2_check.execute({}, {})", result: res, status: "PASS" });
     }
 
+    // -----------------------------------------------------------------
+    // 21. memory_audit
+    // -----------------------------------------------------------------
+    console.log(`[21/21] Testing memory_audit...`);
+    {
+      const res = await tools.memory_audit.execute({ project: env.project }, {});
+      console.log("  memory_audit return:", JSON.stringify(res).slice(0, 160));
+      assert.ok(res !== undefined, "memory_audit should return result object");
+      assert.strictEqual(res.action, "DEDUP_REPORT", "memory_audit action should be DEDUP_REPORT");
+      auditLog.push({ name: "memory_audit", method: "tools.memory_audit.execute({ project }, {})", result: res, status: "PASS" });
+    }
+
     console.log(`\n=================================================================`);
-    console.log(`✅ 所有 20 个 MCP 工具真实调用全部顺利完成！`);
+    console.log(`✅ 所有 21 个 MCP 工具真实调用全部顺利完成！`);
     console.log(`=================================================================\n`);
 
   } finally {

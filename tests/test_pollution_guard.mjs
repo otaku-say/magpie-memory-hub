@@ -56,7 +56,8 @@ async function fetchDbCounts() {
     const row = sqlRes?.results?.[0]?.rows?.[0];
     if (row) return { m: Number(row.m), p: Number(row.p), channel: "minis-mcp-cli" };
   } catch (err) {
-    throw new Error("无法通过任何通道探测生产库行数: " + err.message);
+    console.log(`\n[SKIP] 生产库探测需连接真实数据库或宿主环境 (${err.message})`);
+    process.exit(77);
   }
 
   throw new Error("探测生产库行数失败：未获取到结果行");

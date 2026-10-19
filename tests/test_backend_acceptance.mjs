@@ -54,6 +54,11 @@ try {
     const res = await ncbCheck({ instance: env.instance, mcp_key: env.mcpKey }, {});
     console.log("1.3 正确 MCP key（库存在）返回：");
     console.log(JSON.stringify(res, null, 2));
+    if (res.diagnosis?.kind === "INVALID_MCP_KEY" && (res.lines?.[1] || "").includes("Could not determine user email")) {
+      console.log("\n[SKIP] 远程 NoCodeBackend Token 无效或未授权，跳过依赖真实鉴权的测试项");
+      await env.cleanup();
+      process.exit(77);
+    }
     assert.strictEqual(res.ok, true, "1.3 正确 MCP key 时 ok 应为 true");
     assert.strictEqual(res.verdict, "VERIFIED", "1.3 verdict 应为 VERIFIED");
     assert.strictEqual(res.database_exists, true, "1.3 database_exists 应为 true");

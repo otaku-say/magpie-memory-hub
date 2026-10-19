@@ -91,7 +91,17 @@ try {
   }
 
   console.log("\n--- 7. db_status（MCP 路径）---");
-  const st = P(await S.db_status.execute({}));
+  let st;
+  try {
+    st = P(await S.db_status.execute({}));
+  } catch (err) {
+    if (String(err?.message || "").includes("Could not determine user email")) {
+      console.log("\n[SKIP] 远程 NoCodeBackend Token 无效或未授权，跳过依赖真实鉴权的测试项");
+      await env.cleanup();
+      process.exit(77);
+    }
+    throw err;
+  }
   check(st.ok === true && (st.initialized === true || (st.missing_tables.length === 0 && st.present_tables.length === 3)), `ok=${st.ok} initialized=${st.initialized}`);
 
   console.log("\n--- 8. 反证测试：篡改内容必触发校验拒绝 ---");

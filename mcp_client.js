@@ -126,11 +126,19 @@ export function buildSelect(table, params) {
   let sql = "SELECT " + selectCols + " FROM " + t;
   if (where.length) sql += " WHERE " + where.join(" AND ");
   if (p.order_by && typeof p.order_by === "string") {
-    const obParts = p.order_by.trim().split(/\s+/);
-    if (obParts.length >= 1) {
-      const col = safeIdent(obParts[0], "column", table);
-      const dir = obParts[1] && /^desc$/i.test(obParts[1]) ? "DESC" : "ASC";
-      sql += " ORDER BY " + col + " " + dir;
+    const rawOrder = p.order_by.trim();
+    const ORDER_BY_REGEX = /^[a-zA-Z0-9_]+(?:\s+(?:ASC|DESC))?(?:\s*,\s*[a-zA-Z0-9_]+(?:\s+(?:ASC|DESC))?)*$/i;
+    if (!ORDER_BY_REGEX.test(rawOrder)) {
+      throw new Error(`非法 order_by 格式 "${rawOrder}"（只允许列名加可选 ASC/DESC）`);
+    }
+    const clauses = rawOrder.split(/\s*,\s*/).map((clause) => {
+      const parts = clause.trim().split(/\s+/);
+      const col = safeIdent(parts[0], "column", table);
+      const dir = parts[1] && /^desc$/i.test(parts[1]) ? "DESC" : "ASC";
+      return `${col} ${dir}`;
+    });
+    if (clauses.length) {
+      sql += " ORDER BY " + clauses.join(", ");
     }
   }
   const limRaw = String(p.limit == null ? "" : p.limit).trim();

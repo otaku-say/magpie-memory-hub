@@ -189,9 +189,9 @@ async function execute(action, cfg, fs, sp, state, options) {
   let client = null;
   try {
     if (cfg && cfg.client) client = cfg.client;
-    else if (cfg && (cfg.mcpKey || cfg.mcp_key)) {
-      const { makeMcpClient } = await import("./mcp_client.js");
-      client = makeMcpClient(cfg);
+    else if (cfg) {
+      const { makeClient } = await import("./tools.js");
+      client = makeClient(cfg);
     }
   } catch (_) { client = null; }
 
@@ -296,7 +296,10 @@ async function execute(action, cfg, fs, sp, state, options) {
     else if (action.op === "sync_snapshot") {
       let memories = [];
       try {
-        if (!client) client = (await import("./mcp_client.js")).makeMcpClient(cfg);
+        if (!client) {
+          const { makeClient } = await import("./tools.js");
+          client = makeClient(cfg);
+        }
         const resList = await client.list("memories", {
           lifecycle_status: "active",
           order_by: "updated_at DESC",
@@ -337,23 +340,19 @@ async function execute(action, cfg, fs, sp, state, options) {
       // 异步在后台执行去重/撤销（fire-and-forget），通过 writeCardStatus("audit", ...) 持续回传进度
       (async () => {
         try {
-          const { MagpieMemoryHub } = await import("./tools.js");
+          const { makeClient, memoryAudit } = await import("./tools.js");
           // 后台任务必须自建 client，不依赖加载期传入的那个
           let asyncClient = null;
+          const clientCfg = Object.assign({}, cfg || {}, options || {});
           try {
-            const clientCfg = Object.assign({}, cfg || {}, options || {});
-            if (clientCfg.mcpKey || clientCfg.mcp_key || clientCfg.ncb_instance) {
-              const { makeMcpClient } = await import("./mcp_client.js");
-              asyncClient = makeMcpClient(clientCfg);
-            }
+            asyncClient = makeClient(clientCfg);
           } catch (_) { asyncClient = null; }
 
-          const hub = await MagpieMemoryHub(options || {}, { client: asyncClient });
           const auditArgs = Object.assign({}, action.args || {});
           if (action.undo) auditArgs.undo = true;
           if (action.undo_before) auditArgs.undo_before = action.undo_before;
 
-          const auditResRaw = await hub.tool.memory_audit.execute(auditArgs, {});
+          const auditResRaw = await memoryAudit(asyncClient, clientCfg, auditArgs, {});
           const auditRes = typeof auditResRaw === "string" ? JSON.parse(auditResRaw) : auditResRaw;
           const ok = auditRes && auditRes.success !== false;
           let lines = [];

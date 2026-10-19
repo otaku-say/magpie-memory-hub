@@ -949,7 +949,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     const symptom = String(item.symptom || item.title || "").trim();
     if (!symptom) continue;
 
-    const fp = item.content_fingerprint || fingerprint(`${project}:${component}:${symptom}`);
+    const fp = item.content_fingerprint || semanticFingerprint(project, "pitfall", component, symptom);
     const pitKey = `p:${project}:${fp}`;
     if (isRecent(pitKey)) continue;
 
@@ -1127,18 +1127,14 @@ export async function onResponse(reply, ctx) {
       turn: countTurnsFromMessages(requestBody),
     };
 
-    // 构造 NCB client（如果配置了 mcp_key）
+    // 构造 NCB client（支持 mcp_key 与 ncb_secret 回退）
     let client = (opts && (opts._client || opts.client)) || null;
     if (!client) {
-      const mcpKey = opts.mcp_key || opts.mcpKey || process.env.NCB_API_KEY || "";
-      const rawInst = opts.ncb_instance || opts.instance || lookupDatabase() || "memory";
-      const instance = lookupRealDatabase(rawInst) || rawInst;
-      if (mcpKey) {
-        try {
-          client = makeMcpClient({ mcpKey, instance });
-        } catch (_) {
-          client = null;
-        }
+      try {
+        const { makeClient } = await import("./tools.js");
+        client = makeClient(opts);
+      } catch (_) {
+        client = null;
       }
     }
 

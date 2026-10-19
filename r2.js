@@ -633,7 +633,8 @@ export async function r2Check(cfg, args) {
  * ------------------------------------------------------------------ */
 
 export async function r2Upload(cfg, args) {
-  const db = dbOf(cfg, args);
+  const rawDb = dbOf(cfg, args);
+  const db = await resolveRealDatabase(cfg, rawDb);
   const filename = args && args.filename;
   if (!filename) {
     const err = new Error("缺少 filename");

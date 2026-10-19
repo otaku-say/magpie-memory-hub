@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isSemanticallySimilar } from "./semantic_dedup.js";
 
 export const STATE_DIRNAME = ".magpie-memory-hub";
 export const STATE_FILENAME = "state.json";
@@ -35,12 +36,16 @@ export function statePath() {
 // 进程内缓存与紧凑序列化
 let _cachedState = null;
 let _cachedMtime = 0;
+let _cachedSize = 0;
+let _cachedIno = 0;
 let _cachedPath = null;
 
 /** 测试或隔离环境清理内存缓存 */
 export function _resetStateCacheForTests() {
   _cachedState = null;
   _cachedMtime = 0;
+  _cachedSize = 0;
+  _cachedIno = 0;
   _cachedPath = null;
 }
 
@@ -56,7 +61,7 @@ export function readState() {
       return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: true, _missing: true };
     }
     const stat = fs.statSync(p);
-    if (_cachedState && _cachedPath === p && stat.mtimeMs === _cachedMtime) {
+    if (_cachedState && _cachedPath === p && stat.mtimeMs === _cachedMtime && stat.size === _cachedSize && stat.ino === _cachedIno) {
       return JSON.parse(JSON.stringify(_cachedState));
     }
     const o = JSON.parse(fs.readFileSync(p, "utf8"));
@@ -74,6 +79,8 @@ export function readState() {
     };
     _cachedState = parsed;
     _cachedMtime = stat.mtimeMs;
+    _cachedSize = stat.size;
+    _cachedIno = stat.ino;
     _cachedPath = p;
     return JSON.parse(JSON.stringify(parsed));
   } catch (e) {
@@ -127,6 +134,8 @@ export function writeState(state) {
       const st = fs.statSync(p);
       _cachedState = JSON.parse(JSON.stringify(out));
       _cachedMtime = st.mtimeMs;
+      _cachedSize = st.size;
+      _cachedIno = st.ino;
       _cachedPath = p;
     } catch (_) {}
     return true;
@@ -229,7 +238,7 @@ export function getAuditCursor(project) {
   const prj = String(project || "global").trim();
   const st = readState();
   const cursors = (st.audit && st.audit.cursors) || {};
-  return cursors[prj] || { last_id: 0, last_updated_at: "", reviewed_count: 0 };
+  return cursors[prj] || { last_memory_id: null, last_pitfall_id: null, last_id: null, last_updated_at: "", reviewed_count: 0 };
 }
 
 /** 保存指定项目的记忆体检增量游标 */
@@ -565,13 +574,43 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
 
   // 2. 更新或新建条目
   let entry = pending[fingerprint];
+  let targetKey = fingerprint;
+
+  // P0-3: 同 project + kind === "pitfall" 时做语义模糊去重
+  if (!entry && (kind === "pitfall" || options.kind === "pitfall") && payload) {
+    const curProject = String(options.project || payload.project || "").trim();
+    const curComp = String(payload.component || "").trim().toLowerCase();
+    const curSym = String(payload.symptom || payload.title || "").trim();
+    const curSol = String(payload.solution || payload.root_cause || "").trim();
+
+    if (curSym) {
+      for (const [k, cand] of Object.entries(pending)) {
+        if (!cand || typeof cand !== "object") continue;
+        const candKind = cand.kind || (k.startsWith("p:") ? "pitfall" : "");
+        if (candKind !== "pitfall") continue;
+        const candPayload = cand.payload || {};
+        const candProject = String(candPayload.project || "").trim();
+        if (curProject && candProject && curProject !== candProject) continue;
+        const candComp = String(candPayload.component || "").trim().toLowerCase();
+        if (curComp && candComp && curComp !== candComp) continue;
+        const candSym = String(candPayload.symptom || candPayload.title || "").trim();
+        const candSol = String(candPayload.solution || candPayload.root_cause || "").trim();
+        if (candSym && isSemanticallySimilar(curSym, curSol, candSym, candSol)) {
+          entry = cand;
+          targetKey = k;
+          break;
+        }
+      }
+    }
+  }
+
   if (entry) {
     // 同轮去重：如果传入了 turnKey 且本轮次已经记录过该指纹，则本轮不重复 +1
     if (turnKey && entry.last_turn === turnKey) {
       entry.last_seen = now;
       if (payload) entry.payload = truncatedPayload;
       if (entry.count >= minEvidence) {
-        delete pending[fingerprint];
+        delete pending[targetKey];
         st.pending_patterns = pending;
         writeState(st);
         return {
@@ -622,13 +661,14 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
       payload: truncatedPayload,
     };
     pending[fingerprint] = entry;
+    targetKey = fingerprint;
   }
 
   // 3. 门禁阈值判断
   if (entry.count >= minEvidence) {
     // 达到门槛，正式毕业进写入队列，从 pending 彻底移除
     const graduatedEntry = { ...entry, payload: payload || entry.payload || {} };
-    delete pending[fingerprint];
+    delete pending[targetKey];
     st.pending_patterns = pending;
     writeState(st);
     return {
