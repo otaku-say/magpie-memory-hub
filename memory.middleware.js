@@ -531,6 +531,43 @@ function cut(s, n) {
   return v.length > n ? v.slice(0, n) + "…" : v;
 }
 
+/* ================= 动态嗅探真实工具名 =================
+ * 客户端可能使用不同前缀（如 mcp__magpie__... 或直接工具名），
+ * 动态从 body.tools 中嗅探最匹配的注册工具名。
+ */
+function sniffToolNames(body) {
+  var names = {
+    memory_save: PLUGIN_NAME + "_memory_save",
+    pitfall_save: PLUGIN_NAME + "_pitfall_save",
+    memory_context: PLUGIN_NAME + "_memory_context",
+    memory_search: PLUGIN_NAME + "_memory_search",
+    pitfall_search: PLUGIN_NAME + "_pitfall_search"
+  };
+  var tools = (body && body.tools) || (body && body.functions);
+  if (Array.isArray(tools)) {
+    for (var i = 0; i < tools.length; i++) {
+      var t = tools[i];
+      var name = "";
+      if (typeof t === "string") {
+        name = t;
+      } else if (t && typeof t === "object") {
+        if (t.function && typeof t.function.name === "string") {
+          name = t.function.name;
+        } else if (typeof t.name === "string") {
+          name = t.name;
+        }
+      }
+      if (!name) continue;
+      if (/memory_save$/.test(name)) names.memory_save = name;
+      else if (/pitfall_save$/.test(name)) names.pitfall_save = name;
+      else if (/memory_context$/.test(name)) names.memory_context = name;
+      else if (/memory_search$/.test(name)) names.memory_search = name;
+      else if (/pitfall_search$/.test(name)) names.pitfall_search = name;
+    }
+  }
+  return names;
+}
+
 /* ================= onRequest ================= */
 function onRequestInner(body, ctx) {
   if (!body || typeof body !== "object") return body;
@@ -743,15 +780,30 @@ function onRequestInner(body, ctx) {
     if (interval > 1 && (turnNo % interval) !== 0) wantExtract = false;
 
     if (wantExtract) {
-      var saveTool = PLUGIN_NAME + "_memory_save";
-      var pitfallTool = PLUGIN_NAME + "_pitfall_save";
-      var ctxTool = PLUGIN_NAME + "_memory_context";
-      var searchTool = PLUGIN_NAME + "_memory_search";
-      var pitSearchTool = PLUGIN_NAME + "_pitfall_search";
-      if (strength === "strict") {
+      var toolsSniffed = sniffToolNames(body);
+      var saveTool = toolsSniffed.memory_save;
+      var pitfallTool = toolsSniffed.pitfall_save;
+      var ctxTool = toolsSniffed.memory_context;
+      var searchTool = toolsSniffed.memory_search;
+      var pitSearchTool = toolsSniffed.pitfall_search;
+
+      var isTrouble = /Error:|Exception|Traceback|panic:|ENOENT|ECONN|报错|失败|不生效|踩坑|异常|bug/i.test(prompt);
+      var isPrinciple = /记住|以后都|不要再|严禁|禁止|必须用|统一用|默认配置|架构原则|铁律/.test(prompt);
+
+      if (isTrouble) {
+        injected +=
+          "\n\n[Memory Agent Guide —— 排障与避坑]\n" +
+          "- 先查避坑：检测到排障/报错场景，请先主动调用 `" + pitSearchTool + "` 或 `" + ctxTool + "` 检索已知避坑经验与历史解法；\n" +
+          "- 修复必存：排障解决后，结束本轮前务必调用 `" + pitfallTool + "` 沉淀踩坑经验（含 symptom, solution 等）；无工具调用能力时跳过保存，绝不在回复里输出 <memory> 标签块。";
+      } else if (isPrinciple) {
+        injected +=
+          "\n\n[Memory Agent Guide —— 规范与准则沉淀]\n" +
+          "- 立即沉淀准则：检测到长期规范或铁律意图，请立即调用 `" + saveTool + "`(category=\"principle\") 持久化沉淀；无工具调用能力时跳过保存，绝不在回复里输出 <memory> 标签块。\n" +
+          "- 检索辅助：若需校验既有规范或配置，可主动调用 `" + ctxTool + "` 或 `" + searchTool + "` 召回。";
+      } else if (strength === "strict" || turnNo <= 1) {
         injected +=
           "\n\n[Memory Agent Guide —— 检索与沉淀]\n" +
-          "1. 主动检索：涉及项目背景、历史规范、关键配置或排查报错时，优先主动调用 `" + ctxTool + "`（上下文召回）、`" + searchTool + "`（关键词语义检索）或 `" + pitSearchTool + "`（避坑经验匹配）。\n" +
+          "1. 优先检索：涉及项目背景、历史规范、关键配置或排查报错时，优先主动调用 `" + ctxTool + "`（首选一站式召回）、`" + searchTool + "` 或 `" + pitSearchTool + "` 检索记忆与避坑经验。\n" +
           "2. 及时沉淀：结束本轮前检查是否产生了持久偏好、架构决策、环境事实或报错解法，若命中立即用 `" + saveTool + "` 存入（报错踩坑优先用 `" + pitfallTool + "`）；无工具调用能力时跳过保存，绝不在回复里输出 <memory> 标签块。\n" +
           "无相关需求时忽略本提示，绝不为了凑数操作。";
       } else {

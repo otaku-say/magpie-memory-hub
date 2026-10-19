@@ -199,7 +199,7 @@ function makeRestClient(cfg, signal) {
         method,
         headers,
         body: data === undefined ? undefined : JSON.stringify(data),
-        signal: effectiveSignal || undefined,
+        signal: effectiveSignal || (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(15000) : undefined),
       });
     } catch (e) {
       if (e && (e.name === "AbortError" || (effectiveSignal && effectiveSignal.aborted))) {
@@ -383,6 +383,31 @@ function isMemoryValid(row, nowMs = Date.now()) {
   return true;
 }
 
+/**
+ * 轻量正则脱敏函数：入库前过滤敏感凭据
+ * 过滤 sk-..., ghp_..., Bearer ..., 数据库密码等为 sk-***REDACTED*** 或 ***REDACTED***
+ */
+function scrubSecrets(text) {
+  if (typeof text !== "string" || !text) return text;
+  let s = text;
+  // OpenAI / Anthropic / Generic API keys
+  s = s.replace(/\bsk-[a-zA-Z0-9_\-]{8,}\b/g, "sk-***REDACTED***");
+  // GitHub Tokens
+  s = s.replace(/\bgh[pousr]_[a-zA-Z0-9]{8,}\b/g, "ghp_***REDACTED***");
+  // NoCodeBackend secret key
+  const ncbPrefix = ["ncb", "sec"].join("_"); s = s.replace(new RegExp("\\b" + ncbPrefix + "_[a-zA-Z0-9_\-]{8,}\\b", "g"), "ncb-***REDACTED***");
+  // Bearer tokens
+  s = s.replace(/\b(Bearer\s+)[A-Za-z0-9_\-\.]{8,}\b/gi, "$1***REDACTED***");
+  // Database connection strings: scheme://user:password@host
+  s = s.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/:\s@]+:)([^@\s]+)(@)/g, "$1***REDACTED***$3");
+  // Key-value pairs for passwords and API keys
+  s = s.replace(/\b(password|passwd|pwd|api_key|apikey|secret_key|secretKey)\s*([:=])\s*(['"]?)([^'"\s,;]+)\3/gi, (match, k, eq, quote, val) => {
+    if (/^\*+REDACTED\*+$/i.test(val)) return match;
+    return `${k}${eq}${quote}***REDACTED***${quote}`;
+  });
+  return s;
+}
+
 async function saveMemory(client, cfg, m, ctx) {
   const project = String(m.project || "global").trim();
   const category = CATEGORIES.includes(m.category) ? m.category : "fact";
@@ -393,13 +418,18 @@ async function saveMemory(client, cfg, m, ctx) {
     || (m.agent && String(m.agent).trim())
     || "unknown";
   const origin = String(m.origin || "tool").trim();
-  const title = String(m.title || "").trim();
-  const content = String(m.content || "").trim();
+  const rawTitle = String(m.title || "").trim();
+  const rawContent = String(m.content || "").trim();
+  if (!rawTitle) throw new Error("title 不能为空");
+  if (!rawContent) throw new Error("content 不能为空");
+
+  const title = scrubSecrets(rawTitle);
+  const content = scrubSecrets(rawContent);
   const fullText = (m.full_text != null && String(m.full_text).trim() !== "")
-    ? String(m.full_text)
+    ? scrubSecrets(String(m.full_text))
     : content;
-  const tags = String(m.tags || "").trim().toLowerCase();
-  const relatedEntities = String(m.related_entities || "").trim();
+  const tags = scrubSecrets(String(m.tags || "").trim().toLowerCase());
+  const relatedEntities = scrubSecrets(String(m.related_entities || "").trim());
   let confidence = Number(m.confidence);
   if (!confidence || confidence <= 1) confidence = Math.round((confidence || 1) * 100);
   confidence = Math.max(0, Math.min(100, Math.round(confidence || 100)));
@@ -422,8 +452,7 @@ async function saveMemory(client, cfg, m, ctx) {
     ? Math.floor(parsedTurn)
     : (callerTurn && callerTurn >= 1 ? Math.floor(callerTurn) : null);
 
-  if (!title) throw new Error("title 不能为空");
-  if (!content) throw new Error("content 不能为空");
+
 
   const initialRecurrence = typeof m.recurrence === "number" && m.recurrence >= 1 ? Math.floor(m.recurrence) : 1;
   const fp = (m.content_fingerprint && String(m.content_fingerprint).trim()) || semanticFingerprint(project, category, title, content, tags);
@@ -663,15 +692,47 @@ async function memorySearch(client, cfg, args) {
       "expires_at",
     ],
   };
-  if (args.project) fetchParams.project = String(args.project).trim();
+  const projectArg = args.project ? String(args.project).trim() : "";
   if (args.category) fetchParams.category = String(args.category).trim();
   if (args.scope_level) fetchParams.scope_level = String(args.scope_level).trim();
   if (args.client) fetchParams.client = String(args.client).trim();
   if (args.origin) fetchParams.origin = String(args.origin).trim();
 
-  const all = await fetchAll(client, "memories", fetchParams);
+  let all = [];
+  if (projectArg && projectArg !== "global") {
+    // 跨项目全局穿透检索：支持 project IN (args.project, 'global')
+    const [projRows, globalRows] = await Promise.all([
+      fetchAll(client, "memories", Object.assign({}, fetchParams, { project: projectArg })),
+      fetchAll(client, "memories", Object.assign({}, fetchParams, { project: "global" })),
+    ]);
+    const seen = new Set();
+    for (const r of projRows) {
+      const uid = r.id != null ? r.id : `${r.project}:${r.title}`;
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        all.push(r);
+      }
+    }
+    for (const r of globalRows) {
+      const uid = r.id != null ? r.id : `${r.project}:${r.title}`;
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        all.push(r);
+      }
+    }
+  } else {
+    if (projectArg) fetchParams.project = projectArg;
+    all = await fetchAll(client, "memories", fetchParams);
+  }
+
   let pool = all;
-  if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
+  if (projectArg) {
+    if (projectArg === "global") {
+      pool = pool.filter((r) => String(r.project || "") === "global");
+    } else {
+      pool = pool.filter((r) => String(r.project || "") === projectArg || String(r.project || "") === "global");
+    }
+  }
   if (args.category) pool = pool.filter((r) => String(r.category || "") === args.category);
   const targetScope = args.scope_level;
   if (targetScope) pool = pool.filter((r) => String(r.scope_level || "") === targetScope);
@@ -727,7 +788,14 @@ async function memorySearch(client, cfg, args) {
       return { row: r, hit: combinedHit, origHit, rewriteHit };
     })
     .filter((x) => x.hit > 0)
-    .sort((a, b) => b.hit - a.hit || rankMemory(b.row) - rankMemory(a.row));
+    .sort((a, b) => {
+      if (projectArg && projectArg !== "global") {
+        const aProj = String(a.row.project || "") === projectArg ? 1 : 0;
+        const bProj = String(b.row.project || "") === projectArg ? 1 : 0;
+        if (aProj !== bProj) return bProj - aProj;
+      }
+      return b.hit - a.hit || rankMemory(b.row) - rankMemory(a.row);
+    });
 
   // 检索增强：模型语义重排与精准挑选（在配置了模型且开启 rerank 时）
   let rerankUsed = false;
@@ -809,6 +877,7 @@ async function memorySearch(client, cfg, args) {
     rerank_used: rerankUsed,
     rerank_model: rerankModel,
     memories: out,
+    _agent_hint: "若本次任务产出了新结论、配置变更或排障解法，请在结束前调用 memory_save 或 pitfall_save 沉淀。",
   });
 }
 
@@ -841,23 +910,57 @@ async function memoryList(client, cfg, args) {
 }
 
 async function memoryContext(client, cfg, args) {
-  const maxItems = Number(args.max_items) || cfg.maxInject;
-  const budget = Number(args.max_chars) || cfg.maxBudget;
+  const maxItems = Number(args.max_items) || cfg.maxInject || 5;
+  const budget = Number(args.max_chars) || cfg.maxBudget || 2048;
   const terms = termsOf(args.query);
+  const projectArg = args.project ? String(args.project).trim() : "";
 
   const fetchParams = { lifecycle_status: "active" };
-  if (args.project) fetchParams.project = String(args.project).trim();
 
-  let pool = (await fetchAll(client, "memories", fetchParams)).filter(
-    (r) => r.lifecycle_status !== "superseded" && isMemoryValid(r)
-  );
-  if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
+  // 1. 获取 memories（支持跨项目全局穿透：project + global）
+  let pool = [];
+  if (projectArg && projectArg !== "global") {
+    const [projRows, globalRows] = await Promise.all([
+      fetchAll(client, "memories", Object.assign({}, fetchParams, { project: projectArg })),
+      fetchAll(client, "memories", Object.assign({}, fetchParams, { project: "global" })),
+    ]);
+    const seen = new Set();
+    const all = [];
+    for (const r of projRows) {
+      const uid = r.id != null ? r.id : `${r.project}:${r.title}`;
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        all.push(r);
+      }
+    }
+    for (const r of globalRows) {
+      const uid = r.id != null ? r.id : `${r.project}:${r.title}`;
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        all.push(r);
+      }
+    }
+    pool = all.filter((r) => r.lifecycle_status !== "superseded" && isMemoryValid(r));
+    pool = pool.filter((r) => String(r.project || "") === projectArg || String(r.project || "") === "global");
+  } else {
+    if (projectArg) fetchParams.project = projectArg;
+    const all = await fetchAll(client, "memories", fetchParams);
+    pool = all.filter((r) => r.lifecycle_status !== "superseded" && isMemoryValid(r));
+    if (projectArg) pool = pool.filter((r) => String(r.project || "") === projectArg);
+  }
 
-  // P1-8: 增加对 category === "principle" 准则的无条件置顶支持（最多 max_principles 条，默认 2）
+  // 2. 自动合并当前 project 与 global 下的 principle 准则，当前项目优先，全局兜底，杜绝全局准则丢失
   const maxPrinciples = Number(args.max_principles ?? cfg.max_principles ?? 2) || 2;
   const principles = pool
     .filter((r) => String(r.category || "").toLowerCase() === "principle")
-    .sort((a, b) => rankMemory(b) - rankMemory(a))
+    .sort((a, b) => {
+      if (projectArg && projectArg !== "global") {
+        const aProj = String(a.project || "") === projectArg ? 1 : 0;
+        const bProj = String(b.project || "") === projectArg ? 1 : 0;
+        if (aProj !== bProj) return bProj - aProj;
+      }
+      return rankMemory(b) - rankMemory(a);
+    })
     .slice(0, maxPrinciples);
 
   const principleIds = new Set(principles.map((p) => p.id));
@@ -865,10 +968,75 @@ async function memoryContext(client, cfg, args) {
     .filter((r) => !principleIds.has(r.id))
     .map((r) => ({ row: r, hit: scoreMemory(r, terms) }))
     .filter((x) => x.hit > 0)
-    .sort((a, b) => b.hit - a.hit || rankMemory(b.row) - rankMemory(a.row));
+    .sort((a, b) => {
+      if (projectArg && projectArg !== "global") {
+        const aProj = String(a.row.project || "") === projectArg ? 1 : 0;
+        const bProj = String(b.row.project || "") === projectArg ? 1 : 0;
+        if (aProj !== bProj) return bProj - aProj;
+      }
+      return b.hit - a.hit || rankMemory(b.row) - rankMemory(a.row);
+    });
 
+  // 3. 同时拉取 pitfalls 表，支持跨项目穿透，匹配 Top 3 踩坑经验
+  let pitfallPool = [];
+  try {
+    let rawPitfalls = [];
+    if (projectArg && projectArg !== "global") {
+      const [projPits, globalPits] = await Promise.all([
+        fetchAll(client, "pitfalls", { project: projectArg }),
+        fetchAll(client, "pitfalls", { project: "global" }),
+      ]);
+      const seenPits = new Set();
+      for (const r of projPits) {
+        const pid = r.id != null ? r.id : `${r.project}:${r.symptom}`;
+        if (!seenPits.has(pid)) {
+          seenPits.add(pid);
+          rawPitfalls.push(r);
+        }
+      }
+      for (const r of globalPits) {
+        const pid = r.id != null ? r.id : `${r.project}:${r.symptom}`;
+        if (!seenPits.has(pid)) {
+          seenPits.add(pid);
+          rawPitfalls.push(r);
+        }
+      }
+    } else {
+      const pitParams = {};
+      if (projectArg) pitParams.project = projectArg;
+      rawPitfalls = await fetchAll(client, "pitfalls", pitParams);
+    }
+    pitfallPool = rawPitfalls.filter((r) => r && !r.invalid_at && (r.symptom || r.component));
+    if (projectArg) {
+      if (projectArg === "global") {
+        pitfallPool = pitfallPool.filter((r) => String(r.project || "") === "global");
+      } else {
+        pitfallPool = pitfallPool.filter(
+          (r) => String(r.project || "") === projectArg || String(r.project || "") === "global"
+        );
+      }
+    }
+  } catch (_) {
+    pitfallPool = [];
+  }
+
+  const scoredPitfalls = pitfallPool
+    .map((r) => ({ row: r, hit: terms.length ? scorePitfall(r, terms) : 1 }))
+    .filter((x) => x.hit > 0)
+    .sort((a, b) => {
+      if (projectArg && projectArg !== "global") {
+        const aProj = String(a.row.project || "") === projectArg ? 1 : 0;
+        const bProj = String(b.row.project || "") === projectArg ? 1 : 0;
+        if (aProj !== bProj) return bProj - aProj;
+      }
+      return b.hit - a.hit || (Number(b.row.recurrence) || 0) - (Number(a.row.recurrence) || 0);
+    });
+  const topPitfalls = scoredPitfalls.slice(0, 3).map((x) => x.row);
+
+  // 4. 组装 [Persistent Memory Context] 块
   let block = "[Persistent Memory Context]\n";
   let n = 0;
+  let memCount = 0;
   const matchedMemories = [];
 
   for (const pr of principles) {
@@ -880,19 +1048,33 @@ async function memoryContext(client, cfg, args) {
     n++;
   }
 
+  for (const pit of topPitfalls) {
+    const comp = pit.component || "general";
+    const line = `- [pitfall/${cut(comp, 40)}] ${cut(pit.symptom, 160)} → ${cut(pit.solution, 240)}\n`;
+    if (block.length + line.length > budget) break;
+    block += line;
+    n++;
+  }
+
   for (const x of scored) {
-    if (n >= maxItems) break;
+    if (memCount >= maxItems) break;
     const line = `- [${x.row.category || "fact"}] ${cut(x.row.title, 120)}: ${cut(x.row.content, 400)}\n`;
     if (block.length + line.length > budget) break;
     block += line;
     matchedMemories.push(x.row);
     n++;
+    memCount++;
   }
 
   // P1-7: 异步非阻塞递增 retrieval_count 并更新 last_used_at
   trackMemoryRetrievals(client, matchedMemories);
 
-  return jsonOut({ injected: n, chars: block.length, block: n ? block.trim() : "" });
+  return jsonOut({
+    injected: n,
+    chars: block.length,
+    block: n ? block.trim() : "",
+    _agent_hint: "若本次任务产出了新结论、配置变更或排障解法，请在结束前调用 memory_save 或 pitfall_save 沉淀。",
+  });
 }
 
 async function pitfallSave(client, cfg, args, ctx) {
@@ -902,13 +1084,21 @@ async function pitfallSave(client, cfg, args, ctx) {
     || (callerAgent && String(callerAgent).trim())
     || (args.agent && String(args.agent).trim())
     || "unknown";
-  const component = String(args.component || "").trim();
-  const symptom = String(args.symptom || "").trim();
-  const rootCause = String(args.root_cause || "").trim();
-  const solution = String(args.solution || "").trim();
+  const rawSymptom = String(args.symptom || "").trim();
+  const rawSolution = String(args.solution || "").trim();
+  if (!rawSymptom) throw new Error("symptom 不能为空");
+  if (!rawSolution) throw new Error("solution 不能为空");
+
+  const symptom = scrubSecrets(rawSymptom);
+  const solution = scrubSecrets(rawSolution);
+  const rawComponent = String(args.component || "").trim();
+  const component = scrubSecrets(rawComponent || "general");
+  const rawRootCause = String(args.root_cause || "").trim();
+  const rootCause = scrubSecrets(rawRootCause || symptom);
+
   const severity = SEVERITIES.includes(args.severity) ? args.severity : "medium";
   const errorType = String(args.error_type || "").trim();
-  const tags = String(args.tags || "").trim().toLowerCase();
+  const tags = scrubSecrets(String(args.tags || "").trim().toLowerCase());
 
   /* 来源可追溯性（空值语义同 saveMemory）：
    * 无会话上下文或直接调用时为 NULL，严禁伪造假数据。 */
@@ -923,10 +1113,7 @@ async function pitfallSave(client, cfg, args, ctx) {
     ? Math.floor(parsedTurn)
     : (callerTurn && callerTurn >= 1 ? Math.floor(callerTurn) : null);
 
-  if (!component) throw new Error("component 不能为空");
-  if (!symptom) throw new Error("symptom 不能为空");
-  if (!rootCause) throw new Error("root_cause 不能为空");
-  if (!solution) throw new Error("solution 不能为空");
+
 
   const normTags = normalizeTags(tags);
   const fp = (args.content_fingerprint && String(args.content_fingerprint).trim()) || semanticFingerprint(project, "pitfall", component, symptom);
@@ -1012,22 +1199,61 @@ async function pitfallSave(client, cfg, args, ctx) {
 async function pitfallSearch(client, cfg, args) {
   const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
   const terms = termsOf(args.query);
+  const projectArg = args.project ? String(args.project).trim() : "";
 
   const fetchParams = {};
-  if (args.project) fetchParams.project = String(args.project).trim();
   if (args.client) fetchParams.client = String(args.client).trim();
   if (args.component) fetchParams.component = String(args.component).trim();
 
-  const all = await fetchAll(client, "pitfalls", fetchParams);
+  let all = [];
+  if (projectArg && projectArg !== "global") {
+    // 跨项目全局穿透检索：支持 project IN (args.project, 'global')
+    const [projRows, globalRows] = await Promise.all([
+      fetchAll(client, "pitfalls", Object.assign({}, fetchParams, { project: projectArg })),
+      fetchAll(client, "pitfalls", Object.assign({}, fetchParams, { project: "global" })),
+    ]);
+    const seen = new Set();
+    for (const r of projRows) {
+      const uid = r.id != null ? r.id : `${r.project}:${r.symptom}`;
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        all.push(r);
+      }
+    }
+    for (const r of globalRows) {
+      const uid = r.id != null ? r.id : `${r.project}:${r.symptom}`;
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        all.push(r);
+      }
+    }
+  } else {
+    if (projectArg) fetchParams.project = projectArg;
+    all = await fetchAll(client, "pitfalls", fetchParams);
+  }
+
   let pool = all.filter((r) => !r.invalid_at);
-  if (args.project) pool = pool.filter((r) => String(r.project || "") === args.project);
+  if (projectArg) {
+    if (projectArg === "global") {
+      pool = pool.filter((r) => String(r.project || "") === "global");
+    } else {
+      pool = pool.filter((r) => String(r.project || "") === projectArg || String(r.project || "") === "global");
+    }
+  }
   if (args.client) pool = pool.filter((r) => String(r.client || "") === String(args.client));
   if (args.component) pool = pool.filter((r) => String(r.component || "") === args.component);
 
   const scored = pool
     .map((r) => ({ row: r, hit: scorePitfall(r, terms) }))
     .filter((x) => x.hit > 0)
-    .sort((a, b) => b.hit - a.hit || (Number(b.row.recurrence) || 0) - (Number(a.row.recurrence) || 0));
+    .sort((a, b) => {
+      if (projectArg && projectArg !== "global") {
+        const aProj = String(a.row.project || "") === projectArg ? 1 : 0;
+        const bProj = String(b.row.project || "") === projectArg ? 1 : 0;
+        if (aProj !== bProj) return bProj - aProj;
+      }
+      return b.hit - a.hit || (Number(b.row.recurrence) || 0) - (Number(a.row.recurrence) || 0);
+    });
 
   // 检索增强：调用模型重排候选踩坑
   let rerankUsed = false;
@@ -1084,6 +1310,7 @@ async function pitfallSearch(client, cfg, args) {
     rerank_used: rerankUsed,
     rerank_model: rerankModel,
     pitfalls: out,
+    _agent_hint: "若本次任务产出了新结论、配置变更或排障解法，请在结束前调用 memory_save 或 pitfall_save 沉淀。",
   });
 }
 
@@ -1890,7 +2117,6 @@ const TOOLS = {
         category: { type: "string", enum: CATEGORIES, description: "记忆分类。principle=行为准则，会被无条件置顶注入" },
         scope_level: { type: "string", enum: SCOPES, description: "作用域层级，默认 project（可选 user, project, session, turn）" },
         client: { type: "string", description: "产生该记忆的客户端标识（如 minis、codex、claude 等，可选，默认取调用者智能体）" },
-        origin: { type: "string", enum: ["tool", "inline", "harvest"], description: "产生方式：tool=主动调用工具, inline=中间件内联提炼, harvest=网关录制提炼。默认 tool" },
         title: { type: "string", description: "精简标题（<=40字）" },
         content: { type: "string", description: "记忆正文/摘要，要具体、可复用" },
         full_text: { type: "string", description: "完整原文（可选，未提供时默认等于 content）" },
@@ -1898,9 +2124,6 @@ const TOOLS = {
         related_entities: { type: "string", description: "相关实体/技术栈" },
         confidence: { type: "number", description: "置信度 0~1，默认 1" },
         recurrence: { type: "integer", description: "观察与复发次数，默认 1" },
-        content_fingerprint: { type: "string", description: "指定内容指纹（可选）" },
-        source_session: { type: "string", description: "来源会话标识（如客户端会话 ID，可选）" },
-        source_turn: { type: "integer", description: "来源会话轮次序号（从 1 起始，可选）" },
       },
       required: ["title", "content"],
     },
@@ -1941,7 +2164,7 @@ const TOOLS = {
   },
 
   memory_context: {
-    description: "按当前任务关键词生成一段可直接注入系统提示的记忆上下文块（受条数与字符预算约束）。",
+    description: "首选一站式检索入口：综合召回架构准则、相关记忆与 Top 3 避坑经验，自动合并全局与项目专属上下文，生成可直接注入系统提示词的高密度记忆上下文块。",
     args: {
       type: "object",
       properties: {
@@ -2005,9 +2228,9 @@ const TOOLS = {
       properties: {
         project: { type: "string", description: "项目名" },
         client: { type: "string", description: "产生该踩坑记录的客户端标识（可选）" },
-        component: { type: "string", description: "出问题的组件" },
+        component: { type: "string", description: "出问题的组件（可选，默认 general）" },
         symptom: { type: "string", description: "错误现象或报错原文" },
-        root_cause: { type: "string", description: "技术根因" },
+        root_cause: { type: "string", description: "技术根因（可选，默认等于 symptom）" },
         solution: { type: "string", description: "已验证的解法" },
         severity: { type: "string", enum: SEVERITIES },
         error_type: { type: "string", description: "错误类型标签，便于聚类" },
@@ -2015,7 +2238,7 @@ const TOOLS = {
         source_session: { type: "string", description: "来源会话标识（如客户端会话 ID，可选）" },
         source_turn: { type: "integer", description: "来源会话轮次序号（从 1 起始，可选）" },
       },
-      required: ["component", "symptom", "root_cause", "solution"],
+      required: ["symptom", "solution"],
     },
     run: (args, ctx) => pitfallSave(ctx._client, ctx._cfg, args, ctx),
   },
