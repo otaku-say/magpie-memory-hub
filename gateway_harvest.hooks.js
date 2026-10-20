@@ -36,6 +36,7 @@ import {
   tokenize,
   overlapCoefficient,
   jaccardSimilarity,
+  hasConflictingNumbers,
 } from "./semantic_dedup.js";
 import { makeMcpClient, buildSelect, buildInsert, sqlValue } from "./mcp_client.js";
 import {
@@ -1308,15 +1309,19 @@ export async function triggerBackgroundDrain(client, options = {}) {
               const solution = item.data?.solution || "";
               const rootCause = item.data?.root_cause || "";
               dup = existingRows.find((r) => {
+                const noConflict = !hasConflictingNumbers(symptom, r.symptom);
                 const rSym = normalizeSemanticText(r.symptom);
                 const curSym = normalizeSemanticText(symptom);
-                if (rSym && curSym && (rSym === curSym || rSym.includes(curSym) || curSym.includes(rSym))) {
+                if (noConflict && rSym && curSym && (rSym === curSym || rSym.includes(curSym) || curSym.includes(rSym))) {
                   return true;
                 }
                 const rTok = tokenize(r.symptom);
                 const sTok = tokenize(symptom);
-                if (overlapCoefficient(rTok.tokens, sTok.tokens) >= 0.5 || jaccardSimilarity(rTok.tokens, sTok.tokens) >= 0.3) {
+                if (noConflict && (overlapCoefficient(rTok.tokens, sTok.tokens) >= 0.5 || jaccardSimilarity(rTok.tokens, sTok.tokens) >= 0.3)) {
                   return true;
+                }
+                if (!noConflict) {
+                  return false;
                 }
                 return isSemanticallySimilar(symptom, solution || rootCause, r.symptom, r.solution || r.root_cause);
               });

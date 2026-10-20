@@ -278,13 +278,20 @@ async function execute(action, cfg, fs, sp, state, options) {
           saveMemory = toolsMod.saveMemory;
           pitfallSave = toolsMod.pitfallSave;
         } else {
-          // tools.js 未直接导出这两个函数，通过 MagpieMemoryHub 实例获取
-          // 注意：传 safeOpts 剔除 _action 避免递归触发信标执行，仅在闭包内构建一次
-          const safeOpts = Object.assign({}, options || {}, cfg || {});
+          // tools.js 未直接导出这两个函数，构造最小 safeOpts 显式禁用生产副作用（auto_init / auto_harvest / dedup_schedule）
+          const safeOpts = Object.assign({}, options || {}, cfg || {}, {
+            auto_init: false,
+            autoInit: false,
+            auto_harvest: false,
+            autoHarvest: false,
+            dedup_schedule: "off",
+            audit_interval: "off",
+            auditInterval: "off",
+          });
           delete safeOpts._action;
           delete safeOpts[ACTION_KEY];
           safeOpts._client = client;
-          const hub = await toolsMod.MagpieMemoryHub(cfg || {}, safeOpts);
+          const hub = await toolsMod.MagpieMemoryHub(safeOpts, safeOpts);
           const hubTools = hub.tool;
           saveMemory = async (cl, c, m, ctx) => {
             const raw = await hubTools.memory_save.execute(m, { ...(ctx || {}), _ctx: ctx });
@@ -429,6 +436,9 @@ async function execute(action, cfg, fs, sp, state, options) {
         ]
       };
 
+      // 先把 "进行中" 状态 writeCardStatus 落盘，再启动异步 IIFE，消除状态倒退竞态
+      writeCardStatus("audit", result, "memory_audit");
+
       // 异步在后台执行去重/撤销（fire-and-forget），通过 writeCardStatus("audit", ...) 持续回传进度
       (async () => {
         try {
@@ -494,19 +504,19 @@ async function execute(action, cfg, fs, sp, state, options) {
 
   // 写入卡片状态文件（供设置页读取）
   try {
-    // 结果写到哪张卡片 —— 必须逐项显式映射，不能只分两类。
-    // 早先写成 `op === "storage_setup" ? "r2" : "ncb"`，导致 r2_check 的结果
-    // 被写进 NoCodeBackend 卡片。
-    const CARD_OF_OP = {
-      provision: "ncb", init: "ncb", reset: "ncb", status: "ncb", ncb_check: "ncb", secret_check: "ncb",  // db-col-ok: UI 操作对应的卡片映射表，非数据库列
-      storage_setup: "r2", r2_check: "r2", clean_probe: "r2",
-      model_check: "model",
-      memory_audit: "audit",
-      harvest_gateway: "gateway",
-      sync_snapshot: "inject",
-    };
-    const cardKey = CARD_OF_OP[action.op] || "ncb";
-    writeCardStatus(cardKey, result, action.op);
+    // memory_audit 的初始「进行中」已在启动 IIFE 前同步落盘，后续由 IIFE 更新，避免外层落盘覆盖后台最终状态
+    if (action.op !== "memory_audit") {
+      const CARD_OF_OP = {
+        provision: "ncb", init: "ncb", reset: "ncb", status: "ncb", ncb_check: "ncb", secret_check: "ncb",  // db-col-ok: UI 操作对应的卡片映射表，非数据库列
+        storage_setup: "r2", r2_check: "r2", clean_probe: "r2",
+        model_check: "model",
+        memory_audit: "audit",
+        harvest_gateway: "gateway",
+        sync_snapshot: "inject",
+      };
+      const cardKey = CARD_OF_OP[action.op] || "ncb";
+      writeCardStatus(cardKey, result, action.op);
+    }
   } catch (e) {
     console.error("[memory-hub] writeCardStatus execution error:", (e && e.message) || e);
   }
