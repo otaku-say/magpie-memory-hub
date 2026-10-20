@@ -24,6 +24,7 @@
  */
 
 import crypto from "node:crypto";
+import { MagpieMemoryHub } from "./tools.js";
 import {
   isTestMode,
   isExplicitUserMemory,
@@ -413,10 +414,11 @@ export const classifyEndpointCache = new Map();
 export const HARVEST_SYSTEM_PROMPT = `你是一个专业的长期记忆与踩坑经验提炼助手。从对话中严格提炼出值得跨会话持久化的重要信息。
 
 【必须记录的内容】：
-1. 偏好/约定 (preference)：用户表达的持久习惯、偏好风格或硬性约束（例如「统一使用 TypeScript」「不要使用 any」）。
-2. 架构决策 (decision)：经确认的技术选型、组件替代、接口协议约定（例如「API 网关采用 fastify 替代 express」）。
-3. 环境事实 (fact)：项目路径、可用的生效端口、确定的配置文件及生效选项、环境变量（例如「跨域必须在 config.toml 中配置 cors = true」）。
-4. 真实踩坑与解法 (pitfall)：真实遇到的具体报错/异常现象，以及最终确证有效的解决办法（必须包含现象、根因、解法三要素）。
+1. 长期铁律/架构原则 (principle)：用户确立的长期铁律、最高准则或核心架构原则（例如「严禁在前端代码中暴露任何密钥凭据」「单测断言失败必须立即中断流水线」）。
+2. 偏好/约定 (preference)：用户表达的持久习惯、偏好风格或硬性约束（例如「统一使用 TypeScript」「不要使用 any」）。
+3. 架构决策 (decision)：经确认的技术选型、组件替代、接口协议约定（例如「API 网关采用 fastify 替代 express」）。
+4. 环境事实 (fact)：项目路径、可用的生效端口、确定的配置文件及生效选项、环境变量（例如「跨域必须在 config.toml 中配置 cors = true」）。
+5. 真实踩坑与解法 (pitfall)：真实遇到的具体报错/异常现象，以及最终确证有效的解决办法（必须包含现象、根因、解法三要素，分别明确给出 root_cause 与 solution）。
 
 【严禁记录的内容】：
 - 闲聊、客套、问候、感谢（如「你好」「谢谢你的帮助」）。
@@ -428,11 +430,14 @@ export const HARVEST_SYSTEM_PROMPT = `你是一个专业的长期记忆与踩坑
 - 若对话中没有任何值得持久化的内容，必须且仅返回空数组: []
 - 若有值得记录的内容，返回合法的 JSON 数组，每个对象包含以下键：
   {
-    "category": "fact" | "preference" | "decision" | "pitfall",
+    "category": "principle" | "fact" | "preference" | "decision" | "pitfall",
     "title": "简明标题（20字以内，点明核心实体与动作）",
-    "content": "核心事实或踩坑解法详情（必须具体，包含关键参数或报错与解法）",
+    "content": "核心事实、原则或踩坑详情（必须具体，包含关键参数或报错与解法）",
     "tags": "3~5个逗号分隔的同义检索词/别名/关键词（必须包含不同表述的检索同义词，如关于数据库密码必须包含：数据库,密码,凭据,db,credential,password 等，确保用户用不同同义词搜索时均可精准命中）",
-    "confidence": 0.8到1.0之间的置信度数值
+    "related_entities": "逗号分隔的相关实体/技术栈/模块名（例如 Redis, Fastify, Docker；无特定实体时给空字符串 \"\"）",
+    "confidence": 0.8到1.0之间的置信度数值,
+    "root_cause": "技术根因（category 为 pitfall 时必填，说明引发报错的技术原因；非 pitfall 类可为空串 \"\"）",
+    "solution": "已验证的解法（category 为 pitfall 时必填，说明确证有效的解决步骤；非 pitfall 类可为空串 \"\"）"
   }
 - 严禁包裹 \`\`\`json 代码块，严禁输出任何 markdown 格式或额外说明文字，仅输出原始 JSON 数组。`;
 
@@ -742,15 +747,20 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
       const minConf = Number(options.min_confidence ?? options.minConfidence ?? 0.6);
       if (confidence < minConf) continue;
 
+      const related_entities = item.related_entities ? String(item.related_entities).trim() : "";
+
       if (category === "pitfall" || category === "failure" || /踩坑|报错|error|failure/i.test(category)) {
+        const root_cause = item.root_cause ? String(item.root_cause).trim() : "";
+        const solution = item.solution ? String(item.solution).trim() : content;
         pitfalls.push({
           title,
           content,
-          symptom: item.symptom || title,
-          solution: item.solution || content,
-          root_cause: item.root_cause || content,
+          symptom: item.symptom ? String(item.symptom).trim() : title,
+          solution,
+          root_cause,
           component: item.component || (tags.split(",")[0] || "general"),
           tags,
+          related_entities,
           confidence,
           category: "pitfall",
         });
@@ -760,6 +770,7 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
           title,
           content,
           tags,
+          related_entities,
           confidence,
           category: VALID_CATS.includes(category) ? category : "fact",
         });
@@ -944,7 +955,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       content,
       full_text: content,
       tags: item.tags || "auto-harvest",
-      related_entities: "",
+      related_entities: item.related_entities ? String(item.related_entities).trim() : "",
       content_fingerprint: fp,
       confidence_score: Math.round((item.confidence || 0.8) * 100),
       lifecycle_status: "active",
@@ -994,16 +1005,19 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
 
     const now = new Date().toISOString().slice(0, 19).replace("T", " ");
     const queueId = `hq_p_${fp}`;
+    const rootCause = item.root_cause ? String(item.root_cause).trim() : "";
+    const solution = item.solution ? String(item.solution).trim() : (item.content ? String(item.content).trim() : "");
     const pitfallPayload = {
       project,
       client: agent,
       component,
       symptom,
-      root_cause: item.root_cause || `执行中出现 ${symptom}，后续成功解决`,
-      solution: item.solution || "",
+      root_cause: rootCause,
+      solution: solution,
       severity: item.severity || "medium",
       error_type: item.error_type || "general",
       tags: item.tags || "auto-harvest,gateway",
+      related_entities: item.related_entities ? String(item.related_entities).trim() : "",
       content_fingerprint: fp,
       recurrence,
       created_at: now,
@@ -1024,6 +1038,8 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
     " queue=" + (typeof readHarvestQueue === "function" ? (readHarvestQueue() || []).length : "?"));
 
   // 若传入了 client，由唯一受控的消费器统一执行落库（防并发重入与重复插入）
+  let memoriesEnriched = 0;
+  let pitfallsEvolved = 0;
   if (client && !client._isNoCredentials) {
     try {
       const drainRes = await triggerBackgroundDrain(client);
@@ -1035,11 +1051,17 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
         if (typeof drainRes.pitfallsSaved === "number") {
           pitfallsSaved = drainRes.pitfallsSaved;
         }
+        if (typeof drainRes.memoriesEnriched === "number") {
+          memoriesEnriched = drainRes.memoriesEnriched;
+        }
+        if (typeof drainRes.pitfallsEvolved === "number") {
+          pitfallsEvolved = drainRes.pitfallsEvolved;
+        }
       }
     } catch (_) {}
   }
 
-  return { memoriesSaved, pitfallsSaved, pendingSaved, skipped: false };
+  return { memoriesSaved, pitfallsSaved, memoriesEnriched, pitfallsEvolved, pendingSaved, skipped: false };
 }
 
 /* ================================================================== *
@@ -1188,6 +1210,47 @@ export async function triggerBackgroundDrain(client, options = {}) {
   _isDraining = true;
   let totalMemoriesSaved = 0;
   let totalPitfallsSaved = 0;
+  let totalMemoriesEnriched = 0;
+  let totalPitfallsEvolved = 0;
+  const actions = { CREATED: 0, ENRICHED: 0, EVOLVED: 0, NOOP: 0 };
+
+  let hubInstance = null;
+  const safeClient = {
+    ...client,
+    update: client.update ? client.update.bind(client) : async () => ({ affectedRows: 0 }),
+  };
+
+  async function getHub() {
+    if (!hubInstance) {
+      hubInstance = (options && options.hub) || await MagpieMemoryHub({}, { _client: safeClient, _cfg: (options && options.cfg) || {} });
+    }
+    return hubInstance;
+  }
+
+  async function callSaveMemory(data, ctx) {
+    if (options && typeof options.saveMemory === "function") {
+      if (options.saveMemory.length >= 3) {
+        return await options.saveMemory(safeClient, (options && options.cfg) || {}, data, ctx);
+      }
+      return await options.saveMemory(data, ctx);
+    }
+    const h = await getHub();
+    const res = await h.tool.memory_save.execute(data, ctx);
+    return typeof res === "string" ? JSON.parse(res) : res;
+  }
+
+  async function callPitfallSave(data, ctx) {
+    if (options && typeof options.pitfallSave === "function") {
+      if (options.pitfallSave.length >= 3) {
+        return await options.pitfallSave(safeClient, (options && options.cfg) || {}, data, ctx);
+      }
+      return await options.pitfallSave(data, ctx);
+    }
+    const h = await getHub();
+    const res = await h.tool.pitfall_save.execute(data, ctx);
+    return typeof res === "string" ? JSON.parse(res) : res;
+  }
+
   try {
     let totalProcessed = 0;
     while (true) {
@@ -1199,196 +1262,86 @@ export async function triggerBackgroundDrain(client, options = {}) {
       for (const item of queue) {
         try {
           if (item.table === "memories") {
-            const fp = item.fp || item.data?.content_fingerprint || "";
-            const project = item.project || "global";
-            const memKey = `m:${project}:${fp}`;
-            const category = item.data?.category || "fact";
-            const title = item.data?.title || "";
-            const content = item.data?.content || item.data?.full_text || "";
-
-            // Layer ① 语义指纹查重 + Layer ② 滑动窗口语义相似度比对 (上限提升至 200，并按修改时间倒序)
-            const existing = await client.list("memories", {
-              project,
-              category,
-              lifecycle_status: "active",
-              order_by: "updated_at DESC",
-              limit: 200,
-            });
-            const rows = Array.isArray(existing?.data) ? existing.data : (Array.isArray(existing) ? existing : []);
-            const categoryRows = rows.filter((r) => !category || r.category === category);
-            const dup = findSemanticDuplicate(categoryRows, title, content, fp);
-
-            if (dup) {
-              const next = (Number(dup.recurrence) || 1) + (Number(item.data?.recurrence) || 1);
-              const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-              try {
-                await client.update("memories", dup.id, {
-                  recurrence: next,
-                  updated_at: now,
-                });
-              } catch (_) {}
-              markRecent("m:" + (dup.content_fingerprint || fp));
-              successIds.push(item.id);
-              batchSuccess++;
-              continue;
-            }
-            // 同标题旧记忆版本演进 (superseded)
-            const superseded = categoryRows.filter(
-              (r) =>
-                r.lifecycle_status === "active" &&
-                String(r.title || "").trim().toLowerCase() === title.toLowerCase()
-            );
-            const revision = superseded.reduce(function (mx, r) { return Math.max(mx, Number(r.revision) || 1); }, 0) + (superseded.length > 0 ? 1 : 0);
-            const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-            const drainMemoryPayload = {
+            const project = item.project || item.data?.project || "global";
+            const memPayload = {
               ...item.data,
-              lifecycle_status: item.data?.lifecycle_status || "active",
-              revision: revision || Number(item.data?.revision) || 1,
-              recurrence: Number(item.data?.recurrence) || 1,
-              created_at: (item.data && item.data.created_at) || now,
-              updated_at: now,
+              project,
             };
-            try {
-              const created = await client.create("memories", drainMemoryPayload);
-              const newId = created && (created.id || created.insertId);
-              if (newId && superseded.length > 0) {
-                for (const oldRow of superseded) {
-                  if (!oldRow || !oldRow.id) continue;
-                  try {
-                    await client.update("memories", oldRow.id, {
-                      lifecycle_status: "superseded",
-                      superseded_by_id: newId,
-                      invalid_at: now,
-                      invalid_reason: "superseded",
-                      updated_at: now,
-                    });
-                  } catch (_) {}
-                }
-              }
+            const ctx = {
+              agent: memPayload.client,
+              session: memPayload.source_session,
+              turn: memPayload.source_turn,
+            };
+            const res = await callSaveMemory(memPayload, ctx);
+            const act = String((res && (res.action || (res.status ? res.status : ""))) || "").toUpperCase();
+            _diag("drain_action", `item ${item.id} table=memories action=${act || "UNKNOWN"} id=${res && res.id}`);
+
+            if (act === "ADD" || act === "CREATED" || act === "UPDATE") {
               totalMemoriesSaved++;
-            } catch (createErr) {
-              const msg = String(createErr?.message || createErr || "");
-              if (/duplicate|ER_DUP_ENTRY|already exists|1062/i.test(msg)) {
-                // 唯一索引拦截：累加复发计数
-                try {
-                  const dupRows = await client.list("memories", { project, content_fingerprint: fp, limit: 1 });
-                  const hit = Array.isArray(dupRows?.data) ? dupRows.data[0] : null;
-                  if (hit) {
-                    const next = (Number(hit.recurrence) || 1) + (Number(item.data?.recurrence) || 1);
-                    await client.update("memories", hit.id, { recurrence: next, updated_at: now });
-                  }
-                } catch (_) {}
-              } else {
-                // 非 1062 报错：累加 retries
-                const currentRetries = (Number(item.retries) || 0) + 1;
-                item.retries = currentRetries;
-                if (currentRetries >= 3) {
-                  deadLetterIds.push(item.id);
-                  _diag("dead_letter_evicted", `item ${item.id} table=${item.table} retries=${currentRetries} err=${msg.slice(0, 100)}`);
-                } else {
-                  updateHarvestItemRetries(item.id, msg);
-                }
-                continue;
-              }
+              actions.CREATED = (actions.CREATED || 0) + 1;
+            } else if (act === "ENRICHED") {
+              totalMemoriesEnriched++;
+              actions.ENRICHED = (actions.ENRICHED || 0) + 1;
+              _diag("drain_enriched", `item ${item.id} memory enriched id=${res.id} recurrence=${res.recurrence} rev=${res.revision}`);
+            } else {
+              actions.NOOP = (actions.NOOP || 0) + 1;
             }
-            markRecent(memKey);
+            if (res && (res.crystallized || (res.category === "principle" && memPayload.category !== "principle"))) {
+              _diag("drain_crystallized", `item ${item.id} memory crystallized into principle id=${res.id}`);
+            }
+            const fp = item.fp || item.data?.content_fingerprint || "";
+            if (fp) markRecent(`m:${project}:${fp}`);
             successIds.push(item.id);
             batchSuccess++;
           } else if (item.table === "pitfalls") {
-            const fp = item.fp || item.data?.content_fingerprint || "";
-            const project = item.project || "global";
-            const pitKey = `p:${project}:${fp}`;
-            const existing = await client.list("pitfalls", {
-              project,
-              limit: 50,
-            });
-            const existingRows = (Array.isArray(existing?.data) ? existing.data : []).filter((r) => !r.invalid_at);
-            let dup = existingRows.find((r) => r.content_fingerprint === fp);
-            if (!dup) {
-              const symptom = item.data?.symptom || "";
-              const solution = item.data?.solution || "";
-              const rootCause = item.data?.root_cause || "";
-              dup = existingRows.find((r) => {
-                const noConflict = !hasConflictingNumbers(symptom, r.symptom);
-                const rSym = normalizeSemanticText(r.symptom);
-                const curSym = normalizeSemanticText(symptom);
-                if (noConflict && rSym && curSym && (rSym === curSym || rSym.includes(curSym) || curSym.includes(rSym))) {
-                  return true;
-                }
-                const rTok = tokenize(r.symptom);
-                const sTok = tokenize(symptom);
-                if (noConflict && (overlapCoefficient(rTok.tokens, sTok.tokens) >= 0.5 || jaccardSimilarity(rTok.tokens, sTok.tokens) >= 0.3)) {
-                  return true;
-                }
-                if (!noConflict) {
-                  return false;
-                }
-                return isSemanticallySimilar(symptom, solution || rootCause, r.symptom, r.solution || r.root_cause);
-              });
-            }
-            if (dup) {
-              const next = (Number(dup.recurrence) || 1) + (Number(item.data?.recurrence) || 1);
-              const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-              try {
-                await client.update("pitfalls", dup.id, {
-                  recurrence: next,
-                  last_occurred_at: now,
-                  updated_at: now,
-                });
-              } catch (_) {}
-              markRecent(pitKey);
-              successIds.push(item.id);
-              batchSuccess++;
-              continue;
-            }
-            const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-            const drainPitfallPayload = {
+            const project = item.project || item.data?.project || "global";
+            const pitPayload = {
               ...item.data,
-              created_at: (item.data && item.data.created_at) || now,
-              updated_at: now,
+              project,
             };
-            try {
-              await client.create("pitfalls", drainPitfallPayload);
+            const ctx = {
+              agent: pitPayload.client,
+              session: pitPayload.source_session,
+              turn: pitPayload.source_turn,
+            };
+            const res = await callPitfallSave(pitPayload, ctx);
+            const act = String((res && (res.action || (res.status ? res.status : ""))) || "").toUpperCase();
+            _diag("drain_action", `item ${item.id} table=pitfalls action=${act || "UNKNOWN"} id=${res && res.id}`);
+
+            if (act === "ADD" || act === "CREATED") {
               totalPitfallsSaved++;
-            } catch (createErr) {
-              const msg = String(createErr?.message || createErr || "");
-              if (/duplicate|ER_DUP_ENTRY|already exists|1062/i.test(msg)) {
-                // 已存在则视为成功去重消费
-                try {
-                  const dupRows = await client.list("pitfalls", { project, content_fingerprint: fp, limit: 1 });
-                  const hit = Array.isArray(dupRows?.data) ? dupRows.data.find((r) => !r.invalid_at) : null;
-                  if (hit) {
-                    const next = (Number(hit.recurrence) || 1) + (Number(item.data?.recurrence) || 1);
-                    const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-                    await client.update("pitfalls", hit.id, { recurrence: next, last_occurred_at: now, updated_at: now });
-                  }
-                } catch (_) {}
-              } else {
-                // 非 1062 报错：累加 retries
-                const currentRetries = (Number(item.retries) || 0) + 1;
-                item.retries = currentRetries;
-                if (currentRetries >= 3) {
-                  deadLetterIds.push(item.id);
-                  _diag("dead_letter_evicted", `item ${item.id} table=${item.table} retries=${currentRetries} err=${msg.slice(0, 100)}`);
-                } else {
-                  updateHarvestItemRetries(item.id, msg);
-                }
-                continue;
-              }
+              actions.CREATED = (actions.CREATED || 0) + 1;
+            } else if (act === "EVOLVED") {
+              totalPitfallsEvolved++;
+              actions.EVOLVED = (actions.EVOLVED || 0) + 1;
+              _diag("drain_evolved", `item ${item.id} pitfall evolved id=${res.id} recurrence=${res.recurrence} reason=${res.reason || ""}`);
+            } else {
+              actions.NOOP = (actions.NOOP || 0) + 1;
             }
-            markRecent(pitKey);
+            const fp = item.fp || item.data?.content_fingerprint || "";
+            if (fp) markRecent(`p:${project}:${fp}`);
             successIds.push(item.id);
             batchSuccess++;
           }
         } catch (itemErr) {
-          // 单项失败容错并检查是否达到死信上限
-          const currentRetries = (Number(item.retries) || 0) + 1;
-          item.retries = currentRetries;
-          if (currentRetries >= 3 && !deadLetterIds.includes(item.id)) {
-            deadLetterIds.push(item.id);
-            _diag("dead_letter_evicted", `item ${item.id} table=${item.table} retries=${currentRetries} err=${((itemErr && itemErr.message) || String(itemErr)).slice(0, 100)}`);
+          const msg = String((itemErr && itemErr.message) || itemErr || "");
+          if (/duplicate|ER_DUP_ENTRY|already exists|1062/i.test(msg)) {
+            const fp = item.fp || item.data?.content_fingerprint || "";
+            const project = item.project || item.data?.project || "global";
+            if (fp) markRecent((item.table === "pitfalls" ? "p:" : "m:") + project + ":" + fp);
+            successIds.push(item.id);
+            batchSuccess++;
+            actions.NOOP = (actions.NOOP || 0) + 1;
+            _diag("drain_action", `item ${item.id} duplicate index caught, marked as NOOP`);
           } else {
-            updateHarvestItemRetries(item.id, (itemErr && itemErr.message) || String(itemErr));
+            const currentRetries = (Number(item.retries) || 0) + 1;
+            item.retries = currentRetries;
+            if (currentRetries >= 3 && !deadLetterIds.includes(item.id)) {
+              deadLetterIds.push(item.id);
+              _diag("dead_letter_evicted", `item ${item.id} table=${item.table} retries=${currentRetries} err=${msg.slice(0, 100)}`);
+            } else {
+              updateHarvestItemRetries(item.id, msg);
+            }
           }
         }
       }
@@ -1405,6 +1358,9 @@ export async function triggerBackgroundDrain(client, options = {}) {
       processed: totalProcessed,
       memoriesSaved: totalMemoriesSaved,
       pitfallsSaved: totalPitfallsSaved,
+      memoriesEnriched: totalMemoriesEnriched,
+      pitfallsEvolved: totalPitfallsEvolved,
+      actions,
     };
   } finally {
     _isDraining = false;
