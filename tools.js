@@ -1926,7 +1926,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
       (cfg && cfg.dedup_batch_size) ||
       200
     ), 1000));
-    const maxModelBatches = Math.max(1, Math.min(Number(args.max_model_batches || args.max_batches || cfg.audit_max_batches || 2), 10));
+    const maxModelBatches = Math.max(1, Math.min(Number(args.audit_max_batches || args.max_model_batches || args.max_batches || cfg.audit_max_batches || 2), 10));
     const batchTs = Date.now();
     const now = nowSql();
 
@@ -2078,14 +2078,20 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
               if (!pId || dIds.length === 0) continue;
               const pItemPre = rows.find((r) => r.id === pId) || candidateItemMap.get(pId);
-              if (!pItemPre) { validMDups.push({ primary_id: pId, duplicate_ids: dIds }); continue; }
+              // 【P2-1a】模型可能捏造当前批次根本不存在的主记录 ID：此时绝不能放行该组，
+              // 否则会把它记入 modelHandledIds，导致同 ID 的真实规则组被误判为「已处理」而拆毁。
+              if (!pItemPre) {
+                rollingLogs.push(`[${nowSql()}] 模型组主记录 ${pId} 不存在于本批次，已忽略（疑似幻觉）`);
+                continue;
+              }
               const pTitlePre = pItemPre.title || "";
               const pContentPre = pItemPre.content || pItemPre.full_text || "";
               // 【P1-1b】严格分字段校验（标题对标题、正文对正文），禁止跨字段拼接
               const keptDIds = dIds.filter((dId) => {
                 if (dId === pId) return false;
                 const dItemPre = rows.find((r) => r.id === dId) || candidateItemMap.get(dId);
-                if (!dItemPre) return true;
+                // 【P2-1b】模型捏造不存在的从记录 ID：剔除，不得计入 validMDups
+                if (!dItemPre) return false;
                 const dTitlePre = dItemPre.title || "";
                 const dContentPre = dItemPre.content || dItemPre.full_text || "";
                 return !hasConflictingNumbers(pTitlePre, dTitlePre)
@@ -2385,7 +2391,11 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
               if (!pId || dIds.length === 0) continue;
               const pItemPre = rows.find((r) => r.id === pId) || candidateItemMap.get(pId);
-              if (!pItemPre) { validPDups.push({ primary_id: pId, duplicate_ids: dIds }); continue; }
+              // 【P2-1c】同 memories：捏造的主记录 ID 必须丢弃，避免误拆真实规则组
+              if (!pItemPre) {
+                rollingLogs.push(`[${nowSql()}] 模型踩坑组主记录 ${pId} 不存在于本批次，已忽略（疑似幻觉）`);
+                continue;
+              }
               const pSymPre = pItemPre.symptom || "";
               const pSolPre = pItemPre.solution || "";
               const pRootPre = pItemPre.root_cause || "";
@@ -2393,7 +2403,8 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
               const keptDIds = dIds.filter((dId) => {
                 if (dId === pId) return false;
                 const dItemPre = rows.find((r) => r.id === dId) || candidateItemMap.get(dId);
-                if (!dItemPre) return true;
+                // 【P2-1d】模型捏造不存在的从记录 ID：剔除
+                if (!dItemPre) return false;
                 return !hasConflictingNumbers(pSymPre, dItemPre.symptom || "")
                   && !hasConflictingNumbers(pSolPre, dItemPre.solution || "")
                   && !hasConflictingNumbers(pRootPre, dItemPre.root_cause || "");
