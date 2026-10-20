@@ -120,7 +120,7 @@ function readOptions(options) {
     dedup_weekday: Number(o.dedup_weekday) || 1,
     dedup_day: Number(o.dedup_day) || 1,
     dedup_batch_size: Math.max(20, Math.min(Number(o.dedup_batch_size || 50), 1000)),
-    dedup_fetch_limit: Math.max(20, Math.min(Number((o.dedup_batch_size && Number(o.dedup_batch_size) !== 50 ? o.dedup_batch_size : (o.dedup_batch_size || o.dedup_fetch_limit || 200))), 1000)),
+    dedup_fetch_limit: Math.max(20, Math.min(Number((o.dedup_batch_size && Number(o.dedup_batch_size) !== 50 ? o.dedup_batch_size : (o.dedup_fetch_limit || o.dedup_batch_size || 200))), 1000)),
     project: String(o.project || "global").trim(),
     audit_chunk_size: Number(o.audit_chunk_size) > 0 ? Number(o.audit_chunk_size) : 40,
     audit_max_batches: Number(o.audit_max_batches) > 0 ? Number(o.audit_max_batches) : 1,
@@ -2052,7 +2052,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
       candidateList = Array.from(candidateItemMap.values());
 
       // 【P1-2】MODEL_CHUNK 增加 [5, 60] 范围守卫并锚定 audit_chunk_size
-      const rawChunk = Number(cfg.audit_chunk_size ?? auditOptions.audit_chunk_size ?? 40);
+      const rawChunk = Number(auditOptions.audit_chunk_size ?? cfg.audit_chunk_size ?? 40);
         // 【时间预算】单次 memory_audit 的最坏耗时估算：
   // 2 次模型调用 × 15s = 30s < 55s（MCP 客户端硬超时），安全余量 25s。
   // 新增任何模型调用时必须重算此预算，绝不允许突破 55s。
@@ -2069,15 +2069,42 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
             : (Array.isArray(mr.duplicate_groups) ? mr.duplicate_groups : []);
           if (mDups.length > 0) {
             // 【P1-2 b】remainingGroups 只剔除「已被模型明确处理过的 id」，不要把整组无条件丢弃
-            const modelHandledIds = new Set();
+            // 【P1-1a】先用数字守卫预过滤模型幻觉组，只有「仍然有效」的组才记账。
+            // 反例：模型把 3306 合进 3307 被守卫拒绝，但 3306 已被记为 handled，
+            // 导致 3306 自身的精确重复组被拆毁 → 永久漏删。
+            const validMDups = [];
             for (const dg of mDups) {
               const pId = Number(dg.primary_id);
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
-              if (pId && dIds.length > 0) {
-                modelHandledIds.add(pId);
-                for (const dId of dIds) {
-                  if (dId !== pId) modelHandledIds.add(dId);
-                }
+              if (!pId || dIds.length === 0) continue;
+              const pItemPre = rows.find((r) => r.id === pId) || candidateItemMap.get(pId);
+              if (!pItemPre) { validMDups.push({ primary_id: pId, duplicate_ids: dIds }); continue; }
+              const pTitlePre = pItemPre.title || "";
+              const pContentPre = pItemPre.content || pItemPre.full_text || "";
+              // 【P1-1b】严格分字段校验（标题对标题、正文对正文），禁止跨字段拼接
+              const keptDIds = dIds.filter((dId) => {
+                if (dId === pId) return false;
+                const dItemPre = rows.find((r) => r.id === dId) || candidateItemMap.get(dId);
+                if (!dItemPre) return true;
+                const dTitlePre = dItemPre.title || "";
+                const dContentPre = dItemPre.content || dItemPre.full_text || "";
+                return !hasConflictingNumbers(pTitlePre, dTitlePre)
+                  && !hasConflictingNumbers(pContentPre, dContentPre);
+              });
+              if (keptDIds.length > 0) {
+                validMDups.push({ primary_id: pId, duplicate_ids: keptDIds });
+              } else {
+                rollingLogs.push(`[${nowSql()}] 模型组被数字守卫拒绝（主记录 ${pId}），保留原规则组`);
+              }
+            }
+
+            const modelHandledIds = new Set();
+            for (const dg of validMDups) {
+              const pId = Number(dg.primary_id);
+              const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
+              modelHandledIds.add(pId);
+              for (const dId of dIds) {
+                if (dId !== pId) modelHandledIds.add(dId);
               }
             }
 
@@ -2110,7 +2137,7 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
             }
 
             const attachedOrphanIds = new Set();
-            for (const dg of mDups) {
+            for (const dg of validMDups) {
               const pId = Number(dg.primary_id);
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
               if (pId && dIds.length > 0 && !modelDupIds.has(pId)) {
@@ -2154,17 +2181,16 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
                 if (pItem) {
                   const pTitle = pItem.title || "";
                   const pContent = pItem.content || pItem.full_text || "";
-                  const pAllText = (pTitle + " " + pContent).trim();
 
+                  // 【P1-1b】严格分字段校验，删除跨字段拼接 pAllText/dAllText：
+                  // 拼接后「方案多了『重试 3 次』」会让数字集合大小不同而被误判冲突
                   for (const d of dItems) {
                     const dTitle = d.title || "";
                     const dContent = d.content || d.full_text || "";
-                    const dAllText = (dTitle + " " + dContent).trim();
 
                     const hasNumConflict =
                       hasConflictingNumbers(pTitle, dTitle) ||
-                      hasConflictingNumbers(pContent, dContent) ||
-                      hasConflictingNumbers(pAllText, dAllText);
+                      hasConflictingNumbers(pContent, dContent);
 
                     if (hasNumConflict) {
                       continue;
@@ -2297,18 +2323,19 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
       for (let j = i + 1; j < rows.length; j++) {
         const b = rows[j];
         if (batchDupIds.has(b.id)) continue;
-        if (hasConflictingNumbers(a.symptom, b.symptom)) continue;
-        const textA = [a.symptom, a.solution, a.root_cause].filter(Boolean).join(" ");
-        const textB = [b.symptom, b.solution, b.root_cause].filter(Boolean).join(" ");
-        if (hasConflictingNumbers(textA, textB)) continue;
+        // 【P1-1b】规则层同样必须分字段独立校验：
+        // 拼接后「方案多了『重试 3 次』」会让数字集合大小不同而被误判冲突
+        if (hasConflictingNumbers(a.symptom || "", b.symptom || "")) continue;
+        if (hasConflictingNumbers(a.solution || "", b.solution || "")) continue;
+        if (hasConflictingNumbers(a.root_cause || "", b.root_cause || "")) continue;
         const sameFp = a.content_fingerprint && b.content_fingerprint && a.content_fingerprint === b.content_fingerprint;
         const normSymA = normalizeSemanticText(a.symptom);
         const normSymB = normalizeSemanticText(b.symptom);
-        const sameSym = normSymA && normSymB && normSymA === normSymB && !hasConflictingNumbers(a.symptom, b.symptom) && !hasConflictingNumbers(textA, textB);
+        const sameSym = normSymA && normSymB && normSymA === normSymB;
         const similar = isSemanticallySimilar(a.symptom, a.solution || a.root_cause, b.symptom, b.solution || b.root_cause);
         const tagIntersect = hasTagsIntersection(a.tags, b.tags);
         const symOverlap = Boolean(normSymA && normSymB && (normSymA.includes(normSymB) || normSymB.includes(normSymA)));
-        if (sameFp || sameSym || similar || (tagIntersect && symOverlap && !hasConflictingNumbers(a.symptom, b.symptom) && !hasConflictingNumbers(textA, textB))) {
+        if (sameFp || sameSym || similar || (tagIntersect && symOverlap)) {
           grp.push(b);
           batchDupIds.add(b.id);
         }
@@ -2339,7 +2366,7 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
       candidateList = Array.from(candidateItemMap.values());
 
       // 【P1-2】MODEL_CHUNK 增加 [5, 60] 范围守卫并锚定 audit_chunk_size
-      const rawChunk = Number(cfg.audit_chunk_size ?? auditOptions.audit_chunk_size ?? 40);
+      const rawChunk = Number(auditOptions.audit_chunk_size ?? cfg.audit_chunk_size ?? 40);
       const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 40, 60));
       const modelBudgetItems = maxModelBatches * MODEL_CHUNK;
       const forModel = candidateList.slice(0, modelBudgetItems);
@@ -2351,15 +2378,40 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
           const pDups = Array.isArray(mr.pitfall_duplicates) ? mr.pitfall_duplicates : [];
           if (pDups.length > 0) {
             // 【P1-2 b】remainingGroups 只剔除「已被模型明确处理过的 id」，不要把整组无条件丢弃
-            const modelHandledIds = new Set();
+            // 【P1-1a】同 memories：先校验后记账，被守卫拒绝的组不得抢先标记
+            const validPDups = [];
             for (const dg of pDups) {
               const pId = Number(dg.primary_id);
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
-              if (pId && dIds.length > 0) {
-                modelHandledIds.add(pId);
-                for (const dId of dIds) {
-                  if (dId !== pId) modelHandledIds.add(dId);
-                }
+              if (!pId || dIds.length === 0) continue;
+              const pItemPre = rows.find((r) => r.id === pId) || candidateItemMap.get(pId);
+              if (!pItemPre) { validPDups.push({ primary_id: pId, duplicate_ids: dIds }); continue; }
+              const pSymPre = pItemPre.symptom || "";
+              const pSolPre = pItemPre.solution || "";
+              const pRootPre = pItemPre.root_cause || "";
+              // 【P1-1b】分字段独立校验：症状对症状、方案对方案、根因对根因
+              const keptDIds = dIds.filter((dId) => {
+                if (dId === pId) return false;
+                const dItemPre = rows.find((r) => r.id === dId) || candidateItemMap.get(dId);
+                if (!dItemPre) return true;
+                return !hasConflictingNumbers(pSymPre, dItemPre.symptom || "")
+                  && !hasConflictingNumbers(pSolPre, dItemPre.solution || "")
+                  && !hasConflictingNumbers(pRootPre, dItemPre.root_cause || "");
+              });
+              if (keptDIds.length > 0) {
+                validPDups.push({ primary_id: pId, duplicate_ids: keptDIds });
+              } else {
+                rollingLogs.push(`[${nowSql()}] 模型踩坑组被数字守卫拒绝（主记录 ${pId}），保留原规则组`);
+              }
+            }
+
+            const modelHandledIds = new Set();
+            for (const dg of validPDups) {
+              const pId = Number(dg.primary_id);
+              const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
+              modelHandledIds.add(pId);
+              for (const dId of dIds) {
+                if (dId !== pId) modelHandledIds.add(dId);
               }
             }
 
@@ -2392,7 +2444,7 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
             }
 
             const attachedOrphanIds = new Set();
-            for (const dg of pDups) {
+            for (const dg of validPDups) {
               const pId = Number(dg.primary_id);
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
               if (pId && dIds.length > 0 && !modelDupIds.has(pId)) {
@@ -2425,15 +2477,15 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
                 const validDItems = [];
                 if (pItem) {
                   const pSym = pItem.symptom || "";
-                  const pText = [pItem.symptom, pItem.solution, pItem.root_cause].filter(Boolean).join(" ");
+                  const pSol = pItem.solution || "";
+                  const pRoot = pItem.root_cause || "";
 
+                  // 【P1-1b】分字段独立校验，删除跨字段拼接 pText/dText
                   for (const d of dItems) {
-                    const dSym = d.symptom || "";
-                    const dText = [d.symptom, d.solution, d.root_cause].filter(Boolean).join(" ");
-
                     const hasNumConflict =
-                      hasConflictingNumbers(pSym, dSym) ||
-                      hasConflictingNumbers(pText, dText);
+                      hasConflictingNumbers(pSym, d.symptom || "") ||
+                      hasConflictingNumbers(pSol, d.solution || "") ||
+                      hasConflictingNumbers(pRoot, d.root_cause || "");
 
                     if (hasNumConflict) {
                       continue;
@@ -2663,6 +2715,13 @@ async function checkScheduledDedup(client, cfg) {
   }
 
   try {
+    // 【P1-4】新周期首次触发（非 5 分钟截断接力）必须清空上一周期遗留的表尾游标，
+    // 否则 incremental 会跳过 id <= oldMaxId 的全部既有记录，新周期体检形同虚设。
+    if (!isPending) {
+      try {
+        clearAuditCursor(cfg.project || "global");
+      } catch (_) {}
+    }
     const updatedAfter = getDedupTimeWindow(schedule);
     const res = await memoryAudit(client, cfg, {
       project: cfg.project || "global",
