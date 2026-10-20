@@ -266,6 +266,11 @@ export function levSimilarity(s1, s2) {
  * 判断两个记忆条目是否表达「同一事实」（Layer ② 语义判重）
  */
 export function isSemanticallySimilar(title1, content1, title2, content2) {
+  // P1-1 核心：统一前置数字冲突总闸（短路一切误判，防止 Port 80 vs 8080、Node 18 vs 20 误判为同一实体）
+  if (hasConflictingNumbers(title1, title2) || hasConflictingNumbers(content1, content2)) {
+    return false;
+  }
+
   const t1 = tokenize(title1);
   const t2 = tokenize(title2);
   const c1 = tokenize(content1);

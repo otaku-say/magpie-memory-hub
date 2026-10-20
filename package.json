@@ -56,9 +56,15 @@
       "dedup_time": "02:00",
       "dedup_weekday": 1,
       "dedup_day": 1,
-      "dedup_batch_size": 1000,
+      "dedup_batch_size": 50,
       "classify_endpoint": "auto",
-      "search_rewrite": true
+      "search_rewrite": true,
+      "dedup_fetch_limit": 200,
+      "search_rerank": true,
+      "harvest_max_per_min": 20,
+      "harvest_max_total": 2000,
+      "audit_max_batches": 2,
+      "audit_chunk_size": 40
     }
   }
 }

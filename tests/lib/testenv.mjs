@@ -16,6 +16,8 @@ process.env.MAGPIE_TEST = "1";
 
 import assert from "node:assert";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import crypto from "node:crypto";
 import { NcbMcp } from "../../ncb_mcp.js";
 import { makeMcpClient } from "../../mcp_client.js";
@@ -192,6 +194,13 @@ function executeMemorySql(sql, prefix = "__test__") {
 export async function createTestEnv(options = {}) {
   ensureProcessHooks();
 
+  // 0. 状态隔离（P0-2 双保险）：生成唯一临时目录赋予 MEMHUB_STATE_DIR
+  const testStateDir = path.join(os.tmpdir(), `memhub-testenv-${Date.now()}_${crypto.randomBytes(4).toString("hex")}`);
+  try {
+    fs.mkdirSync(testStateDir, { recursive: true });
+  } catch (_) {}
+  process.env.MEMHUB_STATE_DIR = testStateDir;
+
   const mode = options.mode || (process.env.TEST_MODE === "remote" ? "remote" : "memory");
   const instance = options.instance || "41694_agent_memory";
   const prefix = options.prefix || "__test__";
@@ -342,6 +351,7 @@ export async function createTestEnv(options = {}) {
   const env = {
     project,
     instance,
+    testStateDir,
     mcpKey,
     secret,
     mcp,
@@ -379,6 +389,11 @@ export async function createTestEnv(options = {}) {
 
     /** 强制清理并断言计数必须为 0 */
     async cleanup() {
+      if (testStateDir && fs.existsSync(testStateDir)) {
+        try {
+          fs.rmSync(testStateDir, { recursive: true, force: true });
+        } catch (_) {}
+      }
       if (this.cleaned) return { memoriesDeleted: 0, pitfallsDeleted: 0 };
 
       if (mode === "memory") {

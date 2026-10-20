@@ -249,15 +249,16 @@ export function makeMcpClient(cfg, signal) {
     list: async (table, params) => {
       const p = params || {};
       const limRaw = String(p.limit == null ? "" : p.limit).trim();
-      const limit = /^\d+$/.test(limRaw) && Number(limRaw) > 0 ? Math.floor(Number(limRaw)) : 200;
+      const rawLimit = /^\d+$/.test(limRaw) && Number(limRaw) > 0 ? Math.floor(Number(limRaw)) : 200;
+      const effectiveLimit = Math.min(rawLimit, 1000);
       const r = await run(buildSelect(table, params));
       const rows = Array.isArray(r.rows) ? r.rows : [];
       return {
         data: rows,
         metadata: {
-          hasMore: rows.length >= limit,
+          hasMore: rows.length >= effectiveLimit,
           page: Number(p.page) || 1,
-          limit,
+          limit: effectiveLimit,
         },
       };
     },
