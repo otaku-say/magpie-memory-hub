@@ -157,24 +157,68 @@ export function overlapCoefficient(setA, setB) {
   return intersection / Math.min(setA.size, setB.size);
 }
 
-/** Levenshtein 编辑距离 */
+/**
+ * Alpha token 匹配检查：
+ * 纯数字 token 走 === 严格全等（防止 "80" 与 "8080" 误判为同一实体）；
+ * 含字母 token 才允许 includes 子串包含匹配。
+ */
+export function isAlphaTokenMatch(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  if (a === b) return true;
+  const aIsDigit = /^\d+$/.test(a);
+  const bIsDigit = /^\d+$/.test(b);
+  if (aIsDigit || bIsDigit) {
+    return a === b;
+  }
+  return a.includes(b) || b.includes(a);
+}
+
+/** Levenshtein 编辑距离（双行滚动数组 O(min(M,N)) 空间，输入上限 512 字符截断） */
 export function levenshteinDistance(s1, s2) {
+  if (typeof s1 !== "string") s1 = String(s1 || "");
+  if (typeof s2 !== "string") s2 = String(s2 || "");
+  if (s1.length > 512) s1 = s1.slice(0, 512);
+  if (s2.length > 512) s2 = s2.slice(0, 512);
+
+  if (s1 === s2) return 0;
+  if (s1.length === 0) return s2.length;
+  if (s2.length === 0) return s1.length;
+
+  // 保证 s2 为较短字符串以节约空间（O(min(M,N))）
+  if (s1.length < s2.length) {
+    const tmp = s1; s1 = s2; s2 = tmp;
+  }
+
   const m = s1.length;
   const n = s2.length;
-  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+
+  for (let j = 0; j <= n; j++) prev[j] = j;
+
   for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    const c1 = s1[i - 1];
     for (let j = 1; j <= n; j++) {
-      if (s1[i - 1] === s2[j - 1]) dp[i][j] = dp[i - 1][j - 1];
-      else dp[i][j] = Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]) + 1;
+      if (c1 === s2[j - 1]) {
+        curr[j] = prev[j - 1];
+      } else {
+        curr[j] = Math.min(prev[j], curr[j - 1], prev[j - 1]) + 1;
+      }
     }
+    const temp = prev;
+    prev = curr;
+    curr = temp;
   }
-  return dp[m][n];
+  return prev[n];
 }
 
 /** 基于编辑距离的归一化相似度 (0 ~ 1) */
 export function levSimilarity(s1, s2) {
+  if (typeof s1 !== "string") s1 = String(s1 || "");
+  if (typeof s2 !== "string") s2 = String(s2 || "");
+  if (s1.length > 512) s1 = s1.slice(0, 512);
+  if (s2.length > 512) s2 = s2.slice(0, 512);
   const maxLen = Math.max(s1.length, s2.length);
   if (maxLen === 0) return 1.0;
   const dist = levenshteinDistance(s1, s2);
@@ -200,13 +244,21 @@ export function isSemanticallySimilar(title1, content1, title2, content2) {
     let sharedAlpha = 0;
     for (const a of alpha1) {
       for (const b of alpha2) {
-        if (a === b || a.includes(b) || b.includes(a)) {
+        if (isAlphaTokenMatch(a, b)) {
           sharedAlpha++;
           break;
         }
       }
     }
     if (sharedAlpha === 0) return false;
+
+    // 纯数字实体必须精确相等：若双方均包含数字编号/版本/端口，但没有相同的数字实体，则严禁判为同一实体
+    const nums1 = [...alpha1].filter((x) => /^\d+$/.test(x));
+    const nums2 = [...alpha2].filter((x) => /^\d+$/.test(x));
+    if (nums1.length > 0 && nums2.length > 0) {
+      const hasSharedNum = nums1.some((n1) => nums2.includes(n1));
+      if (!hasSharedNum) return false;
+    }
   }
 
   // 3. 计算多维相似度指标

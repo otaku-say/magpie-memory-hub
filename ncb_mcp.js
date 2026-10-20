@@ -91,6 +91,8 @@ export function NcbMcp(opts) {
   this.signal = opts.signal || null;
   this._seq = 0;
   this._sessionId = null;
+  this._initPromise = null;
+  this._ready = false;
 }
 
 /** 发一次 JSON-RPC。失败抛异常（含可读原因）。 */
@@ -198,19 +200,27 @@ NcbMcp.prototype.rpc = async function (method, params, isNotification, callOpts)
   return parsed;
 };
 
-/** 握手（幂等，可重复调用；失败会抛出可读错误）。 */
+/** 握手（幂等，可重复调用；失败会抛出可读错误；并发互斥复用 promise）。 */
 NcbMcp.prototype.initialize = async function () {
   if (this._ready) return this._serverInfo;
-  var res = await this.rpc("initialize", {
-    protocolVersion: "2024-11-05",
-    capabilities: {},
-    clientInfo: { name: "magpie-memory-hub", version: "1" },
-  });
-  this._serverInfo = (res && res.result && res.result.serverInfo) || {};
-  // 规范要求握手后发通知；失败不影响后续调用
-  try { await this.rpc("notifications/initialized", undefined, true); } catch (e) { /* 忽略 */ }
-  this._ready = true;
-  return this._serverInfo;
+  if (this._initPromise) return this._initPromise;
+  this._initPromise = (async () => {
+    try {
+      var res = await this.rpc("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "magpie-memory-hub", version: "1" },
+      });
+      this._serverInfo = (res && res.result && res.result.serverInfo) || {};
+      // 规范要求握手后发通知；失败不影响后续调用
+      try { await this.rpc("notifications/initialized", undefined, true); } catch (e) { /* 忽略 */ }
+      this._ready = true;
+      return this._serverInfo;
+    } finally {
+      this._initPromise = null;
+    }
+  })();
+  return this._initPromise;
 };
 
 /** 列出服务端工具名。 */

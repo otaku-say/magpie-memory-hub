@@ -51,8 +51,8 @@
 
   var current = {};
   var lastSubmitTime = 0;
-  var pollingTimer = null;
-  var countdownTimer = null;
+  var pollingTimers = new Map();
+  var countdownTimers = new Map();
 
   function escapeHtml(str) {
     return String(str || "")
@@ -735,11 +735,17 @@
   }
 
   function startPollingStatus(targetCard, submitTime, opHint) {
-    if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; }
-    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
-
     var resolvedCard = cardOfOp(opHint || targetCard);
     var containerId = containerOfOp(opHint || targetCard);
+
+    if (pollingTimers.has(resolvedCard)) {
+      clearInterval(pollingTimers.get(resolvedCard));
+      pollingTimers.delete(resolvedCard);
+    }
+    if (countdownTimers.has(resolvedCard)) {
+      clearInterval(countdownTimers.get(resolvedCard));
+      countdownTimers.delete(resolvedCard);
+    }
 
     // 等待期间只接受「比提交时间更新」的结果，避免旧结果把等待态刷掉（会来回闪）
     pendingSince[resolvedCard] = submitTime;
@@ -759,9 +765,10 @@
     }
     if (el) { el.style.display = "block"; el.className = "action-status-box waiting"; }
     tick();
-    countdownTimer = setInterval(tick, 1000);
+    var cTimer = setInterval(tick, 1000);
+    countdownTimers.set(resolvedCard, cTimer);
 
-    pollingTimer = setInterval(function () {
+    var pTimer = setInterval(function () {
       loadStatus(function (err, statusData) {
         statusData = statusData || window.__memhubStatus;
         var isAuditOp = (opHint === "memory_audit" || opHint === "audit" || opHint === "dedup_undo");
@@ -775,7 +782,7 @@
             deadline = Date.now() + waitSec * 1000;
             return;
           }
-          // 拿到比提交时间更新且已完成的结果 → 停止一切计时
+          // 拿到比提交时间更新且已完成的结果 → 停止该卡片一切计时
           if ((card.op === "sync_snapshot" || opHint === "sync_snapshot") && card.ok && Array.isArray(card.memories) && window.magpie && window.magpie.options) {
             try {
               var next = collect();
@@ -785,13 +792,25 @@
               queuedOptionsSet(next, true);
             } catch (_) {}
           }
-          clearInterval(pollingTimer); pollingTimer = null;
-          if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+          if (pollingTimers.has(resolvedCard)) {
+            clearInterval(pollingTimers.get(resolvedCard));
+            pollingTimers.delete(resolvedCard);
+          }
+          if (countdownTimers.has(resolvedCard)) {
+            clearInterval(countdownTimers.get(resolvedCard));
+            countdownTimers.delete(resolvedCard);
+          }
           return;
         }
         if (Date.now() >= deadline) {
-          clearInterval(pollingTimer); pollingTimer = null;
-          if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+          if (pollingTimers.has(resolvedCard)) {
+            clearInterval(pollingTimers.get(resolvedCard));
+            pollingTimers.delete(resolvedCard);
+          }
+          if (countdownTimers.has(resolvedCard)) {
+            clearInterval(countdownTimers.get(resolvedCard));
+            countdownTimers.delete(resolvedCard);
+          }
           delete pendingSince[resolvedCard];       // 超时：允许显示现有结果
           var box = $(containerId);
           if (box) {
@@ -803,6 +822,7 @@
         }
       });
     }, 2000);
+    pollingTimers.set(resolvedCard, pTimer);
   }
 
   /** 给「重新查询」按钮绑定一次性重试。 */
