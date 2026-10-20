@@ -261,11 +261,11 @@ console.log("\n▶ [Test 3] memory_context 一站式召回 (Top 3 避坑经验 +
   assert.ok(block.includes("全局架构规范：统一使用 TypeScript strict 模式"), "必须自动穿透包含 global 全局准则");
 
   // 断言 2: Top 3 避坑经验以 - [pitfall/组件] 症状 → 解法 格式拼入
-  assert.ok(block.includes("- [pitfall/docker] Docker daemon connection refused 报错 → systemctl start docker"), "必须拼入格式化的避坑经验");
-  assert.ok(block.includes("- [pitfall/vite] Vite 热更新失效报错 → sysctl -w fs.inotify.max_user_watches=524288"), "必须包含项目专属避坑");
+  assert.ok(block.includes("[pitfall/docker#") && block.includes("Docker daemon connection refused 报错 → systemctl start docker"), "必须拼入格式化的避坑经验");
+  assert.ok(block.includes("[pitfall/vite#") && block.includes("Vite 热更新失效报错 → sysctl -w fs.inotify.max_user_watches=524288"), "必须包含项目专属避坑");
 
   // 断言 3: 普通事实记忆正常召回
-  assert.ok(block.includes("[fact] Alpha 部署端口事实"), "相关事实记忆必须正常召回");
+  assert.ok(block.includes("[fact#") && block.includes("Alpha 部署端口事实"), "相关事实记忆必须正常召回");
 
   // 跨项目穿透在 memory_search 与 pitfall_search 中同样有效
   const searchRes = JSON.parse(await hubOneStop.tool.memory_search.execute({

@@ -438,7 +438,7 @@ async function run() {
       query: "MySQL 慢查询",
     }, {}));
     const block2 = ctxRes2.block;
-    assert.ok(block2.includes("[pitfall/mysql]"), "正常包含踩坑记录");
+    assert.ok(block2.includes("[pitfall/mysql#"), "正常包含踩坑记录");
     assert.ok(!block2.includes("[高频复发"), "【反证】：recurrence=2 严禁包含 [高频复发×N]");
     assert.ok(!block2.includes("建议核查根因是否已根治"), "【反证】：recurrence=2 严禁包含根因提示");
     console.log("  ✓ 反向通过：recurrence=2 未达阈值绝不包含高频复发前缀与根因提示");

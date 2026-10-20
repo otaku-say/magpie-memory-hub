@@ -74,7 +74,10 @@ async function run() {
         assert.strictEqual(res.recurrence, 1, "初始 recurrence 应为 1");
         firstId = res.id;
       } else {
-        assert.strictEqual(res.action, "NOOP", `变体 ${i + 1} 必须被语义查重拦截为 NOOP`);
+        // v6.36 EVO-1 语义升级：同标题且新内容显著更详尽时会返回 ENRICHED 融合更新，
+        // 仍复用同一 id 且不新增记录。故此处接受 NOOP 或 ENRICHED，
+        // 但下方「id 必须相同」「库中只 1 条」等不变量保持严格。
+        assert.ok(["NOOP", "ENRICHED"].includes(res.action), `变体 ${i + 1} 必须被语义查重拦截（NOOP 或 ENRICHED），实际 ${res.action}`);
         assert.strictEqual(res.id, firstId, `变体 ${i + 1} 返回的 id 必须与第 1 条相同`);
         assert.strictEqual(res.recurrence, i + 1, `变体 ${i + 1} recurrence 应累加为 ${i + 1}`);
       }
@@ -115,7 +118,10 @@ async function run() {
         assert.ok(res.id > 0, "应返回有效主键 ID");
         pnpmFirstId = res.id;
       } else {
-        assert.strictEqual(res.action, "NOOP", `pnpm 变体 ${i + 1} 必须被语义查重拦截为 NOOP`);
+        // v6.36 EVO-1 语义升级：同标题且新内容显著更详尽时会返回 ENRICHED 融合更新，
+        // 仍复用同一 id 且不新增记录。故此处接受 NOOP 或 ENRICHED，
+        // 但下方「id 必须相同」「库中只 1 条」等不变量保持严格。
+        assert.ok(["NOOP", "ENRICHED"].includes(res.action), `pnpm 变体 ${i + 1} 必须被语义查重拦截（NOOP 或 ENRICHED），实际 ${res.action}`);
         assert.strictEqual(res.id, pnpmFirstId, `pnpm 变体 ${i + 1} 返回的 id 必须与第 1 条相同`);
         assert.strictEqual(res.recurrence, i + 1, `pnpm 变体 ${i + 1} recurrence 应累加为 ${i + 1}`);
       }

@@ -213,7 +213,7 @@ try {
 
   // 4.2 断言未配置实体的记录不包含 ' | 实体:' 虚假占位
   assert.ok(
-    block.includes("- [insight] 批量处理性能调优: 调大 batch 参数可显著降低网络往返延迟"),
+    block.includes("- [insight#") && block.includes("批量处理性能调优: 调大 batch 参数可显著降低网络往返延迟"),
     "【反证门 4b 通过】：无 related_entities 记录保持干净输出，绝不拼接空白实体占位"
   );
   assert.ok(

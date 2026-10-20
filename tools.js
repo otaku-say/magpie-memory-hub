@@ -627,7 +627,7 @@ async function saveMemory(client, cfg, m, ctx) {
       }
 
       try {
-        await client.update("memories", dup.id, updatePayload);
+        await client.update("memories", dup.id, Object.assign({}, updatePayload, { updated_at: updatePayload.updated_at || nowSql() }));
         markRecent("m:" + (newFp || dup.content_fingerprint || fp));
         return {
           action: "ENRICHED",
@@ -655,7 +655,7 @@ async function saveMemory(client, cfg, m, ctx) {
         if (newFp) updatePayload.content_fingerprint = newFp;
       }
       try {
-        await client.update("memories", dup.id, updatePayload);
+        await client.update("memories", dup.id, Object.assign({}, updatePayload, { updated_at: updatePayload.updated_at || nowSql() }));
         markRecent("m:" + (updatePayload.content_fingerprint || dup.content_fingerprint || fp));
         const baseNote = dup.content_fingerprint === fp ? "内容未变化，累加复发计数" : "语义相似去重命中，累加复发计数";
         const note = isCrystallized ? (baseNote + "，已升维为 principle") : baseNote;
@@ -816,7 +816,7 @@ async function saveMemory(client, cfg, m, ctx) {
           if (newFp) updatePayload.content_fingerprint = newFp;
         }
         try {
-          await client.update("memories", dupRow.id, updatePayload);
+          await client.update("memories", dupRow.id, Object.assign({}, updatePayload, { updated_at: updatePayload.updated_at || nowSql() }));
         } catch (_) {}
         const note = isCrystallized ? "唯一索引拦下重复，累加复发计数，已升维为 principle" : "唯一索引拦下重复，累加复发计数";
         return { action: "NOOP", id: dupRow.id, category: targetCategory, recurrence: next, retrieval_count: Number(dupRow.retrieval_count) || 0, note };
@@ -1372,13 +1372,12 @@ async function memoryContext(client, cfg, args) {
   let n = 0;
   const matchedMemories = [];
 
-  const isLegacyUxTest = typeof process !== "undefined" &&
-    process.argv &&
-    process.argv.some((arg) => typeof arg === "string" && arg.includes("test_proactive_memory_ux"));
+  // 说明：曾用 process.argv 检测测试文件名来切换输出格式（省略 #id），
+  // 这会让「测试通过」依赖文件名而生产行为不一致，已移除。格式在测试与生产完全统一。
 
   for (const pr of principles) {
     if (n >= maxItems) break;
-    const idTag = !isLegacyUxTest && pr.id != null ? `#${pr.id}` : "";
+    const idTag = pr.id != null ? `#${pr.id}` : "";
     const prEntStr = Array.isArray(pr.related_entities)
       ? pr.related_entities.join(",")
       : String(pr.related_entities || "").trim();
@@ -1395,7 +1394,7 @@ async function memoryContext(client, cfg, args) {
   for (const pit of topPitfalls) {
     if (n >= maxItems) break;
     const comp = pit.component || "general";
-    const idTag = !isLegacyUxTest && pit.id != null ? `#${pit.id}` : "";
+    const idTag = pit.id != null ? `#${pit.id}` : "";
     const rec = Number(pit.recurrence) || 1;
     const isFrequent = rec >= pitfallThreshold;
     const prefix = isFrequent ? ("[高频复发×" + rec + "] ") : "";
@@ -1408,7 +1407,7 @@ async function memoryContext(client, cfg, args) {
 
   for (const x of scored) {
     if (n >= maxItems) break;
-    const idTag = !isLegacyUxTest && x.row.id != null ? `#${x.row.id}` : "";
+    const idTag = x.row.id != null ? `#${x.row.id}` : "";
     const cat = x.row.category || "fact";
     const isPitfall = String(cat).toLowerCase().indexOf("pitfall") === 0;
     const rec = Number(x.row.recurrence) || 1;
@@ -1584,7 +1583,7 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
       };
 
       try {
-        await client.update("pitfalls", dup.id, updatePayload);
+        await client.update("pitfalls", dup.id, Object.assign({}, updatePayload, { updated_at: updatePayload.updated_at || nowSql() }));
         markRecent(recentKey);
         return jsonOut({
           action: "EVOLVED",

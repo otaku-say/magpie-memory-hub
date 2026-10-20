@@ -52,6 +52,8 @@ const KNOWN_NON_TOOL_SYMBOLS = new Set([
   // v6.28.0 去重模型响应字段
   "memory_duplicates",
   "pitfall_duplicates",
+  // v6.36：配置项键名（非 MCP 工具），避免被工具名门禁误判
+  "pitfall_recurrence_threshold",
   // 设置页 DOM 元素 ID
   "db_action_status",
   "model_action_status",
