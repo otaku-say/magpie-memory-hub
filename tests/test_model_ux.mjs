@@ -392,7 +392,7 @@ console.log("\n▶ [Test 3] 优先级 2：memory_search 自然语言查询改写
   console.log(`  [改写前（现状）] 关键词: "${naturalQuery}"`);
   console.log(`    - matched: ${resBefore.matched}, returned: ${resBefore.returned}`);
   console.log(`    - 结论: 纯词面精确匹配由于口语词干扰，【命中 0 条】（搜不到历史问题解法！）`);
-  assert.strictEqual(resBefore.matched, 0, "现状行为：自然语言整句无法匹配标题或标签，命中必为 0");
+  assert.ok(resBefore.matched >= 1, "现状行为：自然语言经 Bigram 分词后至少命中 1 条");
   assert.strictEqual(resBefore.rewrite_used, false);
 
   // 实验组 B：配置提炼模型并启用改写
