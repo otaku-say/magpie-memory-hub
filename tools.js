@@ -120,7 +120,11 @@ function readOptions(options) {
     dedup_weekday: Number(o.dedup_weekday) || 1,
     dedup_day: Number(o.dedup_day) || 1,
     dedup_batch_size: Math.max(20, Math.min(Number(o.dedup_batch_size || 50), 1000)),
-    dedup_fetch_limit: Math.max(20, Math.min(Number(o.dedup_fetch_limit || o.dedup_batch_size || 200), 1000)),
+    dedup_fetch_limit: Math.max(20, Math.min(Number((o.dedup_batch_size && Number(o.dedup_batch_size) !== 50 ? o.dedup_batch_size : (o.dedup_batch_size || o.dedup_fetch_limit || 200))), 1000)),
+    project: String(o.project || "global").trim(),
+    audit_chunk_size: Number(o.audit_chunk_size) > 0 ? Number(o.audit_chunk_size) : 40,
+    audit_max_batches: Number(o.audit_max_batches) > 0 ? Number(o.audit_max_batches) : 1,
+    rerank_model: o.rerank_model || "",
     classify_endpoint: o.classify_endpoint || "auto",
     search_rewrite: o.search_rewrite !== false,
     search_rerank: o.search_rerank !== false,
@@ -1911,9 +1915,17 @@ export async function memoryAudit(client, cfg, args, ctx) {
     const project = String(args.project || (cfg && cfg.project) || "global").trim();
     // 【v6.3.1 解耦】「DB 拉取批」与「模型分块」
     // a) dbFetchLimit：只管从数据库拉取多少条数据（默认 200，上限 1000）
-    // d) maxModelBatches：模型仲裁预算独立（默认 2 = 最多 2 次分块调用），超出部分仅用规则结果 fail-open
-    // f) 单次调用最坏耗时估算：2 次模型调用 × 15s = 30s < 55s（硬超时防线）
-    const dbFetchLimit = Math.max(1, Math.min(Number(args.fetch_limit || args.limit || args.batch_size || cfg.dedup_fetch_limit || cfg.dedup_batch_size || 200), 1000));
+    // 【P1-2】优先级：用户显式传 args.fetch_limit > 用户配置的 dedup_batch_size > dedup_fetch_limit > 200
+    const explicitFetchLimit = args && (args.fetch_limit || args.limit || args.batch_size);
+    const configuredUserBatchSize = (args && args.dedup_batch_size) || (cfg && (Number(cfg.dedup_batch_size) !== 50 ? cfg.dedup_batch_size : null));
+    const configuredFetchLimit = (args && args.dedup_fetch_limit) || (cfg && cfg.dedup_fetch_limit);
+    const dbFetchLimit = Math.max(1, Math.min(Number(
+      explicitFetchLimit ||
+      configuredUserBatchSize ||
+      configuredFetchLimit ||
+      (cfg && cfg.dedup_batch_size) ||
+      200
+    ), 1000));
     const maxModelBatches = Math.max(1, Math.min(Number(args.max_model_batches || args.max_batches || cfg.audit_max_batches || 2), 10));
     const batchTs = Date.now();
     const now = nowSql();
@@ -1963,21 +1975,23 @@ export async function memoryAudit(client, cfg, args, ctx) {
     const q = {
       project,
       lifecycle_status: "active",
+      invalid_at: null,
       limit: dbFetchLimit,
       order_by: "id ASC",
       columns: [
         "id", "project", "category", "scope_level", "client", "origin",
         "title", "content", "full_text", "tags", "confidence_score",
-        "recurrence", "content_fingerprint", "updated_at", "lifecycle_status"
+        "recurrence", "content_fingerprint", "updated_at", "lifecycle_status",
+        "related_entities", "invalid_at", "expires_at"
       ],
     };
     if (memLastId) q.since_id = memLastId;
     if (timeFilter) q.updated_after = timeFilter;
 
-    const rows = rowsOf(await client.list("memories", q))
-      .filter((r) => r.lifecycle_status === "active" && !r.invalid_at);
-    if (!rows.length) break;
-    memLastId = rows[rows.length - 1].id;
+    const rawRows = rowsOf(await client.list("memories", q));
+    const rows = rawRows.filter((r) => r.lifecycle_status === "active" && !r.invalid_at);
+    if (!rawRows.length) break;
+    memLastId = rawRows[rawRows.length - 1].id;
     totalScannedMemories += rows.length;
 
     // b) 内存中全量规则级查重（指纹相同 / 归一化标题相同 / tags 交集）覆盖整批记录
@@ -2037,8 +2051,9 @@ export async function memoryAudit(client, cfg, args, ctx) {
       }
       candidateList = Array.from(candidateItemMap.values());
 
-      // 【P1-3】MODEL_CHUNK 一律读 cfg.audit_chunk_size ?? 40，并把单次送模型的条数硬顶为 audit_chunk_size * maxModelBatches
-      const MODEL_CHUNK = Number(cfg.audit_chunk_size ?? auditOptions.audit_chunk_size ?? 40);
+      // 【P1-2】MODEL_CHUNK 增加 [5, 60] 范围守卫并锚定 audit_chunk_size
+      const rawChunk = Number(cfg.audit_chunk_size ?? auditOptions.audit_chunk_size ?? 40);
+      const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 40, 60));
       const modelBudgetItems = maxModelBatches * MODEL_CHUNK;
       const forModel = candidateList.slice(0, modelBudgetItems);
 
@@ -2064,11 +2079,17 @@ export async function memoryAudit(client, cfg, args, ctx) {
             }
 
             const remainingGroups = [];
+            const orphanedDupsByPrimary = new Map();
             for (const g of groups) {
               if (modelHandledIds.has(g.primary.id)) {
                 const unhandledDups = g.duplicates.filter((d) => !modelHandledIds.has(d.id));
                 if (unhandledDups.length > 1) {
                   remainingGroups.push({ primary: unhandledDups[0], duplicates: unhandledDups.slice(1) });
+                } else if (unhandledDups.length === 1) {
+                  // 【P1-3 a】单条精确重复暂存，挂入主记录所属的模型组一起合并，杜绝漏删
+                  const list = orphanedDupsByPrimary.get(g.primary.id) || [];
+                  list.push(unhandledDups[0]);
+                  orphanedDupsByPrimary.set(g.primary.id, list);
                 }
               } else {
                 const unhandledDups = g.duplicates.filter((d) => !modelHandledIds.has(d.id));
@@ -2084,6 +2105,8 @@ export async function memoryAudit(client, cfg, args, ctx) {
               modelDupIds.add(rg.primary.id);
               for (const d of rg.duplicates) modelDupIds.add(d.id);
             }
+
+            const attachedOrphanIds = new Set();
             for (const dg of mDups) {
               const pId = Number(dg.primary_id);
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
@@ -2098,6 +2121,21 @@ export async function memoryAudit(client, cfg, args, ctx) {
                     if (fallbackItem) dItems.push(fallbackItem);
                   }
                 }
+
+                // 【P1-3 a】把主记录所属的孤儿精确重复副本挂入当前模型组
+                const candidatePrimaryIds = [pId, ...dItems.map((d) => d.id)];
+                for (const candId of candidatePrimaryIds) {
+                  const orphans = orphanedDupsByPrimary.get(candId);
+                  if (orphans && orphans.length > 0) {
+                    for (const orphan of orphans) {
+                      if (!modelDupIds.has(orphan.id) && !dItems.some((d) => d.id === orphan.id) && orphan.id !== pId) {
+                        dItems.push(orphan);
+                        attachedOrphanIds.add(orphan.id);
+                      }
+                    }
+                  }
+                }
+
                 // 【P1-3】组内存在 principle 时强制将其选为 primary
                 if (pItem && pItem.category !== "principle") {
                   const princIdx = dItems.findIndex((d) => d.category === "principle");
@@ -2107,13 +2145,54 @@ export async function memoryAudit(client, cfg, args, ctx) {
                     pItem = princItem;
                   }
                 }
-                if (pItem && dItems.length > 0) {
+
+                // 【P1-3 b】模型合并结果必须经过数字守卫校验，冲突则跳过合并
+                const validDItems = [];
+                if (pItem) {
+                  const pTitle = pItem.title || "";
+                  const pContent = pItem.content || pItem.full_text || "";
+                  const pAllText = (pTitle + " " + pContent).trim();
+
+                  for (const d of dItems) {
+                    const dTitle = d.title || "";
+                    const dContent = d.content || d.full_text || "";
+                    const dAllText = (dTitle + " " + dContent).trim();
+
+                    const hasNumConflict =
+                      hasConflictingNumbers(pTitle, dTitle) ||
+                      hasConflictingNumbers(pContent, dContent) ||
+                      hasConflictingNumbers(pAllText, dAllText);
+
+                    if (hasNumConflict) {
+                      continue;
+                    }
+                    validDItems.push(d);
+                  }
+                }
+
+                if (pItem && validDItems.length > 0) {
                   modelDupIds.add(pItem.id);
-                  for (const d of dItems) modelDupIds.add(d.id);
-                  remainingGroups.push({ primary: pItem, duplicates: dItems });
+                  for (const d of validDItems) modelDupIds.add(d.id);
+                  remainingGroups.push({ primary: pItem, duplicates: validDItems });
                 }
               }
             }
+
+            // 若有未挂载到任何模型组的孤儿精确重复，安全回退合并
+            for (const [primId, orphans] of orphanedDupsByPrimary.entries()) {
+              const unattached = orphans.filter((o) => !attachedOrphanIds.has(o.id) && !modelDupIds.has(o.id));
+              if (unattached.length > 0) {
+                const primItem = rows.find((r) => r.id === primId) || candidateItemMap.get(primId);
+                if (primItem && !modelDupIds.has(primItem.id)) {
+                  remainingGroups.push({ primary: primItem, duplicates: unattached });
+                  modelDupIds.add(primItem.id);
+                  for (const u of unattached) modelDupIds.add(u.id);
+                } else if (unattached.length > 1) {
+                  remainingGroups.push({ primary: unattached[0], duplicates: unattached.slice(1) });
+                }
+              }
+            }
+
             groups.length = 0;
             groups.push(...remainingGroups);
           }
@@ -2178,7 +2257,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
       });
     } catch (_) {}
 
-    if (rows.length < dbFetchLimit) break;
+    if (rawRows.length < dbFetchLimit) break;
     memTruncated = true;
     break;
   }
@@ -2192,15 +2271,17 @@ export async function memoryAudit(client, cfg, args, ctx) {
     pitBatchNum++;
     const q = {
       project,
+      invalid_at: null,
       limit: dbFetchLimit,
       order_by: "id ASC",
     };
     if (pitLastId) q.since_id = pitLastId;
     if (timeFilter) q.updated_after = timeFilter;
 
-    const rows = rowsOf(await client.list("pitfalls", q)).filter((r) => !r.invalid_at);
-    if (!rows.length) break;
-    pitLastId = rows[rows.length - 1].id;
+    const rawRows = rowsOf(await client.list("pitfalls", q));
+    const rows = rawRows.filter((r) => !r.invalid_at);
+    if (!rawRows.length) break;
+    pitLastId = rawRows[rawRows.length - 1].id;
     totalScannedPitfalls += rows.length;
 
     // b) 内存中全量规则级查重覆盖整批记录
@@ -2254,8 +2335,9 @@ export async function memoryAudit(client, cfg, args, ctx) {
       }
       candidateList = Array.from(candidateItemMap.values());
 
-      // 【P1-3】MODEL_CHUNK 一律读 cfg.audit_chunk_size ?? 40，并把单次送模型的条数硬顶为 audit_chunk_size * maxModelBatches
-      const MODEL_CHUNK = Number(cfg.audit_chunk_size ?? auditOptions.audit_chunk_size ?? 40);
+      // 【P1-2】MODEL_CHUNK 增加 [5, 60] 范围守卫并锚定 audit_chunk_size
+      const rawChunk = Number(cfg.audit_chunk_size ?? auditOptions.audit_chunk_size ?? 40);
+      const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 40, 60));
       const modelBudgetItems = maxModelBatches * MODEL_CHUNK;
       const forModel = candidateList.slice(0, modelBudgetItems);
 
@@ -2279,11 +2361,17 @@ export async function memoryAudit(client, cfg, args, ctx) {
             }
 
             const remainingGroups = [];
+            const orphanedDupsByPrimary = new Map();
             for (const g of groups) {
               if (modelHandledIds.has(g.primary.id)) {
                 const unhandledDups = g.duplicates.filter((d) => !modelHandledIds.has(d.id));
                 if (unhandledDups.length > 1) {
                   remainingGroups.push({ primary: unhandledDups[0], duplicates: unhandledDups.slice(1) });
+                } else if (unhandledDups.length === 1) {
+                  // 【P1-3 a】单条精确重复暂存，挂入主记录所属的模型组一起合并，杜绝漏删
+                  const list = orphanedDupsByPrimary.get(g.primary.id) || [];
+                  list.push(unhandledDups[0]);
+                  orphanedDupsByPrimary.set(g.primary.id, list);
                 }
               } else {
                 const unhandledDups = g.duplicates.filter((d) => !modelHandledIds.has(d.id));
@@ -2299,11 +2387,13 @@ export async function memoryAudit(client, cfg, args, ctx) {
               modelDupIds.add(rg.primary.id);
               for (const d of rg.duplicates) modelDupIds.add(d.id);
             }
+
+            const attachedOrphanIds = new Set();
             for (const dg of pDups) {
               const pId = Number(dg.primary_id);
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
               if (pId && dIds.length > 0 && !modelDupIds.has(pId)) {
-                const pItem = rows.find((r) => r.id === pId) || candidateItemMap.get(pId);
+                let pItem = rows.find((r) => r.id === pId) || candidateItemMap.get(pId);
                 const dItems = (forModel.length ? forModel : rows).filter(
                   (r) => dIds.includes(r.id) && r.id !== pId && !modelDupIds.has(r.id)
                 );
@@ -2313,13 +2403,65 @@ export async function memoryAudit(client, cfg, args, ctx) {
                     if (fallbackItem) dItems.push(fallbackItem);
                   }
                 }
-                if (pItem && dItems.length > 0) {
+
+                // 【P1-3 a】把主记录所属的孤儿精确重复副本挂入当前模型组
+                const candidatePrimaryIds = [pId, ...dItems.map((d) => d.id)];
+                for (const candId of candidatePrimaryIds) {
+                  const orphans = orphanedDupsByPrimary.get(candId);
+                  if (orphans && orphans.length > 0) {
+                    for (const orphan of orphans) {
+                      if (!modelDupIds.has(orphan.id) && !dItems.some((d) => d.id === orphan.id) && orphan.id !== pId) {
+                        dItems.push(orphan);
+                        attachedOrphanIds.add(orphan.id);
+                      }
+                    }
+                  }
+                }
+
+                // 【P1-3 b】模型合并结果必须经过数字守卫校验，冲突则跳过合并
+                const validDItems = [];
+                if (pItem) {
+                  const pSym = pItem.symptom || "";
+                  const pText = [pItem.symptom, pItem.solution, pItem.root_cause].filter(Boolean).join(" ");
+
+                  for (const d of dItems) {
+                    const dSym = d.symptom || "";
+                    const dText = [d.symptom, d.solution, d.root_cause].filter(Boolean).join(" ");
+
+                    const hasNumConflict =
+                      hasConflictingNumbers(pSym, dSym) ||
+                      hasConflictingNumbers(pText, dText);
+
+                    if (hasNumConflict) {
+                      continue;
+                    }
+                    validDItems.push(d);
+                  }
+                }
+
+                if (pItem && validDItems.length > 0) {
                   modelDupIds.add(pItem.id);
-                  for (const d of dItems) modelDupIds.add(d.id);
-                  remainingGroups.push({ primary: pItem, duplicates: dItems });
+                  for (const d of validDItems) modelDupIds.add(d.id);
+                  remainingGroups.push({ primary: pItem, duplicates: validDItems });
                 }
               }
             }
+
+            // 若有未挂载到任何模型组的孤儿精确重复，安全回退合并
+            for (const [primId, orphans] of orphanedDupsByPrimary.entries()) {
+              const unattached = orphans.filter((o) => !attachedOrphanIds.has(o.id) && !modelDupIds.has(o.id));
+              if (unattached.length > 0) {
+                const primItem = rows.find((r) => r.id === primId) || candidateItemMap.get(primId);
+                if (primItem && !modelDupIds.has(primItem.id)) {
+                  remainingGroups.push({ primary: primItem, duplicates: unattached });
+                  modelDupIds.add(primItem.id);
+                  for (const u of unattached) modelDupIds.add(u.id);
+                } else if (unattached.length > 1) {
+                  remainingGroups.push({ primary: unattached[0], duplicates: unattached.slice(1) });
+                }
+              }
+            }
+
             groups.length = 0;
             groups.push(...remainingGroups);
           }
@@ -2380,7 +2522,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
       });
     } catch (_) {}
 
-    if (rows.length < dbFetchLimit) break;
+    if (rawRows.length < dbFetchLimit) break;
     pitTruncated = true;
     break;
   }
@@ -2394,7 +2536,8 @@ export async function memoryAudit(client, cfg, args, ctx) {
 
   rememberAuditState({
     last_audit_at: nowSql(),
-    last_dedup_at: nowSql(),
+    last_dedup_at: truncated ? (auditState.last_dedup_at || null) : nowSql(),
+    last_dedup_pending: Boolean(truncated),
     last_dedup_batch_ts: batchTs,
     last_dedup_count: totalDeduped,
     last_dedup_ids: { memories: allDedupedMemIds, pitfalls: allDedupedPitIds },
@@ -2499,7 +2642,8 @@ async function checkScheduledDedup(client, cfg) {
   if (schedule === "off" || schedule === "none") return null;
 
   const state = lookupAuditState();
-  const isDue = isDedupDue({
+  const isPending = Boolean(state && state.last_dedup_pending);
+  const isDue = isPending || isDedupDue({
     schedule,
     time: cfg.dedup_time || "02:00",
     weekday: cfg.dedup_weekday || 1,
@@ -2521,6 +2665,7 @@ async function checkScheduledDedup(client, cfg) {
       project: cfg.project || "global",
       schedule,
       updated_after: updatedAfter,
+      incremental: true,
       batch_size: cfg.dedup_batch_size || cfg.dedup_fetch_limit || 1000,
       fetch_limit: cfg.dedup_fetch_limit || 1000,
     });
@@ -2561,7 +2706,7 @@ function ensureAuditScheduler(client, cfg, optionsGetter) {
     try {
       if (freshCfg && isCfgShape(freshCfg)) {
         const c = makeClient(freshCfg);
-        if (c && typeof c.list === "function") return c;
+        if (c && !c._isNoCredentials && typeof c.list === "function") return c;
       }
     } catch (_) {}
     const baseClient = _auditBaseClient || client;
@@ -2569,16 +2714,28 @@ function ensureAuditScheduler(client, cfg, optionsGetter) {
     return null;
   }
 
-  if (_auditSchedulerStarted) {
-    return { getFreshCfg, getFreshClient, started: true, stop: stopAuditScheduler };
-  }
-  _auditSchedulerStarted = true;
-
   const runScheduled = async () => {
     const freshCfg = getFreshCfg();
+    const schedNow = (freshCfg && (freshCfg.dedup_schedule || freshCfg.audit_interval || freshCfg.auditInterval)) || "off";
+    if (schedNow === "off" || schedNow === "none") {
+      stopAuditScheduler();
+      return null;
+    }
     const freshClient = getFreshClient(freshCfg);
     return await checkScheduledDedup(freshClient, freshCfg);
   };
+
+  const currentCfg = getFreshCfg();
+  const sched = (currentCfg && (currentCfg.dedup_schedule || currentCfg.audit_interval || currentCfg.auditInterval)) || "off";
+  if (sched === "off" || sched === "none") {
+    stopAuditScheduler();
+    return { getFreshCfg, getFreshClient, started: false, stop: stopAuditScheduler, runScheduled };
+  }
+
+  if (_auditSchedulerStarted) {
+    return { getFreshCfg, getFreshClient, started: true, stop: stopAuditScheduler, runScheduled };
+  }
+  _auditSchedulerStarted = true;
 
   if (!isTestMode()) {
     runScheduled().catch((e) => {
@@ -2989,7 +3146,13 @@ export const MagpieMemoryHub = async (input, options) => {
    * 默认 off，关闭时不执行任何后台操作；超期触发后立即分批执行去重，绝不产出冗余卡片。 */
   const dedupSched = cfg.dedup_schedule || cfg.audit_interval || cfg.auditInterval || (options && (options.dedup_schedule || options.audit_interval)) || "off";
   const optionsGetter = () => readOptions(Object.assign({}, input && typeof input === "object" ? input : {}, options && typeof options === "object" ? options : {}));
-  if (dedupSched !== "off" && !isTestMode()) {
+  _auditOptionsGetter = optionsGetter;
+  if (cfg) _auditBaseCfg = cfg;
+  if (client) _auditBaseClient = client;
+
+  if (dedupSched === "off" || dedupSched === "none") {
+    stopAuditScheduler();
+  } else if (!isTestMode()) {
     ensureAuditScheduler(client, cfg, optionsGetter);
   }
 
@@ -3084,3 +3247,5 @@ export const MagpieMemoryHub = async (input, options) => {
 
 MagpieMemoryHub.ensureAuditScheduler = ensureAuditScheduler;
 MagpieMemoryHub.stopAuditScheduler = stopAuditScheduler;
+MagpieMemoryHub.readOptions = readOptions;
+MagpieMemoryHub.checkScheduledDedup = checkScheduledDedup;
