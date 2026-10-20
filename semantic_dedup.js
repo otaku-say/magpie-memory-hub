@@ -183,7 +183,15 @@ export function hasConflictingNumbers(a, b) {
     const raw = String(t == null ? "" : t);
     // 抓取独立的数字串（含小数与常见版本号写法 v1.2.3 / 1.2.3）
     const nums = raw.match(/\d+(?:\.\d+)*/g) || [];
-    return new Set(nums.map((x) => String(Number(x) === Number(x) ? Number(x) : x)));
+    // 逐段去前导零规范化（如 "3.10" -> ["3","10"] -> "3.10"，"03.1" -> ["3","1"] -> "3.1"），绝不转 Number() 避免末位零丢失
+    return new Set(
+      nums.map((x) =>
+        x
+          .split(".")
+          .map((seg) => seg.replace(/^0+/, "") || "0")
+          .join(".")
+      )
+    );
   };
   const na = extract(a);
   const nb = extract(b);

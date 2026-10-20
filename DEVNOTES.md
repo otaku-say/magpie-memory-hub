@@ -990,10 +990,10 @@ true !== false
 - [ ] 2. P2-3 semantic_dedup.js 性能与误判
   - [ ] levenshteinDistance 双行滚动数组 (O(min(M,N)) 空间)，512 字符截断
   - [ ] isAlphaTokenMatch: 纯数字严格相等 (===)，含字母才允许 includes (防 80 vs 8080 误判)
-- [ ] 3. P2-4 mcp_client.js / ncb_mcp.js
-  - [ ] buildSelect OFFSET 使用截断后的 effectiveLimit 计算
-  - [ ] create 回查分流：pitfalls 表使用 symptom 列回查
-  - [ ] ncb_mcp.initialize() 缓存 this._initPromise 实现并发互斥
+- [x] 3. P2-4 mcp_client.js / ncb_mcp.js
+  - [x] buildSelect OFFSET 使用截断后的 effectiveLimit 计算
+  - [x] create 回查分流：pitfalls 表使用 symptom 列回查
+  - [x] ncb_mcp.initialize() 缓存 this._initPromise 实现并发互斥
 - [ ] 4. P2-5a r2.js 凭据兜底
   - [ ] restClient 与 r2Upload 在 cfg 无 secret 时回退 lookupSecret(db)
 - [ ] 5. P2-6b online_models.js / settings.js
