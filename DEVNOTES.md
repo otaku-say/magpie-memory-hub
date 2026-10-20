@@ -1181,3 +1181,211 @@ true !== false
 2. 回归现有核心测试集，确保所有测试全绿。
 3. 校验宿主机 `~/.magpie-memory-hub/state.json` 的 mtime 在测试前后完全不变。
 4. Git 提交并推送至 `feat/v632-c-state`。
+
+
+---
+
+## 二十六、v6.33.0 调度器与审计仲裁（传参短路/正文数字/模型仲裁/分块预算）
+
+# Agent A 检查点报告：调度器与审计仲裁修复 (v6.33-a)
+
+## 任务背景
+- **沙箱 ID**: `79634008d18942a9b894f3409bcdd4b1`
+- **代码目录**: `/workspace/m`
+- **工作分支**: `feat/v633-a-tools`
+- **文件所有权**: 独占修改 `tools.js` 与 `tests/test_v633_a_tools.mjs`，严禁修改其他共享文件。
+
+## 4 项整改方案与技术实现
+
+### 1. 【P0-1 最紧急】ensureAuditScheduler 传参短路导致定时去重 100% 瘫痪
+- **问题根因**:
+  宿主调用 `MagpieMemoryHub(input, options)` 时，宿主传入的 `input` 是带有上下文的 truthy 对象（如 `{ magpie: ... }`）。原代码在传给调度器闭包时使用 `() => readOptions(input || options)`，导致 `input || options` 恒返回 `input`，用户在 `options` 中配置的 `dedup_schedule`、`mcp_key` 等关键字段被完全丢弃，`dedup_schedule` 恒为 `"off"`，定时去重在生产环境完全无法启动。
+  同时，原实现中 `if (_auditSchedulerStarted) return;` 仅仅早退，当设置页更新配置重新调用入口时，闭包中的 getter 与 client 无法动态刷新。
+- **修复方案**:
+  1. 将调度器配置读取闭包改为两者对象合并，且 `options` 拥有高优先级后写覆盖：
+     `() => readOptions(Object.assign({}, input && typeof input === "object" ? input : {}, options && typeof options === "object" ? options : {}))`。
+  2. 修复 `ensureAuditScheduler` 的早退逻辑：若定时器已在运行，不重复创建定时器，但主动刷新模块级闭包中的 `_auditOptionsGetter`、`_auditBaseCfg` 与 `_auditBaseClient`，保证设置页修改后定时器下一次触发能感知最新配置；同时提供 `stopAuditScheduler` 可控停止入口。
+- **反证门 1 设计**:
+  构造 `input = { magpie: { host: "test" } }` 与 `options = { dedup_schedule: "daily", mcp_key: "key_v633_test" }`，断言 `getFreshCfg()` 读到的 `dedup_schedule` 为 `"daily"` 且 `mcpKey` 为 `"key_v633_test"`；断言当 `input` 为空而 `options` 有值时亦能正确解析；断言定时器已启动时动态修改 `options` 能够即时通过 `getFreshCfg()` 读取最新配置。
+
+---
+
+### 2. 【P1-1】memoryAudit 标题短路未校验正文数字冲突
+- **问题根因**:
+  在 `memoryAudit` 的内存规则查重阶段（记忆表约 1997-2001 行、踩坑表约 2190-2194 行），`sameTitle` / `sameSym` 与 `titleOverlap` / `symOverlap` 短路判定仅调用了 `hasConflictingNumbers(a.title, b.title)` 或 `hasConflictingNumbers(a.symptom, b.symptom)`，未校验正文（content/full_text）与排障方案（solution/root_cause）中的数字冲突。导致标题相同（例如均为「数据库连接超时」）但正文指定不同端口（3306 与 3307）或不同参数的记录被短路误判为重复并合并。
+- **修复方案**:
+  在记忆表判定重复前，追加 `!hasConflictingNumbers(a.content || a.full_text, b.content || b.full_text)`；在踩坑表判定重复前，将 `symptom + " " + solution + " " + root_cause` 拼接文本执行 `!hasConflictingNumbers(textA, textB)`，出现数字冲突一律拒绝合并。
+- **反证门 2 设计**:
+  分别在记忆表与踩坑表中插入标题/现象完全相同（如「数据库连接超时治理方案」），但正文/方案中包含不同端口数字（3306 vs 3307）的记录，执行 `memory_audit`（full: true），断言两条记录均保持 `invalid_at == null`，绝不被误合并。
+
+---
+
+### 3. 【P1-2】memoryAudit 模型仲裁漏审未分组行 & 误丢弃确定性规则组 & 跨组主从互指
+- **问题根因**:
+  - a) 当规则分组 `groups.length > 0` 时，原代码仅将命中规则组的记录放进 `candidateList`，未被规则覆盖的行被完全丢弃，导致需要依靠大模型语义理解的同义改写记录被漏审。
+  - b) 当模型返回部分分组结果时，原代码 `remainingGroups` 使用 `modelReviewedIds` 将所有送给模型的规则组全部无条件过滤掉，导致确定性规则组（如精确内容指纹重合组）若模型未返回即被直接丢弃。
+  - c) `modelDupIds` 仅记录了从记录 ID，未记录作为主记录的 `pId`，导致模型跨组返回时存在同一 ID 在 A 组为主、在 B 组为从的互指冲突，进而导致主记录被误软删。
+- **修复方案**:
+  - a) `candidateList` 优先放入规则候选组记录，随后将未分组的剩余记录按预算追加至候选列表，送入模型仲裁（受 `maxModelBatches` 预算约束）。
+  - b) `remainingGroups` 仅剔除「已被模型明确处理过的 ID」（记录在 `modelHandledIds` 中），未被模型处理或部分处理的确定性规则组予以安全保留。
+  - c) 模型仲裁解析每处理一组，不仅记录从记录 ID，亦将主记录 `pItem.id` 计入 `modelDupIds`，且新组的主从记录均不得存在于 `modelDupIds` 中，彻底杜绝跨组主从互指。
+- **反证门 3 设计**:
+  1. 构造「精确指纹规则组（未在模型返回中出现）」+「同义改写无规则组记录（由模型仲裁指出重复）」，执行审计，断言模型返回后，精确指纹规则组绝不被丢弃，同义改写记录成功合并。
+  2. 构造模型恶意/幻觉跨组主从互指响应（A 组 primary=X, dups=[Y]；B 组 primary=Z, dups=[X]），断言 X 绝不被写入 `invalid_at`，主从互指被安全规避。
+
+---
+
+### 4. 【P1-3】MODEL_CHUNK 误读 dedup_batch_size 与预算超支
+- **问题根因**:
+  在 `memoryAudit` 中，`MODEL_CHUNK` 错误地读取了 `dedup_batch_size`（限制到 60）而非 `audit_chunk_size`（40）。当用户配置较大批次时，`candidateList.slice(0, modelBudgetItems)` 切取了 120 条记录，而底层 `auditMemoriesWithModel` 内部按 40 分块，导致产生 3 次外部模型调用而非预期的 2 次调用，超过预算并引入 55s 超时风险。
+- **修复方案**:
+  `MODEL_CHUNK` 一律读取 `cfg.audit_chunk_size ?? 40`，将单次送模型的条数硬顶为 `audit_chunk_size * maxModelBatches`。
+- **反证门 4 设计**:
+  配置 `audit_chunk_size = 40`、`max_model_batches = 2`，准备 100 条待去重记录，模拟模型调用探针，断言送入模型的最大记录数精确受限为 80 条（2 * 40），产生的模型分块调用次数绝不超过 2 次。
+
+## 测试与合规自检计划
+- 新建 `tests/test_v633_a_tools.mjs`，包含上述 4 大反证门及清理断言，100% 符合 `test_meta.mjs` 规范。
+- 依次运行所有必测测试套件确保 0 失败。
+
+
+---
+
+## 二十七、v6.33.0 守卫加固（内部请求豁免/祖先软链接/statePath 精确化）
+
+# v6.33 Agent B 豁免与路径绕过修复规划
+
+## 1. 任务背景与文件所有权
+- **沙箱 ID**：`002823e6db47441ab8317a6db82cb85e`
+- **代码目录**：`/workspace/m`
+- **工作分支**：`feat/v633-b-guard`
+- **文件所有权约束（严格独占）**：
+  - `model_budget.js`
+  - `gateway_harvest.js`
+  - `local_state.js`
+  - `tests/test_v633_b_guard.mjs`
+  - `NOTES_v633_b.md`
+- **严禁修改**：`tools.js` / `semantic_dedup.js` / `package.json` / `settings.*` / `test_meta.mjs` / `DEVNOTES.md` / 其他 tests。
+
+---
+
+## 2. 整改项清单与技术方案
+
+### 2.1 【P0-2 最紧急】Gemini/Responses 内部请求豁免失效，自激风险重现（model_budget.js 约 193-214）
+- **根因**：裁剪 `JSON.stringify` 后只检查 `body.contents` 和 `body.input` 的末尾元素，遗漏了 `body.systemInstruction`、`body.instructions`、`body.contents[0]`、`body.input[0]` 等可能承载 System Prompt 的关键位置。导致沙箱实测三类内部模型调用在未透传请求头时全部返回 `false`，自激放大风险重现。
+- **修复方案**：
+  1. 优先校验内部请求头 `x-magpie-internal` 与 `x-memhub-internal`（保持已有高速路径）；
+  2. 请求体指纹改为检查「所有可能承载 system prompt 的位置」：
+     - `body.system`
+     - `body.systemInstruction`
+     - `body.instructions`
+     - `body.contents[0]` 及 `body.contents` 末尾元素
+     - `body.input[0]` 及 `body.input` 末尾元素（支持 string 及 array）
+     - `body.messages[0]`（system）及 `body.messages` 末尾元素（user）
+  3. 每个候选位置只提取前 2000 字符，绝不全量序列化长上下文；
+  4. 任一位置命中 `INTERNAL_PROMPT_MARKERS` 即刻返回 `true`。
+- **反证验证**：分别构造 Gemini（contents + systemInstruction）与 Responses（input + instructions）内部调用，断言返回 `true`；普通用户请求断言返回 `false`。
+
+---
+
+### 2.2 【P0-3】目标子目录不存在时祖先软链接绕过（gateway_harvest.js 约 270-295）
+- **根因**：向上回溯祖先 `parentReal` 时只校验了 `HARD_FORBIDDEN_PREFIXES`（未包含 `/var`、`/root`、`/home`），且未把 `realPath` 更新为解析后的真实祖先重构路径。导致父级软链接指向 `/var/log` 或 `/root` 且子目录尚不存在时，通过父级软链接直接绕过校验。
+- **修复方案**：
+  1. 向上回溯存在的父级祖先目录时，对解析出的 `parentReal` 执行完整防护校验（`checkPathForbidden`，涵盖 `HARD_FORBIDDEN_PREFIXES` + 敏感子路径黑名单 + 状态目录 + 白名单逻辑）；
+  2. 一旦解析出 `parentReal`，立即基于相对路径计算并更新 `realPath`，对重构后的 `realPath` 同步执行完整防护校验；
+  3. 继续向上校验祖先链，任一层命中黑名单即抛出 `[SECURITY_BLOCKED]`；
+  4. 保留合法的白名单放行（如 `~/GatewayConversations`、`/var/minis`、`/var/folders` 及环境变量指定目录）。
+- **反证验证**：
+  - `/tmp/link_to_var_log/nonexistent_child` 必须坚决拦截；
+  - `/tmp/link_to_root/.ssh/nonexistent` 必须坚决拦截；
+  - `/tmp/normal_dir/nonexistent_child` 必须正常放行。
+
+---
+
+### 2.3 【P1-4】statePath() process.argv 测试检测正则过宽，生产状态被误重定向到 /tmp（local_state.js 约 35-40）
+- **根因**：原正则 `/(^|[\/])test|\btests?\b/i` 过于宽泛，会匹配任何包含 `/test` 的部署路径（如 `/var/minis/test-env`、`/home/user/test-project`），误将生产环境的 `state.json` 重定向到系统易失目录 `/tmp`。
+- **修复方案**：
+  1. 只认明确的环境变量测试信号：`MAGPIE_TEST === "1"`、`NODE_ENV === "test"`、`MEMHUB_TEST === "1"`；
+  2. 针对 `process.argv`，严格采用 `path` 解析判定：
+     - 必须以 `.mjs` 结尾；
+     - 所在父目录名称必须精确等于 `"tests"`（`path.basename(path.dirname(path.resolve(arg))) === "tests"`）；
+     - 彻底杜绝任意包含 `test` 子串的误匹配。
+- **反证验证**：
+  - 当 `argv` 包含 `/var/minis/test-env/run.mjs` 且不含测试环境变量时，`statePath()` 必须稳定指向宿主 `~/.magpie-memory-hub/state.json`；
+  - 当 `argv` 为 `tests/test_v633_b_guard.mjs` 时，`statePath()` 必须指向独立的 `tmpdir` 隔离目录。
+
+---
+
+## 3. 测试与验证策略
+- **新建测试**：`tests/test_v633_b_guard.mjs`，包含三大反证门与 `test_meta` 规范自检；
+- **全套回归**：
+  - `node tests/test_gateway_harvest.mjs`
+  - `node tests/test_gateway_harvest_hooks.mjs`
+  - `node tests/test_call_storm_fix.mjs`
+  - `node tests/test_state_bloat_and_dead_letter.mjs`
+  - `node tests/test_lookup_secret.mjs`
+  - `node tests/test_v632_b_security.mjs`
+  - `node tests/test_v632_c_state.mjs`
+  - `node tests/test_v633_b_guard.mjs`
+
+
+---
+
+## 二十八、v6.33.0 数字归一化与配置漂移（末位零版本号/默认值对齐）
+
+# v6.33 Track C (Config Drift & Number Normalization) Implementation Notes
+
+## 任务目标与文件所有权
+严格限定修改文件：
+- semantic_dedup.js
+- package.json
+- settings.html
+- settings.js
+- tests/test_meta.mjs
+- DEVNOTES.md
+- tests/test_v633_c_config.mjs (新增)
+- NOTES_v633_c.md (本文件)
+
+严禁修改：tools.js / model_budget.js / gateway_harvest.js / local_state.js / mcp_client.js / ncb_mcp.js / 其他 tests。
+
+## 核心整改项设计与落地
+
+### 1. 【P1-1 核心】hasConflictingNumbers 末位零丢失导致版本号冲突漏检（semantic_dedup.js）
+- **根因分析**：
+  原实现使用 `Number(x)` 进行数字归一化，由于 JavaScript 中 `Number("3.10") === 3.1`，末尾的零被完全抹除。导致：
+  - "Python 3.1" 与 "Python 3.10" 提取出的数字集合均为 `{"3.1"}`，被误判为无冲突；
+  - "Go 1.2" 与 "Go 1.20" 被误判为无冲突；
+  - 生产中 pitfall_save 误把 Python 3.10 的报错识别为 Python 3.1 的重复条目并丢弃。
+- **修复方案**：
+  - 彻底废除 `Number()` 归一化；
+  - 提取原始数字/版本号字符串（匹配 `\d+(?:\.\d+)*`）；
+  - 逐段按 `.` 拆分，执行「逐段去前导零」规范化（如 "3.10" -> ["3","10"]，"03.1" -> ["3","1"]，"0080" -> ["80"]）；
+  - 用「段数组」的规范形式作为比较基准（即规范字符串 `segments.join(".")` 构成的集合）；
+  - 两侧段数组完全一致视为同一数字，任一不同判定为冲突；
+  - 纯整数（"80" vs "8080"）段数组不同，判定为冲突，与历史行为完全兼容。
+- **反证门矩阵**：
+  - "Python 3.1" vs "Python 3.10" => 冲突 true（反证门 1）
+  - "Go 1.2" vs "Go 1.20" => 冲突 true
+  - "v1.2.3" vs "v1.2.30" => 冲突 true
+  - "Node 18" vs "Node 20" => 冲突 true
+  - "port 8080" vs "端口 8080" => 冲突 false（反证门 2）
+  - "03.1" vs "3.1" => 冲突 false
+
+### 2. 【P2-1】配置默认值与文档/断言漂移
+- **package.json 与 settings.html / settings.js 默认值对齐**：
+  - package.json 中 `dedup_batch_size` 默认 50，但 settings.html (line 366) 及 settings.js (line 39) 写为 1000；
+  - 统一将其调整为 50，与 `tools.js` readOptions 默认值完全一致。
+  - settings.html 的徽章提示与描述同步更新为「默认 50 / 推荐 50」。
+- **tests/test_meta.mjs 第 160 行断言文案对齐**：
+  - 第 160 行断言当前数字为 52，但提示文案遗留为「期望精确 50 个」；
+  - 修正提示文案为「期望精确 52 个」，数字 52 保持不变（主控在最终多分支合并后统一锁定最终测试文件总数）。
+- **DEVNOTES.md 第 22.3 节复选框勾选**：
+  - 勾选第 22.3 节（`3. P2-4 mcp_client.js / ncb_mcp.js` 及其 3 项子任务）复选框为已完成 `[x]`。
+- **引擎内部配置默认值核验**：
+  - 核查 `dedup_fetch_limit` (200)、`audit_chunk_size` (40)、`audit_max_batches` (2)；
+  - 在 package.json 和 tools.js 中默认值已完全对齐（200、40、2）；settings.html 保持极简，不暴露不必要的底层微调参数。
+
+## 验收计划
+1. 新建 `tests/test_v633_c_config.mjs`，包含上述 2 项整改的完备反证测试。
+2. 运行回归测试套件并确保全部通过。
+3. 检查 git diff 确保仅改动授权文件。
+4. 提交并推送到远端 `feat/v633-c-config` 分支。

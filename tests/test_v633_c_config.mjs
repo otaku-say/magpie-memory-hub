@@ -251,13 +251,18 @@ try {
     // 3.2 tests/test_meta.mjs 提示文案对齐
     const metaPath = path.join(ROOT, "tests/test_meta.mjs");
     const metaContent = fs.readFileSync(metaPath, "utf8");
-    assert.ok(
-      metaContent.includes('assert.strictEqual(testFiles.length, 52, "测试文件总数断言：期望精确 52 个'),
-      "tests/test_meta.mjs line 160 提示文案必须与数字 52 保持一致（期望精确 52 个）"
-    );
-    assert.ok(
-      !metaContent.includes("期望精确 50 个"),
-      "tests/test_meta.mjs 中不得残留陈旧的「期望精确 50 个」文案"
+    // 语义化断言：校验「断言数字」与「提示文案中的数字」一致，
+    // 不硬编码具体数值，避免主控合并锁定新总数时误伤
+    const mAssert = metaContent.match(/assert\.strictEqual\(testFiles\.length,\s*(\d+),\s*["']([^"']*)["']/);
+    assert.ok(mAssert, "tests/test_meta.mjs 必须存在测试总数断言");
+    const declaredCount = mAssert[1];
+    const msgText = mAssert[2];
+    const msgNums = msgText.match(/\d+/g) || [];
+    assert.ok(msgNums.length > 0, "测试总数断言的提示文案必须包含数字");
+    assert.strictEqual(
+      msgNums[0],
+      declaredCount,
+      `测试总数断言的提示文案数字(${msgNums[0]})必须与断言数字(${declaredCount})一致，杜绝文案漂移`
     );
 
     // 3.3 DEVNOTES.md 第 22.3 节复选框勾选校验
