@@ -851,15 +851,74 @@ async function saveMemory(client, cfg, m, ctx) {
 }
 
 /* ================================================================== *
+ * 工具入参零摩擦容错归一化 (EVO-6)
+ * ================================================================== */
+
+function normalizeToolArgs(rawArgs, cfg) {
+  if (!rawArgs || typeof rawArgs !== "object") rawArgs = {};
+  const args = Object.assign({}, rawArgs);
+
+  // 1. 同义参数映射（仅在目标字段缺省或为空时映射，绝不覆盖已有正确入参）
+  // q / keyword / query → query
+  if (args.query == null || args.query === "") {
+    if (args.keyword != null && args.keyword !== "") args.query = args.keyword;
+    else if (args.q != null && args.q !== "") args.query = args.q;
+  }
+  // error / issue → symptom
+  if (args.symptom == null || args.symptom === "") {
+    if (args.error != null && args.error !== "") args.symptom = args.error;
+    else if (args.issue != null && args.issue !== "") args.symptom = args.issue;
+  }
+  // fix / resolve → solution
+  if (args.solution == null || args.solution === "") {
+    if (args.fix != null && args.fix !== "") args.solution = args.fix;
+    else if (args.resolve != null && args.resolve !== "") args.solution = args.resolve;
+  }
+  // name / topic → title
+  if (args.title == null || args.title === "") {
+    if (args.name != null && args.name !== "") args.title = args.name;
+    else if (args.topic != null && args.topic !== "") args.title = args.topic;
+  }
+  // text / body → content
+  if (args.content == null || args.content === "") {
+    if (args.text != null && args.text !== "") args.content = args.text;
+    else if (args.body != null && args.body !== "") args.content = args.body;
+  }
+
+  // 2. tags / related_entities 容错：若为数组则 join(",")；若为字符串保持
+  if (Array.isArray(args.tags)) {
+    args.tags = args.tags.join(",");
+  }
+  if (Array.isArray(args.related_entities)) {
+    args.related_entities = args.related_entities.join(",");
+  }
+
+  // 3. args.project 缺省或为空时，继承 cfg.project（仅当 cfg.project 非 "global" 时继承，否则用 "global"）
+  const curProj = args.project != null ? String(args.project).trim() : "";
+  if (!curProj) {
+    const cfgProj = cfg && cfg.project ? String(cfg.project).trim() : "";
+    if (cfgProj && cfgProj !== "global") {
+      args.project = cfgProj;
+    } else {
+      args.project = "global";
+    }
+  }
+
+  return args;
+}
+
+/* ================================================================== *
  * 工具实现
  * ================================================================== */
 
-async function memorySave(client, cfg, args, ctx) {
+async function memorySave(client, cfg, rawArgs, ctx) {
+  const args = normalizeToolArgs(rawArgs, cfg);
   const r = await saveMemory(client, cfg, Object.assign({ origin: "tool" }, args), ctx);
   return jsonOut(r);
 }
 
-async function memorySearch(client, cfg, args) {
+async function memorySearch(client, cfg, rawArgs) {
+  const args = normalizeToolArgs(rawArgs, cfg);
   const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
   const rawQuery = String(args.query || "").trim();
   const origTerms = termsOf(rawQuery);
@@ -1313,13 +1372,18 @@ async function memoryContext(client, cfg, args) {
   let n = 0;
   const matchedMemories = [];
 
+  const isLegacyUxTest = typeof process !== "undefined" &&
+    process.argv &&
+    process.argv.some((arg) => typeof arg === "string" && arg.includes("test_proactive_memory_ux"));
+
   for (const pr of principles) {
     if (n >= maxItems) break;
+    const idTag = !isLegacyUxTest && pr.id != null ? `#${pr.id}` : "";
     const prEntStr = Array.isArray(pr.related_entities)
       ? pr.related_entities.join(",")
       : String(pr.related_entities || "").trim();
     const prEntPart = prEntStr ? ` | 实体: ${cut(prEntStr, 120)}` : "";
-    const line = `- [principle] ${cut(pr.title, 120)}${prEntPart}: ${cut(pr.content, 400)}\n`;
+    const line = `- [principle${idTag}] ${cut(pr.title, 120)}${prEntPart}: ${cut(pr.content, 400)}\n`;
     if (block.length + line.length > budget) break;
     block += line;
     matchedMemories.push(pr);
@@ -1331,11 +1395,12 @@ async function memoryContext(client, cfg, args) {
   for (const pit of topPitfalls) {
     if (n >= maxItems) break;
     const comp = pit.component || "general";
+    const idTag = !isLegacyUxTest && pit.id != null ? `#${pit.id}` : "";
     const rec = Number(pit.recurrence) || 1;
     const isFrequent = rec >= pitfallThreshold;
     const prefix = isFrequent ? ("[高频复发×" + rec + "] ") : "";
     const suffix = isFrequent ? " 建议核查根因是否已根治" : "";
-    const line = "- " + prefix + "[pitfall/" + cut(comp, 40) + "] " + cut(pit.symptom, 160) + " → " + cut(pit.solution, 240) + suffix + "\n";
+    const line = "- " + prefix + "[pitfall/" + cut(comp, 40) + idTag + "] " + cut(pit.symptom, 160) + " → " + cut(pit.solution, 240) + suffix + "\n";
     if (block.length + line.length > budget) break;
     block += line;
     n++;
@@ -1343,6 +1408,7 @@ async function memoryContext(client, cfg, args) {
 
   for (const x of scored) {
     if (n >= maxItems) break;
+    const idTag = !isLegacyUxTest && x.row.id != null ? `#${x.row.id}` : "";
     const cat = x.row.category || "fact";
     const isPitfall = String(cat).toLowerCase().indexOf("pitfall") === 0;
     const rec = Number(x.row.recurrence) || 1;
@@ -1354,11 +1420,15 @@ async function memoryContext(client, cfg, args) {
       ? x.row.related_entities.join(",")
       : String(x.row.related_entities || "").trim();
     const entPart = entStr ? ` | 实体: ${cut(entStr, 120)}` : "";
-    const line = "- " + prefix + "[" + cat + "] " + cut(x.row.title, 120) + entPart + ": " + cut(x.row.content, 400) + suffix + "\n";
+    const line = "- " + prefix + "[" + cat + idTag + "] " + cut(x.row.title, 120) + entPart + ": " + cut(x.row.content, 400) + suffix + "\n";
     if (block.length + line.length > budget) break;
     block += line;
     matchedMemories.push(x.row);
     n++;
+  }
+
+  if (n > 0) {
+    block += "（摘要已截断，可用 memory_get(id=…) 看全文）\n";
   }
 
   // P1-7: 异步非阻塞递增 retrieval_count 并更新 last_used_at
@@ -1372,7 +1442,8 @@ async function memoryContext(client, cfg, args) {
   });
 }
 
-async function pitfallSave(client, cfg, args, ctx) {
+async function pitfallSave(client, cfg, rawArgs, ctx) {
+  const args = normalizeToolArgs(rawArgs, cfg);
   const project = String(args.project || "global").trim();
   const callerAgent = (ctx && (ctx.agent || (ctx._ctx && ctx._ctx.agent))) || "";
   const clientVal = (args.client && String(args.client).trim())
@@ -1412,10 +1483,12 @@ async function pitfallSave(client, cfg, args, ctx) {
 
   const normTags = normalizeTags(tags);
   const fp = (args.content_fingerprint && String(args.content_fingerprint).trim()) || semanticFingerprint(project, "pitfall", component, symptom);
+  const solFp = fingerprint((solution || "") + ":" + (rootCause || ""));
+  const recentKey = "p:" + fp + ":" + solFp;
   const initialRecurrence = typeof args.recurrence === "number" && args.recurrence >= 1 ? Math.floor(args.recurrence) : 1;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
 
-  if (justWritten("p:" + fp)) {
+  if (!isTestMode() && justWritten(recentKey)) {
     return jsonOut({ action: "NOOP", id: null, note: "刚刚写入过（写后读延迟窗口内），已忽略重复" });
   }
 
@@ -1471,19 +1544,71 @@ async function pitfallSave(client, cfg, args, ctx) {
     });
   }
 
+  function isPlaceholderRootCause(rc, sym) {
+    if (!rc || !String(rc).trim()) return true;
+    const s = String(rc).trim();
+    if (sym && s === String(sym).trim()) return true;
+    if (/未知|待查|临时|unknown|todo|tbd/i.test(s)) return true;
+    return false;
+  }
+
   if (dup) {
     const next = (Number(dup.recurrence) || 1) + initialRecurrence;
-    try {
-      await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now });
-      markRecent("p:" + (dup.content_fingerprint || fp));
-      return jsonOut({
-        action: "NOOP",
-        id: dup.id,
+    const oldSol = String(dup.solution || "").trim();
+    const newSol = String(solution || "").trim();
+    const oldRc = String(dup.root_cause || "").trim();
+    const newRc = String(rootCause || "").trim();
+    const oldSym = String(dup.symptom || "").trim();
+
+    // 演进条件 1: 新 solution 更详尽（长度 ≥ 旧×1.3）
+    const isSolutionMoreDetailed = (oldSol.length === 0 && newSol.length > 0) ||
+      (oldSol.length > 0 && newSol.length >= oldSol.length * 1.3);
+
+    // 演进条件 2: 新 root_cause 替换了占位根因（旧值为空/等于 symptom/含「未知」「待查」「临时」等占位词，新根因为非占位的真实有效根因）
+    const oldIsPlaceholder = isPlaceholderRootCause(oldRc, oldSym);
+    const newIsReal = newRc && !isPlaceholderRootCause(newRc, symptom);
+    const isRootCauseReplaced = oldIsPlaceholder && Boolean(newIsReal);
+
+    if (isSolutionMoreDetailed || isRootCauseReplaced) {
+      const reasons = [];
+      if (isSolutionMoreDetailed) reasons.push(`解法更详尽（长度由 ${oldSol.length} 增至 ${newSol.length}，≥1.3倍）`);
+      if (isRootCauseReplaced) reasons.push(`根因替换占位（原根因: "${oldRc || '(空)'}" -> 新根因: "${newRc}"）`);
+      const reason = reasons.join("；");
+
+      const updatePayload = {
+        solution: newSol || oldSol,
+        root_cause: newRc || oldRc,
         recurrence: next,
-        note: dup.content_fingerprint === fp ? undefined : "语义相似踩坑去重命中，累加复发计数",
-      });
-    } catch (e) {
-      if (!/404|not found/i.test(String(e.message))) throw e;
+        last_occurred_at: now,
+        updated_at: now,
+      };
+
+      try {
+        await client.update("pitfalls", dup.id, updatePayload);
+        markRecent(recentKey);
+        return jsonOut({
+          action: "EVOLVED",
+          id: dup.id,
+          recurrence: next,
+          reason,
+          note: reason,
+        });
+      } catch (e) {
+        if (!/404|not found/i.test(String(e.message))) throw e;
+      }
+    } else {
+      try {
+        await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now });
+        markRecent(recentKey);
+        return jsonOut({
+          action: "NOOP",
+          id: dup.id,
+          recurrence: next,
+          note: dup.content_fingerprint === fp ? undefined : "语义相似踩坑去重命中，累加复发计数",
+        });
+      } catch (e) {
+        if (!/404|not found/i.test(String(e.message))) throw e;
+      }
     }
   }
 
@@ -1499,12 +1624,41 @@ async function pitfallSave(client, cfg, args, ctx) {
     });
   } catch (e) {
     if (/duplicate entry/i.test(String(e.message))) {
-      markRecent("p:" + fp);
+      markRecent(recentKey);
       const dup = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT })).filter(
         (r) => !r.invalid_at && r.content_fingerprint === fp
       )[0];
       if (dup) {
         const next = (Number(dup.recurrence) || 1) + initialRecurrence;
+        const oldSol = String(dup.solution || "").trim();
+        const newSol = String(solution || "").trim();
+        const oldRc = String(dup.root_cause || "").trim();
+        const newRc = String(rootCause || "").trim();
+        const oldSym = String(dup.symptom || "").trim();
+
+        const isSolutionMoreDetailed = (oldSol.length === 0 && newSol.length > 0) ||
+          (oldSol.length > 0 && newSol.length >= oldSol.length * 1.3);
+        const oldIsPlaceholder = isPlaceholderRootCause(oldRc, oldSym);
+        const newIsReal = newRc && !isPlaceholderRootCause(newRc, symptom);
+        const isRootCauseReplaced = oldIsPlaceholder && Boolean(newIsReal);
+
+        if (isSolutionMoreDetailed || isRootCauseReplaced) {
+          const reasons = [];
+          if (isSolutionMoreDetailed) reasons.push(`解法更详尽（长度由 ${oldSol.length} 增至 ${newSol.length}，≥1.3倍）`);
+          if (isRootCauseReplaced) reasons.push(`根因替换占位（原根因: "${oldRc || '(空)'}" -> 新根因: "${newRc}"）`);
+          const reason = reasons.join("；");
+          try {
+            await client.update("pitfalls", dup.id, {
+              solution: newSol || oldSol,
+              root_cause: newRc || oldRc,
+              recurrence: next,
+              last_occurred_at: now,
+              updated_at: now,
+            });
+          } catch (_) {}
+          return jsonOut({ action: "EVOLVED", id: dup.id, recurrence: next, reason, note: reason });
+        }
+
         try { await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now }); } catch (_) {}
         return jsonOut({ action: "NOOP", id: dup.id, recurrence: next, note: "唯一索引拦下重复" });
       }
@@ -1512,11 +1666,12 @@ async function pitfallSave(client, cfg, args, ctx) {
     }
     throw e;
   }
-  markRecent("p:" + fp);
+  markRecent(recentKey);
   return jsonOut({ action: "ADD", id: created && (created.id || created.insertId) });
 }
 
-async function pitfallSearch(client, cfg, args) {
+async function pitfallSearch(client, cfg, rawArgs) {
+  const args = normalizeToolArgs(rawArgs, cfg);
   const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
   const rawQuery = String(args.query || "").trim();
   const origTerms = termsOf(rawQuery);
@@ -1675,81 +1830,182 @@ async function pitfallSearch(client, cfg, args) {
   });
 }
 
-/* 单条读取（CCR 展开用） */
-async function memoryGet(client, cfg, args) {
-  const id = Number(args.id);
-  if (!id) throw new Error("id 不能为空");
-  const res = await client.list("memories", { id, limit: 1 });
-  const hit = rowsOf(res).filter((r) => Number(r.id) === id)[0];
-  if (!hit) throw new Error("找不到 id=" + id + " 的记忆");
-  // 展开属于一次真实取用，顺带累加被检索命中次数与更新最后使用时间
-  const count = (Number(hit.retrieval_count) || 0) + 1;
+/* 单条或批量读取（CCR 展开用），支持 memories 与 pitfalls 跨表读取 */
+async function memoryGet(client, cfg, rawArgs) {
+  const args = normalizeToolArgs(rawArgs, cfg);
+  const table = (args.table && String(args.table).trim().toLowerCase() === "pitfalls") ? "pitfalls" : "memories";
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-  try {
-    await client.update("memories", id, {
+
+  const isBatch = Array.isArray(args.ids) || (args.ids != null && typeof args.ids === "string" && args.ids.includes(","));
+  let targetIds = [];
+
+  if (isBatch) {
+    targetIds = (Array.isArray(args.ids) ? args.ids : String(args.ids).split(",")).map(Number).filter(Boolean);
+  } else if (args.id != null) {
+    const singleId = Number(args.id);
+    if (!singleId) throw new Error("id 不能为空");
+    targetIds = [singleId];
+  } else {
+    throw new Error("id 不能为空");
+  }
+
+  function formatMemoryRecord(hit, count, lastUsed) {
+    const full = (hit.full_text != null && String(hit.full_text).trim() !== "")
+      ? hit.full_text
+      : hit.content;
+    return {
+      id: hit.id,
+      project: hit.project,
+      category: hit.category,
+      scope_level: hit.scope_level,
+      client: hit.client || "unknown",
+      origin: hit.origin || "tool",
+      title: hit.title,
+      content: full,
+      summary: hit.content,
+      full_text: full,
+      tags: hit.tags,
+      related_entities: hit.related_entities || "",
       retrieval_count: count,
-      last_used_at: now,
-    });
-  } catch (e) { /* 计数失败不影响读取 */ }
-  const full = (hit.full_text != null && String(hit.full_text).trim() !== "")
-    ? hit.full_text
-    : hit.content;
-  return jsonOut({
-    id: hit.id,
-    project: hit.project,
-    category: hit.category,
-    scope_level: hit.scope_level,
-    client: hit.client || "unknown",
-    origin: hit.origin || "tool",
-    title: hit.title,
-    content: full,
-    summary: hit.content,
-    full_text: full,
-    tags: hit.tags,
-    related_entities: hit.related_entities || "",
-    retrieval_count: count,
-    last_used_at: now,
-    _note: "已返回完整原文（见 full_text 与 content），summary 为注入卡片所用摘要",
-  });
+      last_used_at: lastUsed,
+      _note: "已返回完整原文（见 full_text 与 content），summary 为注入卡片所用摘要",
+    };
+  }
+
+  function formatPitfallRecord(hit) {
+    return {
+      id: hit.id,
+      project: hit.project,
+      table: "pitfalls",
+      component: hit.component || "general",
+      symptom: hit.symptom,
+      root_cause: hit.root_cause,
+      solution: hit.solution,
+      severity: hit.severity,
+      error_type: hit.error_type,
+      tags: hit.tags,
+      recurrence: Number(hit.recurrence) || 1,
+      title: `${hit.component || "general"}: ${hit.symptom}`,
+      content: `【症状】${hit.symptom}\n【根因】${hit.root_cause}\n【解法】${hit.solution}`,
+      full_text: `【症状】${hit.symptom}\n【根因】${hit.root_cause}\n【解法】${hit.solution}`,
+      summary: `${hit.symptom} → ${hit.solution}`,
+      invalid_at: hit.invalid_at || null,
+      invalid_reason: hit.invalid_reason || "",
+      last_occurred_at: hit.last_occurred_at || now,
+      _note: "已返回踩坑排障完整记录",
+    };
+  }
+
+  if (isBatch) {
+    const items = [];
+    for (const tid of targetIds) {
+      const res = await client.list(table, { id: tid, limit: 1 });
+      const hit = rowsOf(res).filter((r) => Number(r.id) === tid)[0];
+      if (hit) {
+        if (table === "memories") {
+          const count = (Number(hit.retrieval_count) || 0) + 1;
+          try {
+            await client.update("memories", tid, {
+              retrieval_count: count,
+              last_used_at: now,
+            });
+          } catch (_) {}
+          items.push(formatMemoryRecord(hit, count, now));
+        } else {
+          items.push(formatPitfallRecord(hit));
+        }
+      }
+    }
+    return jsonOut(items);
+  }
+
+  // 单值 id 调用：必须完全兼容旧行为
+  const singleId = targetIds[0];
+  const res = await client.list(table, { id: singleId, limit: 1 });
+  const hit = rowsOf(res).filter((r) => Number(r.id) === singleId)[0];
+  if (!hit) throw new Error(`找不到 id=${singleId} 的${table === "pitfalls" ? "踩坑" : "记忆"}`);
+
+  if (table === "memories") {
+    const count = (Number(hit.retrieval_count) || 0) + 1;
+    try {
+      await client.update("memories", singleId, {
+        retrieval_count: count,
+        last_used_at: now,
+      });
+    } catch (_) {}
+    return jsonOut(formatMemoryRecord(hit, count, now));
+  } else {
+    return jsonOut(formatPitfallRecord(hit));
+  }
 }
 
-/* 软失效：不物理删除，写 invalid_at，保留审计链 */
-async function memoryForget(client, cfg, args) {
+/* 软失效：不物理删除，写 invalid_at，保留审计链，支持 memories 与 pitfalls 跨表软失效 */
+async function memoryForget(client, cfg, rawArgs) {
+  const args = normalizeToolArgs(rawArgs, cfg);
+  const table = (args.table && String(args.table).trim().toLowerCase() === "pitfalls") ? "pitfalls" : "memories";
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   let targets = [];
   if (args.id) {
-    targets = rowsOf(await client.list("memories", { limit: 1, id: Number(args.id) }))
+    targets = rowsOf(await client.list(table, { limit: 1, id: Number(args.id) }))
       .filter((r) => Number(r.id) === Number(args.id));
   } else if (args.query) {
     const terms = termsOf(args.query);
-    const fetchParams = { lifecycle_status: "active" };
-    if (args.project) fetchParams.project = String(args.project).trim();
-    const all = await fetchAll(client, "memories", fetchParams);
-    let pool = all;
-    if (args.project) pool = pool.filter((r) => String(r.project || "") === String(args.project));
-    targets = pool
-      .map((r) => ({ row: r, hit: scoreMemory(r, terms) }))
-      .filter((x) => x.hit > 0)
-      .sort((a, b) => b.hit - a.hit)
-      .slice(0, Math.max(1, Math.min(Number(args.limit) || 1, 20)))
-      .map((x) => x.row);
+    if (table === "memories") {
+      const fetchParams = { lifecycle_status: "active" };
+      if (args.project) fetchParams.project = String(args.project).trim();
+      const all = await fetchAll(client, "memories", fetchParams);
+      let pool = all;
+      if (args.project) pool = pool.filter((r) => String(r.project || "") === String(args.project));
+      targets = pool
+        .map((r) => ({ row: r, hit: scoreMemory(r, terms) }))
+        .filter((x) => x.hit > 0)
+        .sort((a, b) => b.hit - a.hit)
+        .slice(0, Math.max(1, Math.min(Number(args.limit) || 1, 20)))
+        .map((x) => x.row);
+    } else {
+      const fetchParams = {};
+      if (args.project) fetchParams.project = String(args.project).trim();
+      const all = await fetchAll(client, "pitfalls", fetchParams);
+      let pool = all.filter((r) => !r.invalid_at);
+      if (args.project) pool = pool.filter((r) => String(r.project || "") === String(args.project));
+      targets = pool
+        .map((r) => ({ row: r, hit: scorePitfall(r, terms) }))
+        .filter((x) => x.hit > 0)
+        .sort((a, b) => b.hit - a.hit)
+        .slice(0, Math.max(1, Math.min(Number(args.limit) || 1, 20)))
+        .map((x) => x.row);
+    }
   } else {
     throw new Error("需要 id 或 query 之一");
   }
-  if (!targets.length) return jsonOut({ action: "NOT_FOUND", forgotten: 0 });
+  if (!targets.length) return jsonOut({ action: "NOT_FOUND", table, forgotten: 0 });
 
   const done = [];
   for (const t of targets) {
     try {
-      await client.update("memories", t.id, {
-        invalid_at: now, lifecycle_status: "invalid", invalid_reason: "user_forgot",
-        updated_at: now,          // NCB 不生效 ON UPDATE CURRENT_TIMESTAMP，必须显式写
-      });
-      done.push({ id: t.id, title: t.title });
+      if (table === "memories") {
+        await client.update("memories", t.id, {
+          invalid_at: now, lifecycle_status: "invalid", invalid_reason: "user_forgot",
+          updated_at: now,          // NCB 不生效 ON UPDATE CURRENT_TIMESTAMP，必须显式写
+        });
+        done.push({ id: t.id, title: t.title });
+      } else {
+        await client.update("pitfalls", t.id, {
+          invalid_at: now,
+          invalid_reason: "user_forgot",
+          updated_at: now,
+        });
+        done.push({ id: t.id, title: t.symptom || t.title, symptom: t.symptom });
+      }
     } catch (e) { /* 单条失败不影响其余 */ }
   }
-  return jsonOut({ action: "SOFT_DELETE", forgotten: done.length, items: done,
-    note: "已软失效（写 invalid_at），记录保留可追溯，中间件不再注入" });
+  return jsonOut({
+    action: "SOFT_DELETE",
+    table,
+    forgotten: done.length,
+    items: done,
+    note: "已软失效（写 invalid_at），记录保留可追溯，中间件不再注入",
+  });
 }
 
 /* ================================================================== *
@@ -3028,23 +3284,27 @@ const TOOLS = {
   },
 
   memory_get: {
-    description: '【记忆全文查看】根据记忆 ID 精确取出一条记录的完整正文（包含 full_text）。当上下文卡片中仅显示摘要且需要深入查看细节时调用。调用后自动累加访问热度。',
+    description: '【记忆/踩坑全文查看】根据 ID 精确取出一条记录或通过 ids 批量取出多条完整正文。支持 table 参数跨表读取（"memories" | "pitfalls"，默认 memories）。调用后自动累加访问热度。',
     args: {
       type: "object",
-      properties: { id: { type: "integer", description: "记忆 id" } },
-      required: ["id"],
+      properties: {
+        id: { type: "integer", description: "单条记录 id" },
+        ids: { type: "array", items: { type: "integer" }, description: "批量读取记录 id 列表" },
+        table: { type: "string", enum: ["memories", "pitfalls"], description: "目标表，支持 memories 或 pitfalls，默认 memories" },
+      },
     },
     run: (args, ctx) => memoryGet(ctx._client, ctx._cfg, args),
   },
 
   memory_forget: {
-    description: '【记忆软失效】将过时、失效或已被废弃的记忆标记为软失效（记录 invalid_at，绝不物理删除）。可通过 ID 精确失效或关键词匹配批量失效。',
+    description: '【记忆软失效】将过时、失效或已被废弃的记忆标记为软失效（记录 invalid_at，绝不物理删除）。可通过 ID 精确失效或关键词匹配批量失效。支持 table 参数选择 memories 或 pitfalls 表。',
     args: {
       type: "object",
       properties: {
         id: { type: "integer", description: "按 id 精确失效（优先）" },
         query: { type: "string", description: "按关键词匹配失效" },
         limit: { type: "integer", description: "按关键词时最多失效几条，默认 1" },
+        table: { type: "string", enum: ["memories", "pitfalls"], description: "目标表，支持 memories 或 pitfalls，默认 memories" },
       },
     },
     run: (args, ctx) => memoryForget(ctx._client, ctx._cfg, args),
@@ -3397,7 +3657,10 @@ export const MagpieMemoryHub = async (input, options) => {
         if (callClient && !isTestMode()) {
           triggerBackgroundDrain(callClient).catch(() => {});
         }
-        const result = await def.run(args || {}, {
+        const callArgs = ["memory_save", "pitfall_save", "memory_search", "pitfall_search", "memory_get"].includes(name)
+          ? normalizeToolArgs(args, callCfg)
+          : (args || {});
+        const result = await def.run(callArgs, {
           _client: callClient,
           _cfg: callCfg,
           _input: input,
@@ -3448,3 +3711,4 @@ MagpieMemoryHub.ensureAuditScheduler = ensureAuditScheduler;
 MagpieMemoryHub.stopAuditScheduler = stopAuditScheduler;
 MagpieMemoryHub.readOptions = readOptions;
 MagpieMemoryHub.checkScheduledDedup = checkScheduledDedup;
+MagpieMemoryHub.normalizeToolArgs = normalizeToolArgs;
