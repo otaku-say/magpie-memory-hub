@@ -36,6 +36,8 @@ import {
   overlapCoefficient,
   jaccardSimilarity,
   hasConflictingNumbers,
+  termsOf,
+  CJK_STOP_BIGRAMS,
 } from "./semantic_dedup.js";
 
 const NCB_BASE = "https://api.nocodebackend.com";
@@ -360,49 +362,24 @@ export async function fetchAll(client, table, params, maxPagesArg) {
 
 /* ---------------- 检索打分 ---------------- */
 
-export const CJK_STOP_BIGRAMS = new Set([
-  "怎么", "如何", "什么", "为什", "么办", "请问", "帮我", "一下", "这个", "那个"
-]);
+export { termsOf, CJK_STOP_BIGRAMS };
 
-export function termsOf(q) {
-  if (typeof q !== "string") {
-    if (typeof q === "number") q = String(q);
-    else return [];
-  }
-  const raw = q.toLowerCase().trim();
-  if (!raw) return [];
-  const parts = raw.split(/[\s,，、;；]+/).map((s) => s.trim()).filter((s) => s.length >= 2);
-  const terms = new Set(parts);
-  // 提取英文/数字专有标识（如 r2, redis, mysql, v6, api 等）
-  const words = raw.match(/[a-z0-9_-]{2,}/g) || [];
-  for (const w of words) terms.add(w);
-  // 对中文连续串提取 2-gram 并过滤 CJK_STOP_BIGRAMS
-  const cjkRuns = raw.match(/[一-鿿]+/g) || [];
-  for (const run of cjkRuns) {
-    for (let i = 0; i + 2 <= run.length; i++) {
-      const bg = run.slice(i, i + 2);
-      if (!CJK_STOP_BIGRAMS.has(bg)) {
-        terms.add(bg);
-      }
-    }
-  }
-  for (const stop of CJK_STOP_BIGRAMS) {
-    terms.delete(stop);
-  }
-  return [...terms];
-}
-
-/** 记忆：标题(5) 标签(3) 正文(1) */
+/** 记忆：标题(5) 标签(3) 实体(3) 正文(1) —— EVO-3 修复实体检索失明与独立打分 */
 function scoreMemory(row, terms) {
   if (!terms.length) return 1;
   const title = String(row.title || "").toLowerCase();
   const tags = String(row.tags || "").toLowerCase();
-  const body = String(row.content || row.related_entities || "").toLowerCase();
+  const entities = (Array.isArray(row.related_entities)
+    ? row.related_entities.join(",")
+    : String(row.related_entities || "")
+  ).toLowerCase();
+  const content = String(row.content || "").toLowerCase();
   let s = 0;
   for (const t of terms) {
     if (title.includes(t)) s += 5;
     if (tags.includes(t)) s += 3;
-    if (body.includes(t)) s += 1;
+    if (entities.includes(t)) s += 3;
+    if (content.includes(t)) s += 1;
   }
   return s;
 }
@@ -1338,7 +1315,11 @@ async function memoryContext(client, cfg, args) {
 
   for (const pr of principles) {
     if (n >= maxItems) break;
-    const line = `- [principle] ${cut(pr.title, 120)}: ${cut(pr.content, 400)}\n`;
+    const prEntStr = Array.isArray(pr.related_entities)
+      ? pr.related_entities.join(",")
+      : String(pr.related_entities || "").trim();
+    const prEntPart = prEntStr ? ` | 实体: ${cut(prEntStr, 120)}` : "";
+    const line = `- [principle] ${cut(pr.title, 120)}${prEntPart}: ${cut(pr.content, 400)}\n`;
     if (block.length + line.length > budget) break;
     block += line;
     matchedMemories.push(pr);
@@ -1368,7 +1349,12 @@ async function memoryContext(client, cfg, args) {
     const isFrequent = isPitfall && rec >= pitfallThreshold;
     const prefix = isFrequent ? ("[高频复发×" + rec + "] ") : "";
     const suffix = isFrequent ? " 建议核查根因是否已根治" : "";
-    const line = "- " + prefix + "[" + cat + "] " + cut(x.row.title, 120) + ": " + cut(x.row.content, 400) + suffix + "\n";
+    // EVO-3：实体独立展示，便于 Agent 判断记录归属领域
+    const entStr = Array.isArray(x.row.related_entities)
+      ? x.row.related_entities.join(",")
+      : String(x.row.related_entities || "").trim();
+    const entPart = entStr ? ` | 实体: ${cut(entStr, 120)}` : "";
+    const line = "- " + prefix + "[" + cat + "] " + cut(x.row.title, 120) + entPart + ": " + cut(x.row.content, 400) + suffix + "\n";
     if (block.length + line.length > budget) break;
     block += line;
     matchedMemories.push(x.row);
