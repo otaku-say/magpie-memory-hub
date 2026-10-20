@@ -485,13 +485,6 @@ async function saveMemory(client, cfg, m, ctx) {
   let confidence = rawConf <= 1 ? Math.round(rawConf * 100) : Math.round(rawConf);
   confidence = Math.max(0, Math.min(100, confidence));
 
-  /* 来源可追溯性（空值语义说明）：
-   * source_session 与 source_turn 为 NULL 是完全合法且符合设计的正常行为：
-   * 1. 外部或 Agent 直接调用 MCP 工具未传 session/turn 上下文；
-   * 2. 客户端调用 Magpie 时未携带会话标识头（如 curl 或单次脚本）；
-   * 3. 离线合成、测试用例或跨会话独立归档。
-   * 严禁无会话信息时伪造随机 UUID 或虚假轮次，拿不到时必须为 NULL。
-   */
   const callerSession = (ctx && (ctx.session || (ctx._ctx && ctx._ctx.session))) || "";
   const callerTurn = (ctx && (typeof ctx.turn === "number" ? ctx.turn : (ctx._ctx && typeof ctx._ctx.turn === "number" ? ctx._ctx.turn : null)));
   const rawSession = (m.source_session && String(m.source_session).trim())
@@ -502,8 +495,6 @@ async function saveMemory(client, cfg, m, ctx) {
   const sourceTurn = (typeof parsedTurn === "number" && !isNaN(parsedTurn) && parsedTurn >= 1)
     ? Math.floor(parsedTurn)
     : (callerTurn && callerTurn >= 1 ? Math.floor(callerTurn) : null);
-
-
 
   const initialRecurrence = typeof m.recurrence === "number" && m.recurrence >= 1 ? Math.floor(m.recurrence) : 1;
   const fp = (m.content_fingerprint && String(m.content_fingerprint).trim()) || semanticFingerprint(project, category, title, content, tags);
@@ -582,7 +573,8 @@ async function saveMemory(client, cfg, m, ctx) {
     const hasSignificantGrowth = newContentStr.length >= (oldContentStr.length * 1.25);
     const isExplicitSupersede = m.supersede === true || m.supersede === "true";
 
-    const shouldEnrich = isSameTitle && noNumberConflict && (hasSignificantGrowth || isExplicitSupersede);
+    // BUG-3: 命中 dup 时，即便标题不一致（isSameTitle 为 false），只要显式传 supersede: true，也必须进入 ENRICHED 融合路径
+    const shouldEnrich = noNumberConflict && (isExplicitSupersede || (isSameTitle && hasSignificantGrowth));
 
     // EVO-4: 高频经验自动升维结晶（preference / decision 且 recurrence 达到阈值且 confidence_score ≥ 80）
     const crystallizationThreshold = Number(m.crystallization_threshold ?? cfg?.crystallization_threshold ?? 5) || 5;
@@ -608,9 +600,11 @@ async function saveMemory(client, cfg, m, ctx) {
       const mergedEntities = Array.from(new Set([...existingEntities, ...newEntities])).join(", ");
 
       const nextRevision = (Number(dup.revision) || 1) + 1;
-      const newFp = semanticFingerprint(project, targetCategory, dup.title, mergedContent, mergedTags);
+      const targetTitle = (isExplicitSupersede && title) ? title : dup.title;
+      const newFp = semanticFingerprint(project, targetCategory, targetTitle, mergedContent, mergedTags);
 
       const updatePayload = {
+        title: targetTitle,
         content: mergedContent,
         full_text: mergedFullText,
         tags: mergedTags || dup.tags,
@@ -644,14 +638,24 @@ async function saveMemory(client, cfg, m, ctx) {
         if (!/404|not found/i.test(String(e.message))) throw e;
       }
     } else {
-      // 维持原 NOOP 行为，仅累加复发计数与时间戳，若满足升维则同步结晶
+      // BUG-3: NOOP 分支除了 recurrence/updated_at，还要把本次传入的 tags 与 related_entities 取并集回写
+      const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+      const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+      const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
+
+      const existingEntities = String(dup.related_entities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+      const incomingEntities = String(relatedEntities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+      const mergedEntities = Array.from(new Set([...existingEntities, ...incomingEntities])).join(", ");
+
       const updatePayload = {
         recurrence: next,
+        tags: mergedTags || dup.tags,
+        related_entities: mergedEntities || dup.related_entities,
         updated_at: now,
       };
       if (isCrystallized) {
         updatePayload.category = "principle";
-        const newFp = semanticFingerprint(project, "principle", dup.title, dup.content, dup.tags);
+        const newFp = semanticFingerprint(project, "principle", dup.title, dup.content, mergedTags || dup.tags);
         if (newFp) updatePayload.content_fingerprint = newFp;
       }
       try {
@@ -690,6 +694,10 @@ async function saveMemory(client, cfg, m, ctx) {
     const newTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
     const mergedTags = Array.from(new Set([...existingTags, ...newTags])).join(", ");
 
+    const existingEntities = String(crossDup.related_entities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+    const newEntities = String(relatedEntities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+    const mergedEntities = Array.from(new Set([...existingEntities, ...newEntities])).join(", ");
+
     // 【P1-3】principle 准则保护：若新记录是 principle 且旧记录不是 principle，
     // 升级旧记录为 principle 并保留准则内容与指纹，绝不允许把 principle 降级为普通分类
     const isNewPrinciple = category === "principle" && crossDup.category !== "principle";
@@ -708,6 +716,7 @@ async function saveMemory(client, cfg, m, ctx) {
     const updatePayload = {
       recurrence: next,
       tags: mergedTags || crossDup.tags,
+      related_entities: mergedEntities || crossDup.related_entities,
       updated_at: now,
     };
     if (isNewPrinciple) {
@@ -744,12 +753,21 @@ async function saveMemory(client, cfg, m, ctx) {
     }
   }
 
-  // 3) 同项目同分类同标题但内容不同 → 新版本，旧版进 supersede 版本链
+  // 3) 支持显式指定 supersede_id 与按标题版本链取代
+  const targetSupersedeId = (m.supersede_id != null && m.supersede_id !== "" && !isNaN(Number(m.supersede_id)))
+    ? Number(m.supersede_id)
+    : null;
+  const targetSupersedeRow = targetSupersedeId ? allActiveRows.find((r) => r.id === targetSupersedeId) : null;
+
   const superseded = categoryRows.filter(
     (r) =>
       r.lifecycle_status === "active" &&
       String(r.title || "").trim().toLowerCase() === title.toLowerCase()
   );
+
+  const baseRevision = superseded.reduce(function (mx, r) { return Math.max(mx, Number(r.revision) || 1); }, 0);
+  const explicitRevision = targetSupersedeRow ? (Number(targetSupersedeRow.revision) || 1) : 0;
+  const newRevision = Math.max(baseRevision, explicitRevision) + 1;
 
   const payload = {
     project,
@@ -771,7 +789,7 @@ async function saveMemory(client, cfg, m, ctx) {
      * NULL 是外键的合法值，语义也正是「未被任何行取代」。 */
     superseded_by_id: null,
     /* 修订版本号 = 被取代那批里最大的修订号 + 1。没有旧版时就是 1。 */
-    revision: superseded.reduce(function (mx, r) { return Math.max(mx, Number(r.revision) || 1); }, 0) + 1,
+    revision: newRevision,
     recurrence: initialRecurrence,
     retrieval_count: 0,
     invalid_at: null,
@@ -809,10 +827,23 @@ async function saveMemory(client, cfg, m, ctx) {
         const isCrystallized = isCrystallizable && (next >= crystallizationThreshold) && (effectiveConfidence >= 80);
         const targetCategory = isCrystallized ? "principle" : dupRow.category;
 
-        const updatePayload = { recurrence: next, updated_at: nowSql() };
+        const existingTags = String(dupRow.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+        const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+        const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
+
+        const existingEntities = String(dupRow.related_entities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+        const incomingEntities = String(relatedEntities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+        const mergedEntities = Array.from(new Set([...existingEntities, ...incomingEntities])).join(", ");
+
+        const updatePayload = {
+          recurrence: next,
+          tags: mergedTags || dupRow.tags,
+          related_entities: mergedEntities || dupRow.related_entities,
+          updated_at: nowSql(),
+        };
         if (isCrystallized) {
           updatePayload.category = "principle";
-          const newFp = semanticFingerprint(project, "principle", dupRow.title, dupRow.content, dupRow.tags);
+          const newFp = semanticFingerprint(project, "principle", dupRow.title, dupRow.content, mergedTags || dupRow.tags);
           if (newFp) updatePayload.content_fingerprint = newFp;
         }
         try {
@@ -828,16 +859,23 @@ async function saveMemory(client, cfg, m, ctx) {
   const newId = created && (created.id || created.insertId);
   markRecent("m:" + fp);
 
-  if (superseded.length && newId) {
+  // EVO-9a: 处理显式 supersede_id 与旧版 supersede 版本链
+  const allSupersedeIds = new Set();
+  if (targetSupersedeId) allSupersedeIds.add(targetSupersedeId);
+  for (const s of superseded) {
+    if (s && s.id) allSupersedeIds.add(s.id);
+  }
+
+  if (allSupersedeIds.size > 0 && newId) {
     let updatedCount = 0;
-    for (const oldRow of superseded) {
-      if (!oldRow || !oldRow.id) continue;
+    for (const sid of allSupersedeIds) {
       try {
-        await client.update("memories", oldRow.id, {
+        const invReason = (sid === targetSupersedeId) ? `superseded_by:${newId}` : "superseded";
+        await client.update("memories", sid, {
           lifecycle_status: "superseded",
           superseded_by_id: newId,
           invalid_at: nowSql(),
-          invalid_reason: "superseded",
+          invalid_reason: invReason,
           updated_at: nowSql(),
         });
         updatedCount++;
@@ -845,9 +883,74 @@ async function saveMemory(client, cfg, m, ctx) {
         if (!/404|not found/i.test(String(e.message))) throw e;
       }
     }
-    return { action: "UPDATE", id: newId, category, superseded_id: superseded[0].id, superseded_count: updatedCount || superseded.length, recurrence: initialRecurrence };
+    const returnSupersededId = targetSupersedeId || (superseded[0] && superseded[0].id);
+    return {
+      action: "UPDATE",
+      id: newId,
+      category,
+      superseded_id: returnSupersededId,
+      superseded_count: updatedCount || allSupersedeIds.size,
+      recurrence: initialRecurrence,
+      note: targetSupersedeId ? `已显式取代旧记录 id=${targetSupersedeId}` : undefined,
+    };
   }
-  return { action: "ADD", id: newId, category, recurrence: initialRecurrence };
+
+  // EVO-9a 冲突感知：saveMemory 返回 ADD 时扫描同主题但含冲突数字的旧记录
+  const normCurTitle = normalizeSemanticText(title);
+  const curTokens = tokenize(title);
+  const stripNums = (s) => String(s || "").replace(/\d+(?:\.\d+)*/g, "").trim();
+  const curTitleNoNums = normalizeSemanticText(stripNums(title));
+  const curTokensNoNums = tokenize(stripNums(title)).tokens;
+
+  const conflictCandidates = [];
+  for (const r of allActiveRows) {
+    if (!r || !r.id || r.id === newId) continue;
+    if (r.lifecycle_status !== "active" || r.invalid_at) continue;
+
+    const rTitleStr = String(r.title || "").trim();
+    const normRowTitle = normalizeSemanticText(rTitleStr);
+    const rowTokens = tokenize(rTitleStr);
+
+    // 1. 标题相似判定（同主题）
+    const exactOrInclude = Boolean(
+      (normCurTitle && normRowTitle && (normCurTitle === normRowTitle || normCurTitle.includes(normRowTitle) || normRowTitle.includes(normCurTitle))) ||
+      (rTitleStr.toLowerCase() === title.toLowerCase())
+    );
+    const tokenOverlap = overlapCoefficient(curTokens.tokens, rowTokens.tokens) >= 0.4 ||
+                         jaccardSimilarity(curTokens.tokens, rowTokens.tokens) >= 0.25;
+
+    // 针对标题含版本/端口数字的归一化比对（如 Node 18 配置 vs Node 20 配置）
+    const rowTitleNoNums = normalizeSemanticText(stripNums(rTitleStr));
+    const rowTokensNoNums = tokenize(stripNums(rTitleStr)).tokens;
+    const noNumsMatch = Boolean(
+      (curTitleNoNums && rowTitleNoNums && (curTitleNoNums === rowTitleNoNums || curTitleNoNums.includes(rowTitleNoNums) || rowTitleNoNums.includes(curTitleNoNums))) ||
+      (overlapCoefficient(curTokensNoNums, rowTokensNoNums) >= 0.4 || jaccardSimilarity(curTokensNoNums, rowTokensNoNums) >= 0.25)
+    );
+
+    const isTopicSimilar = exactOrInclude || tokenOverlap || noNumsMatch;
+    if (!isTopicSimilar) continue;
+
+    // 2. hasConflictingNumbers 判定（标题或正文存在数字冲突）
+    const hasNumConflict = hasConflictingNumbers(title, r.title) ||
+                           hasConflictingNumbers(content, r.content || r.full_text || "");
+
+    if (hasNumConflict) {
+      const summary = String(r.content || r.full_text || "").trim().slice(0, 100);
+      conflictCandidates.push({
+        id: r.id,
+        title: r.title,
+        content: summary,
+      });
+      if (conflictCandidates.length >= 3) break;
+    }
+  }
+
+  const addResult = { action: "ADD", id: newId, category, recurrence: initialRecurrence };
+  if (conflictCandidates.length > 0) {
+    addResult.conflict_candidates = conflictCandidates;
+    addResult.note = "可能存在配置冲突，建议用 supersede_id 取代或 memory_forget 淘汰";
+  }
+  return addResult;
 }
 
 /* ================================================================== *
@@ -1459,6 +1562,7 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
   const rawComponent = String(args.component || "").trim();
   const component = scrubSecrets(rawComponent || "general");
   const rawRootCause = String(args.root_cause || "").trim();
+  const hasExplicitRootCause = Boolean(args.root_cause != null && String(args.root_cause).trim() !== "");
   const rootCause = scrubSecrets(rawRootCause || symptom);
 
   const severity = SEVERITIES.includes(args.severity) ? args.severity : "medium";
@@ -1478,9 +1582,6 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
     ? Math.floor(parsedTurn)
     : (callerTurn && callerTurn >= 1 ? Math.floor(callerTurn) : null);
 
-
-
-  const normTags = normalizeTags(tags);
   const fp = (args.content_fingerprint && String(args.content_fingerprint).trim()) || semanticFingerprint(project, "pitfall", component, symptom);
   const solFp = fingerprint((solution || "") + ":" + (rootCause || ""));
   const recentKey = "p:" + fp + ":" + solFp;
@@ -1556,27 +1657,54 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
     const oldSol = String(dup.solution || "").trim();
     const newSol = String(solution || "").trim();
     const oldRc = String(dup.root_cause || "").trim();
-    const newRc = String(rootCause || "").trim();
     const oldSym = String(dup.symptom || "").trim();
 
-    // 演进条件 1: 新 solution 更详尽（长度 ≥ 旧×1.3）
-    const isSolutionMoreDetailed = (oldSol.length === 0 && newSol.length > 0) ||
-      (oldSol.length > 0 && newSol.length >= oldSol.length * 1.3);
+    // BUG-1 (2): 数字冲突守卫：新旧 solution 存在数字冲突时禁止演进覆盖，改为返回 NOOP 并在 note 说明数字冲突
+    const hasSolConflict = hasConflictingNumbers(oldSol, newSol);
+    if (hasSolConflict) {
+      try {
+        await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now });
+        markRecent(recentKey);
+        return jsonOut({
+          action: "NOOP",
+          id: dup.id,
+          recurrence: next,
+          note: "方案存在数字冲突，禁止演进覆盖，累加复发计数",
+        });
+      } catch (e) {
+        if (!/404|not found/i.test(String(e.message))) throw e;
+      }
+    }
 
-    // 演进条件 2: 新 root_cause 替换了占位根因（旧值为空/等于 symptom/含「未知」「待查」「临时」等占位词，新根因为非占位的真实有效根因）
+    // 演进条件 1: 新 solution 更详尽（长度 ≥ 旧×1.3 且无数字冲突）
+    const isSolutionMoreDetailed = !hasSolConflict && (
+      (oldSol.length === 0 && newSol.length > 0) ||
+      (oldSol.length > 0 && newSol.length >= oldSol.length * 1.3)
+    );
+
+    // BUG-1 (1): 仅当调用方显式传入 root_cause 时才用新值；未传则保留库中原值（绝不拿 symptom 顶替）
+    const explicitRc = hasExplicitRootCause ? scrubSecrets(rawRootCause) : "";
     const oldIsPlaceholder = isPlaceholderRootCause(oldRc, oldSym);
-    const newIsReal = newRc && !isPlaceholderRootCause(newRc, symptom);
+    const newIsReal = hasExplicitRootCause && explicitRc && !isPlaceholderRootCause(explicitRc, symptom);
     const isRootCauseReplaced = oldIsPlaceholder && Boolean(newIsReal);
+    const isRootCauseExplicitUpdated = hasExplicitRootCause && Boolean(explicitRc) && explicitRc !== oldRc && !oldIsPlaceholder;
 
-    if (isSolutionMoreDetailed || isRootCauseReplaced) {
+    if (isSolutionMoreDetailed || isRootCauseReplaced || isRootCauseExplicitUpdated) {
       const reasons = [];
       if (isSolutionMoreDetailed) reasons.push(`解法更详尽（长度由 ${oldSol.length} 增至 ${newSol.length}，≥1.3倍）`);
-      if (isRootCauseReplaced) reasons.push(`根因替换占位（原根因: "${oldRc || '(空)'}" -> 新根因: "${newRc}"）`);
+      if (isRootCauseReplaced) reasons.push(`根因替换占位（原根因: "${oldRc || '(空)'}" -> 新根因: "${explicitRc}"）`);
+      else if (isRootCauseExplicitUpdated) reasons.push(`根因更新（原根因: "${oldRc || '(空)'}" -> 新根因: "${explicitRc}"）`);
       const reason = reasons.join("；");
 
+      // BUG-1 (3): 演进时 tags 取并集
+      const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+      const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+      const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
+
       const updatePayload = {
-        solution: newSol || oldSol,
-        root_cause: newRc || oldRc,
+        solution: (isSolutionMoreDetailed && newSol) ? newSol : oldSol,
+        root_cause: (hasExplicitRootCause && explicitRc) ? explicitRc : oldRc,
+        tags: mergedTags || dup.tags,
         recurrence: next,
         last_occurred_at: now,
         updated_at: now,
@@ -1632,24 +1760,40 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
         const oldSol = String(dup.solution || "").trim();
         const newSol = String(solution || "").trim();
         const oldRc = String(dup.root_cause || "").trim();
-        const newRc = String(rootCause || "").trim();
         const oldSym = String(dup.symptom || "").trim();
 
-        const isSolutionMoreDetailed = (oldSol.length === 0 && newSol.length > 0) ||
-          (oldSol.length > 0 && newSol.length >= oldSol.length * 1.3);
-        const oldIsPlaceholder = isPlaceholderRootCause(oldRc, oldSym);
-        const newIsReal = newRc && !isPlaceholderRootCause(newRc, symptom);
-        const isRootCauseReplaced = oldIsPlaceholder && Boolean(newIsReal);
+        const hasSolConflict = hasConflictingNumbers(oldSol, newSol);
+        if (hasSolConflict) {
+          try { await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now }); } catch (_) {}
+          return jsonOut({ action: "NOOP", id: dup.id, recurrence: next, note: "方案存在数字冲突，禁止演进覆盖，累加复发计数" });
+        }
 
-        if (isSolutionMoreDetailed || isRootCauseReplaced) {
+        const isSolutionMoreDetailed = !hasSolConflict && (
+          (oldSol.length === 0 && newSol.length > 0) ||
+          (oldSol.length > 0 && newSol.length >= oldSol.length * 1.3)
+        );
+        const explicitRc = hasExplicitRootCause ? scrubSecrets(rawRootCause) : "";
+        const oldIsPlaceholder = isPlaceholderRootCause(oldRc, oldSym);
+        const newIsReal = hasExplicitRootCause && explicitRc && !isPlaceholderRootCause(explicitRc, symptom);
+        const isRootCauseReplaced = oldIsPlaceholder && Boolean(newIsReal);
+        const isRootCauseExplicitUpdated = hasExplicitRootCause && Boolean(explicitRc) && explicitRc !== oldRc && !oldIsPlaceholder;
+
+        if (isSolutionMoreDetailed || isRootCauseReplaced || isRootCauseExplicitUpdated) {
           const reasons = [];
           if (isSolutionMoreDetailed) reasons.push(`解法更详尽（长度由 ${oldSol.length} 增至 ${newSol.length}，≥1.3倍）`);
-          if (isRootCauseReplaced) reasons.push(`根因替换占位（原根因: "${oldRc || '(空)'}" -> 新根因: "${newRc}"）`);
+          if (isRootCauseReplaced) reasons.push(`根因替换占位（原根因: "${oldRc || '(空)'}" -> 新根因: "${explicitRc}"）`);
+          else if (isRootCauseExplicitUpdated) reasons.push(`根因更新（原根因: "${oldRc || '(空)'}" -> 新根因: "${explicitRc}"）`);
           const reason = reasons.join("；");
+
+          const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+          const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+          const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
+
           try {
             await client.update("pitfalls", dup.id, {
-              solution: newSol || oldSol,
-              root_cause: newRc || oldRc,
+              solution: (isSolutionMoreDetailed && newSol) ? newSol : oldSol,
+              root_cause: (hasExplicitRootCause && explicitRc) ? explicitRc : oldRc,
+              tags: mergedTags || dup.tags,
               recurrence: next,
               last_occurred_at: now,
               updated_at: now,
