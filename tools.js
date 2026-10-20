@@ -1991,14 +1991,17 @@ export async function memoryAudit(client, cfg, args, ctx) {
         const b = rows[j];
         if (batchDupIds.has(b.id)) continue;
         if (hasConflictingNumbers(a.title, b.title)) continue;
+        const contentA = a.content || a.full_text || "";
+        const contentB = b.content || b.full_text || "";
+        if (hasConflictingNumbers(contentA, contentB)) continue;
         const sameFp = a.content_fingerprint && b.content_fingerprint && a.content_fingerprint === b.content_fingerprint;
         const normTitleA = normalizeSemanticText(a.title);
         const normTitleB = normalizeSemanticText(b.title);
-        const sameTitle = normTitleA && normTitleB && normTitleA === normTitleB && !hasConflictingNumbers(a.title, b.title);
+        const sameTitle = normTitleA && normTitleB && normTitleA === normTitleB && !hasConflictingNumbers(a.title, b.title) && !hasConflictingNumbers(contentA, contentB);
         const similar = isSemanticallySimilar(a.title, a.content || a.full_text, b.title, b.content || b.full_text);
         const tagIntersect = hasTagsIntersection(a.tags, b.tags);
         const titleOverlap = Boolean(normTitleA && normTitleB && (normTitleA.includes(normTitleB) || normTitleB.includes(normTitleA)));
-        if (sameFp || sameTitle || similar || (tagIntersect && titleOverlap && !hasConflictingNumbers(a.title, b.title))) {
+        if (sameFp || sameTitle || similar || (tagIntersect && titleOverlap && !hasConflictingNumbers(a.title, b.title) && !hasConflictingNumbers(contentA, contentB))) {
           grp.push(b);
           batchDupIds.add(b.id);
         }
@@ -2022,17 +2025,20 @@ export async function memoryAudit(client, cfg, args, ctx) {
     if (auditModel && auditModel !== "off" && auditModel !== "none" && rows.length > 1) {
       const candidateItemMap = new Map();
       let candidateList = [];
-      if (groups.length > 0) {
-        for (const g of groups) {
-          candidateItemMap.set(g.primary.id, g.primary);
-          for (const d of g.duplicates) candidateItemMap.set(d.id, d);
-        }
-        candidateList = Array.from(candidateItemMap.values());
-      } else {
-        candidateList = rows;
-        for (const r of rows) candidateItemMap.set(r.id, r);
+      for (const g of groups) {
+        candidateItemMap.set(g.primary.id, g.primary);
+        for (const d of g.duplicates) candidateItemMap.set(d.id, d);
       }
-      const MODEL_CHUNK = Math.max(10, Math.min(Number(auditOptions.dedup_batch_size || auditOptions.batch_size || 40), 60));
+      // 【P1-2 a】未分组行也要按 chunk 送模型（预算仍受 maxModelBatches 约束）
+      for (const r of rows) {
+        if (!candidateItemMap.has(r.id)) {
+          candidateItemMap.set(r.id, r);
+        }
+      }
+      candidateList = Array.from(candidateItemMap.values());
+
+      // 【P1-3】MODEL_CHUNK 一律读 cfg.audit_chunk_size ?? 40，并把单次送模型的条数硬顶为 audit_chunk_size * maxModelBatches
+      const MODEL_CHUNK = Number(cfg.audit_chunk_size ?? auditOptions.audit_chunk_size ?? 40);
       const modelBudgetItems = maxModelBatches * MODEL_CHUNK;
       const forModel = candidateList.slice(0, modelBudgetItems);
 
@@ -2044,21 +2050,44 @@ export async function memoryAudit(client, cfg, args, ctx) {
             ? mr.memory_duplicates
             : (Array.isArray(mr.duplicate_groups) ? mr.duplicate_groups : []);
           if (mDups.length > 0) {
-            const modelReviewedIds = new Set(forModel.map((r) => r.id));
-            const remainingGroups = groups.filter((g) => {
-              const allInModel = modelReviewedIds.has(g.primary.id) && g.duplicates.every((d) => modelReviewedIds.has(d.id));
-              return !allInModel;
-            });
-            // 【P0-4】恢复三重过滤 dIds.includes(r.id) && r.id !== pId && !batchDupIds.has(r.id)
-            // 每消费一个 id 立即加入 batchDupIds，防止跨组重复消费与自删主记录
+            // 【P1-2 b】remainingGroups 只剔除「已被模型明确处理过的 id」，不要把整组无条件丢弃
+            const modelHandledIds = new Set();
+            for (const dg of mDups) {
+              const pId = Number(dg.primary_id);
+              const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
+              if (pId && dIds.length > 0) {
+                modelHandledIds.add(pId);
+                for (const dId of dIds) {
+                  if (dId !== pId) modelHandledIds.add(dId);
+                }
+              }
+            }
+
+            const remainingGroups = [];
+            for (const g of groups) {
+              if (modelHandledIds.has(g.primary.id)) {
+                const unhandledDups = g.duplicates.filter((d) => !modelHandledIds.has(d.id));
+                if (unhandledDups.length > 1) {
+                  remainingGroups.push({ primary: unhandledDups[0], duplicates: unhandledDups.slice(1) });
+                }
+              } else {
+                const unhandledDups = g.duplicates.filter((d) => !modelHandledIds.has(d.id));
+                if (unhandledDups.length > 0) {
+                  remainingGroups.push({ primary: g.primary, duplicates: unhandledDups });
+                }
+              }
+            }
+
+            // 【P1-2 c】每处理一组就把 pId 也加入 modelDupIds，杜绝跨组主从互指
             const modelDupIds = new Set();
             for (const rg of remainingGroups) {
+              modelDupIds.add(rg.primary.id);
               for (const d of rg.duplicates) modelDupIds.add(d.id);
             }
             for (const dg of mDups) {
               const pId = Number(dg.primary_id);
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
-              if (pId && dIds.length > 0) {
+              if (pId && dIds.length > 0 && !modelDupIds.has(pId)) {
                 let pItem = rows.find((r) => r.id === pId) || candidateItemMap.get(pId);
                 const dItems = (forModel.length ? forModel : rows).filter(
                   (r) => dIds.includes(r.id) && r.id !== pId && !modelDupIds.has(r.id)
@@ -2079,6 +2108,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
                   }
                 }
                 if (pItem && dItems.length > 0) {
+                  modelDupIds.add(pItem.id);
                   for (const d of dItems) modelDupIds.add(d.id);
                   remainingGroups.push({ primary: pItem, duplicates: dItems });
                 }
@@ -2184,14 +2214,17 @@ export async function memoryAudit(client, cfg, args, ctx) {
         const b = rows[j];
         if (batchDupIds.has(b.id)) continue;
         if (hasConflictingNumbers(a.symptom, b.symptom)) continue;
+        const textA = [a.symptom, a.solution, a.root_cause].filter(Boolean).join(" ");
+        const textB = [b.symptom, b.solution, b.root_cause].filter(Boolean).join(" ");
+        if (hasConflictingNumbers(textA, textB)) continue;
         const sameFp = a.content_fingerprint && b.content_fingerprint && a.content_fingerprint === b.content_fingerprint;
         const normSymA = normalizeSemanticText(a.symptom);
         const normSymB = normalizeSemanticText(b.symptom);
-        const sameSym = normSymA && normSymB && normSymA === normSymB && !hasConflictingNumbers(a.symptom, b.symptom);
+        const sameSym = normSymA && normSymB && normSymA === normSymB && !hasConflictingNumbers(a.symptom, b.symptom) && !hasConflictingNumbers(textA, textB);
         const similar = isSemanticallySimilar(a.symptom, a.solution || a.root_cause, b.symptom, b.solution || b.root_cause);
         const tagIntersect = hasTagsIntersection(a.tags, b.tags);
         const symOverlap = Boolean(normSymA && normSymB && (normSymA.includes(normSymB) || normSymB.includes(normSymA)));
-        if (sameFp || sameSym || similar || (tagIntersect && symOverlap && !hasConflictingNumbers(a.symptom, b.symptom))) {
+        if (sameFp || sameSym || similar || (tagIntersect && symOverlap && !hasConflictingNumbers(a.symptom, b.symptom) && !hasConflictingNumbers(textA, textB))) {
           grp.push(b);
           batchDupIds.add(b.id);
         }
@@ -2209,17 +2242,20 @@ export async function memoryAudit(client, cfg, args, ctx) {
     if (auditModel && auditModel !== "off" && auditModel !== "none" && rows.length > 1) {
       const candidateItemMap = new Map();
       let candidateList = [];
-      if (groups.length > 0) {
-        for (const g of groups) {
-          candidateItemMap.set(g.primary.id, g.primary);
-          for (const d of g.duplicates) candidateItemMap.set(d.id, d);
-        }
-        candidateList = Array.from(candidateItemMap.values());
-      } else {
-        candidateList = rows;
-        for (const r of rows) candidateItemMap.set(r.id, r);
+      for (const g of groups) {
+        candidateItemMap.set(g.primary.id, g.primary);
+        for (const d of g.duplicates) candidateItemMap.set(d.id, d);
       }
-      const MODEL_CHUNK = Math.max(10, Math.min(Number(auditOptions.dedup_batch_size || auditOptions.batch_size || 40), 60));
+      // 【P1-2 a】未分组行也要按 chunk 送模型（预算仍受 maxModelBatches 约束）
+      for (const r of rows) {
+        if (!candidateItemMap.has(r.id)) {
+          candidateItemMap.set(r.id, r);
+        }
+      }
+      candidateList = Array.from(candidateItemMap.values());
+
+      // 【P1-3】MODEL_CHUNK 一律读 cfg.audit_chunk_size ?? 40，并把单次送模型的条数硬顶为 audit_chunk_size * maxModelBatches
+      const MODEL_CHUNK = Number(cfg.audit_chunk_size ?? auditOptions.audit_chunk_size ?? 40);
       const modelBudgetItems = maxModelBatches * MODEL_CHUNK;
       const forModel = candidateList.slice(0, modelBudgetItems);
 
@@ -2229,20 +2265,44 @@ export async function memoryAudit(client, cfg, args, ctx) {
           const mr = modelRes.result;
           const pDups = Array.isArray(mr.pitfall_duplicates) ? mr.pitfall_duplicates : [];
           if (pDups.length > 0) {
-            const modelReviewedIds = new Set(forModel.map((r) => r.id));
-            const remainingGroups = groups.filter((g) => {
-              const allInModel = modelReviewedIds.has(g.primary.id) && g.duplicates.every((d) => modelReviewedIds.has(d.id));
-              return !allInModel;
-            });
-            // 【P0-4】恢复三重过滤 dIds.includes(r.id) && r.id !== pId && !batchDupIds.has(r.id)
+            // 【P1-2 b】remainingGroups 只剔除「已被模型明确处理过的 id」，不要把整组无条件丢弃
+            const modelHandledIds = new Set();
+            for (const dg of pDups) {
+              const pId = Number(dg.primary_id);
+              const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
+              if (pId && dIds.length > 0) {
+                modelHandledIds.add(pId);
+                for (const dId of dIds) {
+                  if (dId !== pId) modelHandledIds.add(dId);
+                }
+              }
+            }
+
+            const remainingGroups = [];
+            for (const g of groups) {
+              if (modelHandledIds.has(g.primary.id)) {
+                const unhandledDups = g.duplicates.filter((d) => !modelHandledIds.has(d.id));
+                if (unhandledDups.length > 1) {
+                  remainingGroups.push({ primary: unhandledDups[0], duplicates: unhandledDups.slice(1) });
+                }
+              } else {
+                const unhandledDups = g.duplicates.filter((d) => !modelHandledIds.has(d.id));
+                if (unhandledDups.length > 0) {
+                  remainingGroups.push({ primary: g.primary, duplicates: unhandledDups });
+                }
+              }
+            }
+
+            // 【P1-2 c】每处理一组就把 pId 也加入 modelDupIds，杜绝跨组主从互指
             const modelDupIds = new Set();
             for (const rg of remainingGroups) {
+              modelDupIds.add(rg.primary.id);
               for (const d of rg.duplicates) modelDupIds.add(d.id);
             }
             for (const dg of pDups) {
               const pId = Number(dg.primary_id);
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
-              if (pId && dIds.length > 0) {
+              if (pId && dIds.length > 0 && !modelDupIds.has(pId)) {
                 const pItem = rows.find((r) => r.id === pId) || candidateItemMap.get(pId);
                 const dItems = (forModel.length ? forModel : rows).filter(
                   (r) => dIds.includes(r.id) && r.id !== pId && !modelDupIds.has(r.id)
@@ -2254,6 +2314,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
                   }
                 }
                 if (pItem && dItems.length > 0) {
+                  modelDupIds.add(pItem.id);
                   for (const d of dItems) modelDupIds.add(d.id);
                   remainingGroups.push({ primary: pItem, duplicates: dItems });
                 }
@@ -2417,6 +2478,21 @@ export async function memoryAudit(client, cfg, args, ctx) {
 
 let _auditTimer = null;
 let _auditSchedulerStarted = false;
+let _auditOptionsGetter = null;
+let _auditBaseClient = null;
+let _auditBaseCfg = null;
+
+function stopAuditScheduler() {
+  if (_auditTimer) {
+    clearInterval(_auditTimer);
+    _auditTimer = null;
+  }
+  _auditSchedulerStarted = false;
+  _auditOptionsGetter = null;
+  _auditBaseClient = null;
+  _auditBaseCfg = null;
+  _isAuditing = false;
+}
 
 async function checkScheduledDedup(client, cfg) {
   const schedule = (cfg && (cfg.dedup_schedule || cfg.audit_interval || cfg.auditInterval)) || "off";
@@ -2455,19 +2531,30 @@ async function checkScheduledDedup(client, cfg) {
   }
 }
 
-// 【P2-4】ensureAuditScheduler 闭包陈旧：定时器触发时通过 optionsGetter 重新读取最新配置与 client
+// 【P0-1】ensureAuditScheduler 闭包配置读取与动态刷新
 function ensureAuditScheduler(client, cfg, optionsGetter) {
+  if (optionsGetter) {
+    _auditOptionsGetter = optionsGetter;
+  }
+  if (cfg) {
+    _auditBaseCfg = cfg;
+  }
+  if (client) {
+    _auditBaseClient = client;
+  }
+
   function getFreshCfg() {
-    let latest = cfg;
+    let latest = _auditBaseCfg || cfg;
     try {
-      if (typeof optionsGetter === "function") {
-        const res = optionsGetter();
+      const getter = _auditOptionsGetter || optionsGetter;
+      if (typeof getter === "function") {
+        const res = getter();
         if (res && typeof res === "object") latest = res;
-      } else if (optionsGetter && typeof optionsGetter === "object") {
-        latest = readOptions(optionsGetter);
+      } else if (getter && typeof getter === "object") {
+        latest = readOptions(getter);
       }
     } catch (_) {}
-    return latest || cfg;
+    return latest || _auditBaseCfg || cfg;
   }
 
   function getFreshClient(freshCfg) {
@@ -2477,11 +2564,14 @@ function ensureAuditScheduler(client, cfg, optionsGetter) {
         if (c && typeof c.list === "function") return c;
       }
     } catch (_) {}
-    if (client && typeof client.list === "function") return client;
+    const baseClient = _auditBaseClient || client;
+    if (baseClient && typeof baseClient.list === "function") return baseClient;
     return null;
   }
 
-  if (_auditSchedulerStarted) return;
+  if (_auditSchedulerStarted) {
+    return { getFreshCfg, getFreshClient, started: true, stop: stopAuditScheduler };
+  }
   _auditSchedulerStarted = true;
 
   const runScheduled = async () => {
@@ -2490,16 +2580,20 @@ function ensureAuditScheduler(client, cfg, optionsGetter) {
     return await checkScheduledDedup(freshClient, freshCfg);
   };
 
-  runScheduled().catch((e) => {
-    console.error("[memory-hub] 启动去重检查跳过:", (e && e.message) || e);
-  });
-
-  _auditTimer = setInterval(() => {
+  if (!isTestMode()) {
     runScheduled().catch((e) => {
-      console.error("[memory-hub] 定时去重跳过:", (e && e.message) || e);
+      console.error("[memory-hub] 启动去重检查跳过:", (e && e.message) || e);
     });
-  }, 5 * 60 * 1000);
-  if (_auditTimer && _auditTimer.unref) _auditTimer.unref();
+
+    _auditTimer = setInterval(() => {
+      runScheduled().catch((e) => {
+        console.error("[memory-hub] 定时去重跳过:", (e && e.message) || e);
+      });
+    }, 5 * 60 * 1000);
+    if (_auditTimer && _auditTimer.unref) _auditTimer.unref();
+  }
+
+  return { getFreshCfg, getFreshClient, started: true, stop: stopAuditScheduler, runScheduled };
 }
 
 /* ================================================================== *
@@ -2894,8 +2988,9 @@ export const MagpieMemoryHub = async (input, options) => {
    * 宿主长驻进程定期检查上次去重时间是否超期（daily / weekly / monthly）。
    * 默认 off，关闭时不执行任何后台操作；超期触发后立即分批执行去重，绝不产出冗余卡片。 */
   const dedupSched = cfg.dedup_schedule || cfg.audit_interval || cfg.auditInterval || (options && (options.dedup_schedule || options.audit_interval)) || "off";
+  const optionsGetter = () => readOptions(Object.assign({}, input && typeof input === "object" ? input : {}, options && typeof options === "object" ? options : {}));
   if (dedupSched !== "off" && !isTestMode()) {
-    ensureAuditScheduler(client, cfg, () => readOptions(input || options));
+    ensureAuditScheduler(client, cfg, optionsGetter);
   }
 
   const tool = {};
@@ -2962,5 +3057,30 @@ export const MagpieMemoryHub = async (input, options) => {
     };
   }
 
-  return { tool };
+  return {
+    tool,
+    _scheduler: {
+      getFreshCfg: () => {
+        if (typeof _auditOptionsGetter === "function") {
+          try {
+            return _auditOptionsGetter();
+          } catch (_) {}
+        }
+        return optionsGetter();
+      },
+      ensureAuditScheduler: (c = client, conf = cfg, og = optionsGetter) => ensureAuditScheduler(c, conf, og),
+      stop: stopAuditScheduler,
+    },
+    _getFreshCfg: () => {
+      if (typeof _auditOptionsGetter === "function") {
+        try {
+          return _auditOptionsGetter();
+        } catch (_) {}
+      }
+      return optionsGetter();
+    },
+  };
 };
+
+MagpieMemoryHub.ensureAuditScheduler = ensureAuditScheduler;
+MagpieMemoryHub.stopAuditScheduler = stopAuditScheduler;
