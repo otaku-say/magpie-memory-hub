@@ -437,65 +437,109 @@ export async function auditMemoriesWithModel({
   // 必须使用 Memory 客户端标识（和提炼一致，面板可区分）
   const headers = getInternalModelHeaders(apiKey);
 
-  const memSummary = memories.map((m) => ({
-    id: m.id,
-    category: m.category,
-    title: m.title,
-    content: m.content || m.full_text,
-    recurrence: m.recurrence,
-    tags: m.tags,
-  }));
+  // 【499 根治】摘要字段强力截断：绝不把 full_text 数万字塞进 Prompt
+  const cut = (v, n) => {
+    const t = String(v == null ? "" : v).replace(/\s+/g, " ").trim();
+    return t.length > n ? t.slice(0, n) + "…" : t;
+  };
 
-  const pitSummary = pitfalls.map((p) => ({
-    id: p.id,
-    component: p.component,
-    symptom: p.symptom,
-    root_cause: p.root_cause,
-    solution: p.solution,
-    recurrence: p.recurrence,
-  }));
+  const buildPayload = (memChunk, pitChunk) => {
+    const memSummary = memChunk.map((m) => ({
+      id: m.id,
+      category: m.category,
+      title: cut(m.title, 60),
+      content: cut(m.content || m.full_text, 120),
+      recurrence: m.recurrence,
+    }));
 
-  const userContent = `【待去重记忆列表】：\n${JSON.stringify(memSummary, null, 2)}\n\n【待去重踩坑列表】：\n${JSON.stringify(pitSummary, null, 2)}\n\n请在单次调用中同时完成「判定 + 生成合并结果」，输出 memory_duplicates 与 pitfall_duplicates（严格输出合法 JSON）。`;
+    const pitSummary = pitChunk.map((p) => ({
+      id: p.id,
+      component: cut(p.component, 40),
+      symptom: cut(p.symptom, 100),
+      solution: cut(p.solution, 120),
+      recurrence: p.recurrence,
+    }));
+
+    return `【待去重记忆列表】：\n${JSON.stringify(memSummary)}\n\n【待去重踩坑列表】：\n${JSON.stringify(pitSummary)}\n\n请在单次调用中同时完成「判定 + 生成合并结果」，输出 memory_duplicates 与 pitfall_duplicates（严格输出合法 JSON）。`;
+  };
+
+  // 【499 根治】分块调用：单次调用绝不超过 CHUNK 条，避免 70KB+ 超大 Prompt 撑爆上下文
+  const CHUNK = Math.max(5, Math.min(Number(options.audit_chunk_size) || 40, 60));
+  const chunks = [];
+  const maxLen = Math.max(memories.length, pitfalls.length);
+  for (let i = 0; i < maxLen; i += CHUNK) {
+    chunks.push({
+      mem: memories.slice(i, i + CHUNK),
+      pit: pitfalls.slice(i, i + CHUNK),
+    });
+  }
+  if (chunks.length === 0) return null;
+
+  const merged = {
+    memory_duplicates: [],
+    pitfall_duplicates: [],
+    duplicate_groups: [],
+  };
+  let anySucceeded = false;
 
   try {
-    const url = `${baseUrl}/v1/chat/completions`;
-    const payload = {
-      model,
-      messages: [
-        { role: "system", content: AUDIT_SYSTEM_PROMPT },
-        { role: "user", content: userContent },
-      ],
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-    };
+    for (const chunk of chunks) {
+      if (!modelBudgetCheck(options).allowed) break;
 
-    const res = await doFetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-    try { modelBudgetRecord(); } catch (_) {}
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const url = `${baseUrl}/v1/chat/completions`;
+        const payload = {
+          model,
+          messages: [
+            { role: "system", content: AUDIT_SYSTEM_PROMPT },
+            { role: "user", content: buildPayload(chunk.mem, chunk.pit) },
+          ],
+          temperature: 0.1,
+          response_format: { type: "json_object" },
+        };
 
-    if (!res.ok) return null;
+        const res = await doFetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        try { modelBudgetRecord(); } catch (_) {}
 
-    const json = await res.json();
-    const rawContent = json?.choices?.[0]?.message?.content || "";
-    const parsed = parseJsonObject(rawContent) || {};
-    if (Array.isArray(parsed.duplicate_groups) && !parsed.memory_duplicates) {
-      parsed.memory_duplicates = parsed.duplicate_groups;
-    } else if (Array.isArray(parsed.memory_duplicates) && !parsed.duplicate_groups) {
-      parsed.duplicate_groups = parsed.memory_duplicates;
+        if (!res.ok) continue;
+
+        const json = await res.json();
+        const rawContent = json?.choices?.[0]?.message?.content || "";
+        const parsed = parseJsonObject(rawContent) || {};
+        anySucceeded = true;
+
+        const memDups = Array.isArray(parsed.memory_duplicates)
+          ? parsed.memory_duplicates
+          : (Array.isArray(parsed.duplicate_groups) ? parsed.duplicate_groups : []);
+        const pitDups = Array.isArray(parsed.pitfall_duplicates) ? parsed.pitfall_duplicates : [];
+
+        merged.memory_duplicates.push(...memDups);
+        merged.pitfall_duplicates.push(...pitDups);
+        merged.duplicate_groups.push(...memDups);
+      } catch (_) {
+        // 单块失败不阻断其余块
+      } finally {
+        clearTimeout(timer);
+      }
     }
-    return {
-      modelUsed: model,
-      result: parsed,
-    };
   } catch (_) {
-    return null;
-  } finally {
-    clearTimeout(timer);
+    // 外层异常严格 fail-open：已成功合并的结果照常返回
   }
+
+  if (!anySucceeded) return null;
+
+  return {
+    modelUsed: model,
+    result: merged,
+    chunks: chunks.length,
+  };
 }
 
 /**

@@ -117,7 +117,7 @@ function readOptions(options) {
     dedup_time: o.dedup_time || "02:00",
     dedup_weekday: Number(o.dedup_weekday) || 1,
     dedup_day: Number(o.dedup_day) || 1,
-    dedup_batch_size: Math.max(50, Math.min(Number(o.dedup_batch_size || 1000), 1000)),
+    dedup_batch_size: Math.max(20, Math.min(Number(o.dedup_batch_size || 50), 200)),
     classify_endpoint: o.classify_endpoint || "auto",
     search_rewrite: o.search_rewrite !== false,
     search_rerank: o.search_rerank !== false,
@@ -1838,7 +1838,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
 
   try {
     const project = String(args.project || (cfg && cfg.project) || "global").trim();
-    const batchSize = Math.max(50, Math.min(Number(args.batch_size || cfg.dedup_batch_size || 1000), 1000));
+    const batchSize = Math.max(20, Math.min(Number(args.batch_size || cfg.dedup_batch_size || 50), 200));
     const batchTs = Date.now();
     const now = nowSql();
 
