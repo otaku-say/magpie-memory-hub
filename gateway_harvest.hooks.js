@@ -61,40 +61,8 @@ import {
 
 import { _diag, SCAFFOLDING_PATTERNS, stripScaffolding } from "./gateway_harvest.js";
 
-/**
- * 轻量正则脱敏函数：入库前过滤敏感凭据
- */
-export function scrubSecrets(text) {
-  if (typeof text !== "string" || !text) return text;
-  let s = text;
-  // AWS Access Key
-  s = s.replace(/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "***REDACTED***");
-  // Slack/Discord Bot Token
-  s = s.replace(/\b(xox[baprs]-)[0-9A-Za-z-]{10,}\b/g, "$1***REDACTED***");
-  // 长 JWT（三段式）
-  s = s.replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "***REDACTED***");
-  // OpenAI / Anthropic / Generic API keys
-  s = s.replace(/\bsk-[a-zA-Z0-9_\-]{8,}\b/g, "sk-***REDACTED***");
-  // GitHub Tokens
-  s = s.replace(/\bgh[pousr]_[a-zA-Z0-9]{8,}\b/g, "ghp_***REDACTED***");
-  // NoCodeBackend secret key
-  const ncbPrefix = ["ncb", "sec"].join("_"); s = s.replace(new RegExp("\\b" + ncbPrefix + "_[a-zA-Z0-9_\\-]{8,}\\b", "g"), "ncb-***REDACTED***");
-  // Bearer tokens
-  s = s.replace(/\b(Bearer\s+)[A-Za-z0-9_\-\.]{8,}\b/gi, "$1***REDACTED***");
-  // Database connection strings: scheme://user:password@host
-  s = s.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/:\s@]+:)([^@\s]+)(@)/g, "$1***REDACTED***$3");
-  // 中文口令描述
-  s = s.replace(/(密码|密钥|口令|token|secret|apikey|api_key)\s*[是为:：=]\s*['"]?([A-Za-z0-9_!@#$%^&*\-+=.~]{6,})['"]?/gi, (match, k, val) => {
-    if (/\*+REDACTED\*+/i.test(val)) return match;
-    return `${k}=***REDACTED***`;
-  });
-  // Key-value pairs for passwords and API keys
-  s = s.replace(/\b(password|passwd|pwd|api_key|apikey|secret_key|secretKey)\s*([:=])\s*(['"]?)([^'"\s,;]+)\3/gi, (match, k, eq, quote, val) => {
-    if (/\*+REDACTED\*+/i.test(val)) return match;
-    return `${k}${eq}${quote}***REDACTED***${quote}`;
-  });
-  return s;
-}
+import { scrubSecrets } from "./scrub.js";
+export { scrubSecrets };
 
 function safeEnqueueHarvestItems(items) {
   if (!Array.isArray(items)) return;
@@ -1542,7 +1510,7 @@ export async function testExtractionModel(options = {}) {
 export async function testClassificationModel(options = {}) {
   const model = String(options.classify_model || options.classifier_model || "").trim();
   if (!model || model === "off" || model === "none") {
-    return { ok: false, error: "未配置判定模型 (classify_model 为空或已禁用)" };
+    return { skipped: true, ok: true, reason: "未配置判定模型 (classify_model 为空或已禁用)" };
   }
 
   const endpoint = String(options.classify_endpoint || "auto").trim().toLowerCase();
@@ -1621,7 +1589,15 @@ export async function testModelConnectivity(type = "all", options = {}) {
   if (type === "all" || type === "classify" || type === "classification") {
     result.classify = await testClassificationModel(options);
   }
-  result.ok = (!result.extract || result.extract.ok) && (!result.classify || result.classify.ok);
+  const configuredItems = [];
+  if (result.extract && !result.extract.skipped) configuredItems.push(result.extract);
+  if (result.classify && !result.classify.skipped) configuredItems.push(result.classify);
+
+  if (configuredItems.length === 0) {
+    result.ok = (!result.extract || result.extract.ok) && (!result.classify || result.classify.ok);
+  } else {
+    result.ok = configuredItems.every((item) => item.ok);
+  }
   return result;
 }
 

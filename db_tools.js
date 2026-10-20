@@ -12,7 +12,7 @@ import {
   detectDrift, buildStatements, buildDropStatements, describePlan,
   versionUpsertSQL, SCHEMA_VERSION, TABLES, META_TABLE, VERSION_KEY, toNcbTables,
 } from "./schema.js";
-import { rememberSecret, lookupSecret, forgetSecret, rememberDatabase, knownDatabases, lookupRealDatabase } from "./local_state.js";
+import { rememberSecret, lookupSecret, forgetSecret, rememberDatabase, knownDatabases, lookupRealDatabase, clearAuditCursor, clearHarvestQueue, readState, writeState } from "./local_state.js";
 import { r2Setup, r2Upload, r2Guide, resolveRealDatabase } from "./r2.js";
 import { explainUnknownErrorWithModel, attachAiDiagnosis } from "./online_models.js";
 
@@ -196,11 +196,22 @@ export async function dbInit(cfg, args) {
 /* ------------------------------------------------------------------ *
  * db_reset —— 清空：删除插件自己的三张表（结构 + 数据）
  * ------------------------------------------------------------------ */
+
+/**
+ * 校验传入库名与配置库名是否指向同一逻辑库（去掉数字前缀归一化比对）
+ */
+export function isSameDatabaseTarget(a, b) {
+  const norm = (x) => String(x || "").trim().toLowerCase().replace(/^\d+_/, "");
+  const normA = norm(a);
+  const normB = norm(b);
+  return Boolean(normA && normB && normA === normB);
+}
+
 export async function dbReset(cfg, args) {
   const configuredDb = String((cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
   if (args && args.database) {
     const passedDb = String(args.database).trim();
-    if (!configuredDb || passedDb !== configuredDb) {
+    if (!configuredDb || !isSameDatabaseTarget(passedDb, configuredDb)) {
       const err = new Error(`安全防护拦截：拒绝清空外来数据库或系统表！目标数据库 "${passedDb}" 与当前配置的目标实例 "${configuredDb}" 不匹配。`);
       err.code = "FORBIDDEN_DATABASE";
       throw err;
@@ -232,6 +243,21 @@ export async function dbReset(cfg, args) {
   const drops = buildDropStatements();
   const results = await mcp.executeSqlBatch(db, drops);
   const failed = results.filter((r) => !r.ok);
+  if (failed.length === 0) {
+    const project = (args && args.project) || (cfg && cfg.project) || "";
+    try {
+      if (typeof clearAuditCursor === "function") {
+        clearAuditCursor(project);
+      }
+      if (typeof clearHarvestQueue === "function") {
+        clearHarvestQueue();
+      }
+      const st = readState();
+      st.harvest_queue = [];
+      st.pending_patterns = {};
+      writeState(st);
+    } catch (_) {}
+  }
   return {
     ok: failed.length === 0,
     database: db,
