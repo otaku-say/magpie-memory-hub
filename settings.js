@@ -620,7 +620,12 @@
 
     if (statusData.audit) {
       var auditCard = statusData.audit;
-      if (!pendingSince.model || (auditCard.at >= pendingSince.model)) {
+      var modelCard = statusData.model;
+      var auditAt = Number((auditCard && auditCard.at) || 0);
+      var modelAt = Number((modelCard && modelCard.at) || 0);
+      // 只有 audit.at > model.at 时才允许用 audit 覆盖 model_action_status，防止旧去重状态覆盖最新模型检测
+      var shouldRenderAuditToStatus = (!modelCard || auditAt > modelAt) && (!pendingSince.model || (auditCard.at >= pendingSince.model));
+      if (shouldRenderAuditToStatus) {
         renderStatusBlock("model_action_status", auditCard);
       }
       var logBox = $("dedup_rolling_logs");

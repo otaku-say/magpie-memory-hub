@@ -201,10 +201,25 @@ export async function dbInit(cfg, args) {
  * 校验传入库名与配置库名是否指向同一逻辑库（去掉数字前缀归一化比对）
  */
 export function isSameDatabaseTarget(a, b) {
-  const norm = (x) => String(x || "").trim().toLowerCase().replace(/^\d+_/, "");
-  const normA = norm(a);
-  const normB = norm(b);
-  return Boolean(normA && normB && normA === normB);
+  const strA = String(a || "").trim().toLowerCase();
+  const strB = String(b || "").trim().toLowerCase();
+  if (!strA || !strB) return false;
+
+  const mA = strA.match(/^(\d+)_(.*)$/);
+  const mB = strB.match(/^(\d+)_(.*)$/);
+  const prefixA = mA ? mA[1] : null;
+  const prefixB = mB ? mB[1] : null;
+
+  // a) 若两侧都有前缀且前缀不等 → 直接 false（不同账号，防止跨账号越权清库）
+  if (prefixA !== null && prefixB !== null && prefixA !== prefixB) {
+    return false;
+  }
+
+  // b) 若一侧无前缀一侧有前缀 → 视为同一库（逻辑名 vs 真实名），允许比对主体
+  // c) 若双侧前缀相同 → 去掉前缀比较余下部分
+  const restA = mA ? mA[2] : strA;
+  const restB = mB ? mB[2] : strB;
+  return Boolean(restA && restB && restA === restB);
 }
 
 export async function dbReset(cfg, args) {
@@ -218,7 +233,14 @@ export async function dbReset(cfg, args) {
     }
   }
 
-  const rawDb = dbOf(cfg, args);
+  if (!configuredDb) {
+    const err = new Error("未指定数据库名（请在设置页填 ncb_instance，或在配置中指定目标实例）");
+    err.code = "NO_DATABASE";
+    throw err;
+  }
+
+  // d) dbReset 执行 DROP 前，强制使用配置侧的库名（cfg.instance/ncb_instance 解析出的真实库名），绝不使用 args.database 直接执行；args.database 只用于校验
+  const rawDb = configuredDb;
   const db = (await resolveRealDatabase(cfg, rawDb)) || rawDb;
   const confirm = (args && args.confirm) || "";
   if (confirm !== RESET_CONFIRM) {
@@ -244,18 +266,30 @@ export async function dbReset(cfg, args) {
   const results = await mcp.executeSqlBatch(db, drops);
   const failed = results.filter((r) => !r.ok);
   if (failed.length === 0) {
-    const project = (args && args.project) || (cfg && cfg.project) || "";
     try {
-      if (typeof clearAuditCursor === "function") {
-        clearAuditCursor(project);
-      }
       if (typeof clearHarvestQueue === "function") {
         clearHarvestQueue();
       }
       const st = readState();
-      st.harvest_queue = [];
-      st.pending_patterns = {};
-      writeState(st);
+      // 遍历 state.audit.cursors 清空全部 project（不仅当前）
+      if (st.audit && st.audit.cursors && typeof st.audit.cursors === "object") {
+        for (const prj of Object.keys(st.audit.cursors)) {
+          if (typeof clearAuditCursor === "function") {
+            try { clearAuditCursor(prj); } catch (_) {}
+          }
+        }
+      }
+      const freshState = readState();
+      if (freshState.audit && typeof freshState.audit === "object") {
+        freshState.audit.cursors = {};
+      }
+      // 清空 gateway_harvest 指纹缓存与文件处理状态
+      freshState.gateway_harvest = { files: {}, processed_fingerprints: [] };
+      // 清空 harvest_queue 与 pending_patterns
+      freshState.harvest_queue = [];
+      freshState.pending_patterns = {};
+      // 严禁整体抹平 secrets/actions/r2_mounts
+      writeState(freshState);
     } catch (_) {}
   }
   return {

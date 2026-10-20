@@ -104,6 +104,19 @@ export const FORBIDDEN_DIRS = new Set([
   "/home",
 ]);
 
+export const HARD_FORBIDDEN_PREFIXES = [
+  "/etc",
+  "/proc",
+  "/sys",
+  "/dev",
+  "/boot",
+  "/bin",
+  "/sbin",
+  "/usr",
+  "/lib",
+  "/lib64",
+];
+
 export const FORBIDDEN_PREFIXES = [
   "/root",
   "/var",
@@ -120,24 +133,100 @@ export const FORBIDDEN_PREFIXES = [
   "/home",
 ];
 
+export function isWhitelistedGatewayDir(normPath) {
+  if (!normPath || typeof normPath !== "string") return false;
+  const p = normPath.replace(/\\/g, "/");
+
+  // 1. Minis 工作目录与 macOS 临时目录
+  if (p === "/var/minis" || p.startsWith("/var/minis/") || p === "/private/var/minis" || p.startsWith("/private/var/minis/")) {
+    return true;
+  }
+  if (p === "/var/folders" || p.startsWith("/var/folders/") || p === "/private/var/folders" || p.startsWith("/private/var/folders/")) {
+    return true;
+  }
+
+  // 2. Gateway 对话录制目录特征 (GatewayConversations / gateway-conversations / magpie)
+  if (/(?:^|[\/])(gateway[-_]?conversations)(?:[\/]|$)/i.test(p)) {
+    return true;
+  }
+  if (/(?:^|[\/])\.config[\/]magpie(?:[\/]|$)/i.test(p) || /(?:^|[\/])config[\/]magpie(?:[\/]|$)/i.test(p)) {
+    return true;
+  }
+
+  // 3. 用户显式指定的环境变量目录
+  if (process.env.MEMHUB_GATEWAY_CONV_DIR && process.env.MEMHUB_GATEWAY_CONV_DIR.trim()) {
+    const envDir = path.resolve(process.env.MEMHUB_GATEWAY_CONV_DIR.trim()).replace(/\\/g, "/");
+    if (p === envDir || p.startsWith(envDir + "/")) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function checkSensitiveSubpaths(norm) {
+  if (!norm || typeof norm !== "string") return;
+  const segments = norm.split(/[\/\\]+/);
+  const SENSITIVE_SEGMENTS = new Set([
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".docker",
+    ".kube",
+    ".magpie-memory-hub",
+  ]);
+  for (const seg of segments) {
+    if (SENSITIVE_SEGMENTS.has(seg)) {
+      throw new Error(`[SECURITY_BLOCKED] 禁止遍历敏感配置或凭据目录: ${norm}`);
+    }
+  }
+
+  if (/(?:^|[\/\\])\.config[\/\\]gcloud(?:[\/\\]|$)/.test(norm)) {
+    throw new Error(`[SECURITY_BLOCKED] 禁止遍历敏感云凭据目录: ${norm}`);
+  }
+
+  let defaultStateDir = null;
+  try {
+    defaultStateDir = path.resolve(os.homedir(), ".magpie-memory-hub");
+  } catch (_) {}
+  if (defaultStateDir && (norm === defaultStateDir || norm.startsWith(defaultStateDir + path.sep))) {
+    throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统状态目录: ${norm}`);
+  }
+
+  if (process.env.MEMHUB_STATE_DIR && process.env.MEMHUB_STATE_DIR.trim()) {
+    const envStateDir = path.resolve(process.env.MEMHUB_STATE_DIR.trim());
+    if (norm === envStateDir || norm.startsWith(envStateDir + path.sep)) {
+      throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统状态目录: ${norm}`);
+    }
+  }
+}
+
 function checkPathForbidden(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return;
   const norm = path.resolve(targetPath);
   const root = path.parse(norm).root;
-  if (norm === root || FORBIDDEN_DIRS.has(norm)) {
+  if (norm === root) {
     throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录或根路径: ${norm}`);
   }
-  for (const prefix of FORBIDDEN_PREFIXES) {
+
+  // 1. 敏感子路径黑名单校验（任何位置一票否决）
+  checkSensitiveSubpaths(norm);
+
+  // 2. 硬拦截系统目录
+  for (const prefix of HARD_FORBIDDEN_PREFIXES) {
     if (norm === prefix || norm.startsWith(prefix + path.sep)) {
       throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${norm}`);
     }
   }
-  let stateDir = null;
-  try {
-    stateDir = path.resolve(os.homedir(), ".magpie-memory-hub");
-  } catch (_) {}
-  if (stateDir && (norm === stateDir || norm.startsWith(stateDir + path.sep))) {
-    throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统状态目录: ${norm}`);
+
+  // 3. /home、/root、/var 系统目录：根目录硬拦，子路径通过白名单放行，未命中白名单则拦截
+  if (norm === "/home" || norm === "/root" || norm === "/var" || norm === "/private/var") {
+    throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录或根路径: ${norm}`);
+  }
+  if (norm.startsWith("/home" + path.sep) || norm.startsWith("/root" + path.sep) || norm.startsWith("/var" + path.sep) || norm.startsWith("/private/var" + path.sep)) {
+    if (!isWhitelistedGatewayDir(norm)) {
+      throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${norm}`);
+    }
   }
 }
 
@@ -186,8 +275,16 @@ export function validateGatewayDir(customDir) {
         if (curStat) {
           try {
             const parentReal = fs.realpathSync(cur);
-            checkPathForbidden(parentReal);
+            checkSensitiveSubpaths(parentReal);
+            for (const prefix of HARD_FORBIDDEN_PREFIXES) {
+              if (parentReal === prefix || parentReal.startsWith(prefix + path.sep)) {
+                throw new Error(`[SECURITY_BLOCKED] 祖先路径指向系统敏感目录: ${parentReal}`);
+              }
+            }
           } catch (pe) {
+            if (pe.message && pe.message.includes("[SECURITY_BLOCKED]")) {
+              throw pe;
+            }
             throw new Error(`[SECURITY_BLOCKED] 祖先路径软链接解析失败: ${cur}`);
           }
           break;
