@@ -1213,6 +1213,7 @@ async function memorySearch(client, cfg, rawArgs) {
     title: x.row.title,
     content: x.row.content,
     tags: x.row.tags,
+    related_entities: x.row.related_entities || null,
     confidence: x.row.confidence_score,
     recurrence: Number(x.row.recurrence) || 1,
     retrieval_count: Number(x.row.retrieval_count) || 0,
@@ -1238,18 +1239,93 @@ async function memorySearch(client, cfg, rawArgs) {
   });
 }
 
-async function memoryList(client, cfg, args) {
+async function memoryList(client, cfg, rawArgs) {
+  const args = normalizeToolArgs(rawArgs, cfg);
   const limit = Math.max(1, Math.min(Number(args.limit) || 20, 100));
+  const projectArg = args.project ? String(args.project).trim() : "";
   const fetchParams = { lifecycle_status: "active" };
-  if (args.project) fetchParams.project = String(args.project).trim();
   if (args.client) fetchParams.client = String(args.client).trim();
 
-  let all = (await fetchAll(client, "memories", fetchParams)).filter(
-    (r) => r.lifecycle_status !== "superseded" && isMemoryValid(r)
-  );
-  if (args.project) all = all.filter((r) => String(r.project || "") === String(args.project));
+  let all = [];
+  if (projectArg && projectArg !== "global") {
+    // 跨项目全局穿透：支持 project IN (args.project, 'global')，当前项目专属优先
+    const [projRows, globalRows] = await Promise.all([
+      fetchAll(client, "memories", Object.assign({}, fetchParams, { project: projectArg })),
+      fetchAll(client, "memories", Object.assign({}, fetchParams, { project: "global" })),
+    ]);
+    const seen = new Set();
+    for (const r of projRows) {
+      const uid = r.id != null ? r.id : `${r.project}:${r.title}`;
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        all.push(r);
+      }
+    }
+    for (const r of globalRows) {
+      const uid = r.id != null ? r.id : `${r.project}:${r.title}`;
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        all.push(r);
+      }
+    }
+    all = all.filter((r) => r.lifecycle_status !== "superseded" && isMemoryValid(r));
+    all = all.filter((r) => String(r.project || "") === projectArg || String(r.project || "") === "global");
+  } else {
+    if (projectArg) fetchParams.project = projectArg;
+    all = (await fetchAll(client, "memories", fetchParams)).filter(
+      (r) => r.lifecycle_status !== "superseded" && isMemoryValid(r)
+    );
+    if (projectArg) all = all.filter((r) => String(r.project || "") === projectArg);
+  }
+
   if (args.client) all = all.filter((r) => String(r.client || "") === String(args.client));
-  const sorted = all.sort((a, b) => rankMemory(b) - rankMemory(a)).slice(0, limit);
+
+  const sorted = all.slice().sort((a, b) => {
+    if (projectArg && projectArg !== "global") {
+      const aProj = String(a.project || "") === projectArg ? 1 : 0;
+      const bProj = String(b.project || "") === projectArg ? 1 : 0;
+      if (aProj !== bProj) return bProj - aProj;
+    }
+    return rankMemory(b) - rankMemory(a);
+  }).slice(0, limit);
+
+  // EVO-10: knowledge_profile 自省画像计算
+  const threshold = Number(cfg?.crystallization_threshold ?? 5) || 5;
+  let principleCount = 0;
+  let preferenceCount = 0;
+  let decisionCount = 0;
+  const nearCandidates = [];
+
+  for (const r of all) {
+    const cat = String(r.category || "").toLowerCase();
+    if (cat === "principle") principleCount++;
+    else if (cat === "preference") preferenceCount++;
+    else if (cat === "decision") decisionCount++;
+
+    if (cat === "preference" || cat === "decision") {
+      const rec = Number(r.recurrence) || 1;
+      if (rec >= threshold - 1) {
+        nearCandidates.push({
+          id: r.id,
+          title: r.title,
+          recurrence: rec,
+          threshold,
+        });
+      }
+    }
+  }
+
+  nearCandidates.sort((a, b) => b.recurrence - a.recurrence);
+  const nearCrystallization = nearCandidates.slice(0, 5);
+
+  const knowledgeProfile = {
+    principle_count: principleCount,
+    preference_count: preferenceCount,
+    decision_count: decisionCount,
+    near_crystallization: nearCrystallization,
+    total_active: all.length,
+  };
+
   return jsonOut({
     total_active: all.length,
     returned: sorted.length,
@@ -1263,10 +1339,12 @@ async function memoryList(client, cfg, args) {
       retrieval_count: Number(r.retrieval_count) || 0,
       last_used_at: r.last_used_at || null,
     })),
+    knowledge_profile: knowledgeProfile,
   });
 }
 
-async function memoryContext(client, cfg, args) {
+async function memoryContext(client, cfg, rawArgs) {
+  const args = normalizeToolArgs(rawArgs, cfg);
   const maxItems = Number(args.max_items) || cfg.maxInject || 5;
   const budget = Number(args.max_chars) || cfg.maxBudget || 2048;
   const rawQuery = String(args.query || "").trim();
@@ -1976,7 +2054,10 @@ async function pitfallSearch(client, cfg, rawArgs) {
 /* 单条或批量读取（CCR 展开用），支持 memories 与 pitfalls 跨表读取 */
 async function memoryGet(client, cfg, rawArgs) {
   const args = normalizeToolArgs(rawArgs, cfg);
-  const table = (args.table && String(args.table).trim().toLowerCase() === "pitfalls") ? "pitfalls" : "memories";
+  const explicitTable = (rawArgs && rawArgs.table != null && String(rawArgs.table).trim() !== "")
+    ? String(rawArgs.table).trim().toLowerCase()
+    : null;
+  const table = (explicitTable === "pitfalls") ? "pitfalls" : "memories";
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
 
   const isBatch = Array.isArray(args.ids) || (args.ids != null && typeof args.ids === "string" && args.ids.includes(","));
@@ -1992,11 +2073,47 @@ async function memoryGet(client, cfg, rawArgs) {
     throw new Error("id 不能为空");
   }
 
-  function formatMemoryRecord(hit, count, lastUsed) {
+  async function getSupersededHistory(hit) {
+    if (Number(hit.revision) <= 1) return { history: null, note: null };
+    try {
+      const queryParams = { project: hit.project, limit: 100 };
+      const allProjMemories = rowsOf(await client.list("memories", queryParams));
+      const titleLower = String(hit.title || "").trim().toLowerCase();
+      const predecessors = allProjMemories.filter((r) => {
+        if (Number(r.id) === Number(hit.id)) return false;
+        const isSuperBy = Number(r.superseded_by_id) === Number(hit.id);
+        const isSameTitleSuperseded = r.lifecycle_status === "superseded" &&
+          String(r.title || "").trim().toLowerCase() === titleLower;
+        const isPriorRevision = Number(r.revision) < Number(hit.revision) &&
+          String(r.title || "").trim().toLowerCase() === titleLower;
+        return isSuperBy || isSameTitleSuperseded || isPriorRevision;
+      });
+
+      if (predecessors.length > 0) {
+        predecessors.sort((a, b) => {
+          const revDiff = (Number(b.revision) || 0) - (Number(a.revision) || 0);
+          if (revDiff !== 0) return revDiff;
+          return String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
+        });
+        const history = predecessors.slice(0, 3).map((r) => ({
+          revision: Number(r.revision) || 1,
+          title: r.title,
+          content: String(r.content || "").slice(0, 120),
+          updated_at: r.updated_at,
+        }));
+        return { history, note: null };
+      }
+      return { history: [], note: "历史版本未持久化" };
+    } catch (_) {
+      return { history: [], note: "历史版本未持久化" };
+    }
+  }
+
+  function formatMemoryRecord(hit, count, lastUsed, historyInfo) {
     const full = (hit.full_text != null && String(hit.full_text).trim() !== "")
       ? hit.full_text
       : hit.content;
-    return {
+    const rec = {
       id: hit.id,
       project: hit.project,
       category: hit.category,
@@ -2011,12 +2128,20 @@ async function memoryGet(client, cfg, rawArgs) {
       related_entities: hit.related_entities || "",
       retrieval_count: count,
       last_used_at: lastUsed,
+      revision: Number(hit.revision) || 1,
       _note: "已返回完整原文（见 full_text 与 content），summary 为注入卡片所用摘要",
     };
+    if (Number(hit.revision) > 1) {
+      rec.superseded_history = (historyInfo && historyInfo.history) || [];
+      if (historyInfo && historyInfo.note) {
+        rec.note = historyInfo.note;
+      }
+    }
+    return rec;
   }
 
-  function formatPitfallRecord(hit) {
-    return {
+  function formatPitfallRecord(hit, autoFallback = false) {
+    const rec = {
       id: hit.id,
       project: hit.project,
       table: "pitfalls",
@@ -2037,15 +2162,33 @@ async function memoryGet(client, cfg, rawArgs) {
       last_occurred_at: hit.last_occurred_at || now,
       _note: "已返回踩坑排障完整记录",
     };
+    if (autoFallback) {
+      rec.auto_fallback = true;
+    }
+    return rec;
   }
 
   if (isBatch) {
     const items = [];
     for (const tid of targetIds) {
-      const res = await client.list(table, { id: tid, limit: 1 });
-      const hit = rowsOf(res).filter((r) => Number(r.id) === tid)[0];
+      let res = await client.list(table, { id: tid, limit: 1 });
+      let hit = rowsOf(res).filter((r) => Number(r.id) === tid)[0];
+      let isFallback = false;
+
+      // BUG-4: 若未显式指定 table，且 memories 表查无此 id，自动回退到 pitfalls 表查找
+      if (!hit && !explicitTable) {
+        const pitRes = await client.list("pitfalls", { id: tid, limit: 1 });
+        const pitHit = rowsOf(pitRes).filter((r) => Number(r.id) === tid)[0];
+        if (pitHit) {
+          hit = pitHit;
+          isFallback = true;
+        }
+      }
+
       if (hit) {
-        if (table === "memories") {
+        if (isFallback || table === "pitfalls") {
+          items.push(formatPitfallRecord(hit, isFallback));
+        } else {
           const count = (Number(hit.retrieval_count) || 0) + 1;
           try {
             await client.update("memories", tid, {
@@ -2053,9 +2196,8 @@ async function memoryGet(client, cfg, rawArgs) {
               last_used_at: now,
             });
           } catch (_) {}
-          items.push(formatMemoryRecord(hit, count, now));
-        } else {
-          items.push(formatPitfallRecord(hit));
+          const historyInfo = await getSupersededHistory(hit);
+          items.push(formatMemoryRecord(hit, count, now, historyInfo));
         }
       }
     }
@@ -2064,11 +2206,25 @@ async function memoryGet(client, cfg, rawArgs) {
 
   // 单值 id 调用：必须完全兼容旧行为
   const singleId = targetIds[0];
-  const res = await client.list(table, { id: singleId, limit: 1 });
-  const hit = rowsOf(res).filter((r) => Number(r.id) === singleId)[0];
+  let res = await client.list(table, { id: singleId, limit: 1 });
+  let hit = rowsOf(res).filter((r) => Number(r.id) === singleId)[0];
+  let isFallback = false;
+
+  // BUG-4: 若未显式指定 table，且 memories 表查无此 id，自动回退到 pitfalls 表查找
+  if (!hit && !explicitTable) {
+    const pitRes = await client.list("pitfalls", { id: singleId, limit: 1 });
+    const pitHit = rowsOf(pitRes).filter((r) => Number(r.id) === singleId)[0];
+    if (pitHit) {
+      hit = pitHit;
+      isFallback = true;
+    }
+  }
+
   if (!hit) throw new Error(`找不到 id=${singleId} 的${table === "pitfalls" ? "踩坑" : "记忆"}`);
 
-  if (table === "memories") {
+  if (isFallback || table === "pitfalls") {
+    return jsonOut(formatPitfallRecord(hit, isFallback));
+  } else {
     const count = (Number(hit.retrieval_count) || 0) + 1;
     try {
       await client.update("memories", singleId, {
@@ -2076,19 +2232,26 @@ async function memoryGet(client, cfg, rawArgs) {
         last_used_at: now,
       });
     } catch (_) {}
-    return jsonOut(formatMemoryRecord(hit, count, now));
-  } else {
-    return jsonOut(formatPitfallRecord(hit));
+    const historyInfo = await getSupersededHistory(hit);
+    return jsonOut(formatMemoryRecord(hit, count, now, historyInfo));
   }
 }
 
-/* 软失效：不物理删除，写 invalid_at，保留审计链，支持 memories 与 pitfalls 跨表软失效 */
+/* 软失效：不物理删除，写 invalid_at，保留审计链，支持 memories 与 pitfalls 跨表软失效与批量失效 */
 async function memoryForget(client, cfg, rawArgs) {
   const args = normalizeToolArgs(rawArgs, cfg);
   const table = (args.table && String(args.table).trim().toLowerCase() === "pitfalls") ? "pitfalls" : "memories";
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   let targets = [];
-  if (args.id) {
+
+  const isBatch = Array.isArray(args.ids) || (args.ids != null && typeof args.ids === "string" && args.ids.includes(","));
+  if (isBatch) {
+    const targetIds = (Array.isArray(args.ids) ? args.ids : String(args.ids).split(",")).map(Number).filter(Boolean);
+    for (const tid of targetIds) {
+      const rows = rowsOf(await client.list(table, { limit: 1, id: tid })).filter((r) => Number(r.id) === tid);
+      if (rows.length > 0) targets.push(rows[0]);
+    }
+  } else if (args.id != null) {
     targets = rowsOf(await client.list(table, { limit: 1, id: Number(args.id) }))
       .filter((r) => Number(r.id) === Number(args.id));
   } else if (args.query) {
@@ -2119,7 +2282,7 @@ async function memoryForget(client, cfg, rawArgs) {
         .map((x) => x.row);
     }
   } else {
-    throw new Error("需要 id 或 query 之一");
+    throw new Error("需要 id、ids 或 query 之一");
   }
   if (!targets.length) return jsonOut({ action: "NOT_FOUND", table, forgotten: 0 });
 
@@ -3445,6 +3608,7 @@ const TOOLS = {
       type: "object",
       properties: {
         id: { type: "integer", description: "按 id 精确失效（优先）" },
+        ids: { type: "array", items: { type: "integer" }, description: "批量失效记录 id 列表" },
         query: { type: "string", description: "按关键词匹配失效" },
         limit: { type: "integer", description: "按关键词时最多失效几条，默认 1" },
         table: { type: "string", enum: ["memories", "pitfalls"], description: "目标表，支持 memories 或 pitfalls，默认 memories" },
@@ -3800,7 +3964,7 @@ export const MagpieMemoryHub = async (input, options) => {
         if (callClient && !isTestMode()) {
           triggerBackgroundDrain(callClient).catch(() => {});
         }
-        const callArgs = ["memory_save", "pitfall_save", "memory_search", "pitfall_search", "memory_get"].includes(name)
+        const callArgs = ["memory_save", "pitfall_save", "memory_search", "pitfall_search", "memory_get", "memory_context", "memory_list", "memory_forget"].includes(name)
           ? normalizeToolArgs(args, callCfg)
           : (args || {});
         const result = await def.run(callArgs, {
