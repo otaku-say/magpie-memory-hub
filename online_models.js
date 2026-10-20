@@ -431,9 +431,6 @@ export async function auditMemoriesWithModel({
 
   if (!modelBudgetCheck(options).allowed) return null;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
   // 必须使用 Memory 客户端标识（和提炼一致，面板可区分）
   const headers = getInternalModelHeaders(apiKey);
 
@@ -585,8 +582,8 @@ export async function rerankSearchResultsWithModel({
     return null;
   }
 
-  // 模型解析：优先使用 audit_model，若留空回退到 extract_model（兼容 options.rerank_model）
-  const model = String(options.audit_model || options.extract_model || options.rerank_model || options.harvest_model || "").trim();
+  // 模型解析：优先使用 rerank_model，若留空依次回退 audit_model -> extract_model -> harvest_model
+  const model = String(options.rerank_model || options.audit_model || options.extract_model || options.harvest_model || "").trim();
   if (!model || model === "off" || model === "none") {
     return null;
   }

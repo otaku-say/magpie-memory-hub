@@ -92,10 +92,10 @@ export async function resolveRealDatabase(cfg, name) {
 
 /** NoCodeBackend 的 REST 客户端（用数据库 Secret Key 认证）。 */
 function restClient(cfg) {
-  const secret = (cfg && (cfg.secret || cfg.ncb_secret)) || "";
-  const rawInstance = (cfg && (cfg.instance || cfg.ncb_instance)) || "";
+  const rawInstance = (cfg && (cfg.instance || cfg.ncb_instance || cfg.database)) || "";
   // 必须使用真实库名（带账号数字前缀），逻辑名在 REST 侧会直接 403
   const instance = lookupRealDatabase(rawInstance) || rawInstance;
+  const secret = (cfg && (cfg.secret || cfg.ncb_secret)) || lookupSecret(rawInstance) || (instance ? lookupSecret(instance) : "") || lookupSecret("");
   if (!secret) {
     const err = new Error(
       "未配置数据库 Secret Key。R2 的「列举 / 删除」走 NoCodeBackend 的 REST，需要 Secret Key；" +
@@ -650,7 +650,8 @@ export async function r2Upload(cfg, args) {
   }
 
   const hasContent = args && args.content != null;
-  const hasSecret = !!((cfg && (cfg.secret || cfg.ncb_secret)) || "");
+  const fallbackSecret = lookupSecret(db) || lookupSecret(rawDb) || lookupSecret("");
+  const hasSecret = !!((cfg && (cfg.secret || cfg.ncb_secret)) || fallbackSecret);
 
   // 有内容 + 有 Secret Key → 优先尝试 REST multipart（二进制不用 base64，省 33% 且更快）
   if (hasContent && hasSecret) {
@@ -664,7 +665,10 @@ export async function r2Upload(cfg, args) {
     const form = new FormData();
     form.append("file", new Blob([bytes], { type: args.content_type || "application/octet-stream" }), filename);
     try {
-      const { status, body } = await rest(cfg, "POST", "/upload", { form });
+      const effectiveCfg = (cfg && (cfg.secret || cfg.ncb_secret))
+        ? cfg
+        : Object.assign({}, cfg, { secret: fallbackSecret, instance: db });
+      const { status, body } = await rest(effectiveCfg, "POST", "/upload", { form });
       const url = (body && body.url) || "";
       if (status < 400 && !!url) {
         return {

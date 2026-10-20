@@ -27,6 +27,11 @@ const STATUS_JSON_PATH = fileURLToPath(new URL("./_status.json", import.meta.url
 /** 状态文件路径；拿不到 HOME 时返回 null（调用方需容错）。 */
 export function statePath() {
   try {
+    const envDir = (process.env.MEMHUB_STATE_DIR || "").trim();
+    if (envDir) {
+      if (envDir.endsWith(STATE_FILENAME)) return envDir;
+      return path.join(envDir, STATE_FILENAME);
+    }
     return path.join(os.homedir(), STATE_DIRNAME, STATE_FILENAME);
   } catch (e) {
     return null;
@@ -50,6 +55,75 @@ export function _resetStateCacheForTests() {
 }
 
 /** 读状态。带进程内 mtime 缓存，损坏自愈与防抹平保护。 */
+/**
+ * 抽公共函数：状态文件损坏时执行自愈与容灾。
+ * 1. 同步将损坏内容写入 .corrupt.<ts> 备份（防 FUSE 延迟）
+ * 2. 尝试从 .bak 恢复
+ * 3. 严禁回写空 {}，失败时保持 _ok: false
+ */
+export function _recoverCorruptStateFile(p, raw, err) {
+  const corruptPath = `${p}.corrupt.${Date.now()}`;
+  try {
+    let contentToWrite = typeof raw === "string" ? raw : "";
+    if (!contentToWrite && fs.existsSync(p)) {
+      try { contentToWrite = fs.readFileSync(p, "utf8"); } catch (_) {}
+    }
+    fs.writeFileSync(corruptPath, contentToWrite, "utf8");
+    try { fs.unlinkSync(p); } catch (_) {
+      try { fs.renameSync(p, corruptPath); } catch (_) {}
+    }
+  } catch (_) {
+    try { fs.renameSync(p, corruptPath); } catch (_) {}
+  }
+
+  const bakPath = `${p}.bak`;
+  if (fs.existsSync(bakPath)) {
+    try {
+      const bakRaw = fs.readFileSync(bakPath, "utf8");
+      const bakObj = JSON.parse(bakRaw);
+      if (bakObj && typeof bakObj === "object") {
+        const recovered = {
+          current: typeof bakObj.current === "string" ? bakObj.current : "",
+          secrets: bakObj.secrets && typeof bakObj.secrets === "object" ? bakObj.secrets : {},
+          actions: bakObj.actions && typeof bakObj.actions === "object" ? bakObj.actions : {},
+          audit: bakObj.audit && typeof bakObj.audit === "object" ? bakObj.audit : {},
+          gateway_harvest: bakObj.gateway_harvest && typeof bakObj.gateway_harvest === "object" ? bakObj.gateway_harvest : {},
+          pending_patterns: bakObj.pending_patterns && typeof bakObj.pending_patterns === "object" ? bakObj.pending_patterns : {},
+          r2_mounts: bakObj.r2_mounts && typeof bakObj.r2_mounts === "object" ? bakObj.r2_mounts : {},
+          harvest_queue: Array.isArray(bakObj.harvest_queue) ? bakObj.harvest_queue : [],
+          _ok: true,
+          _recovered_from_bak: true,
+        };
+        try {
+          fs.copyFileSync(bakPath, p);
+          const restat = fs.statSync(p);
+          _cachedState = recovered;
+          _cachedMtime = restat.mtimeMs;
+          _cachedSize = restat.size;
+          _cachedIno = restat.ino;
+          _cachedPath = p;
+        } catch (_) {}
+        return JSON.parse(JSON.stringify(recovered));
+      }
+    } catch (_) {}
+  }
+
+  _cachedState = null;
+  _cachedMtime = 0;
+  _cachedPath = null;
+  return {
+    secrets: {},
+    actions: {},
+    gateway_harvest: {},
+    pending_patterns: {},
+    r2_mounts: {},
+    harvest_queue: [],
+    _ok: false,
+    _corrupt: true,
+    _err: String((err && err.message) || err || "invalid state object"),
+  };
+}
+
 export function readState() {
   const p = statePath();
   if (!p) return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: false };
@@ -76,94 +150,11 @@ export function readState() {
     try {
       o = JSON.parse(raw);
     } catch (jsonErr) {
-      // JSON 解析失败：损坏自愈与防抹平保护
-      const corruptPath = `${p}.corrupt.${Date.now()}`;
-      try {
-        fs.renameSync(p, corruptPath);
-      } catch (_) {}
-
-      // 尝试加载 state.json.bak 备份
-      const bakPath = `${p}.bak`;
-      if (fs.existsSync(bakPath)) {
-        try {
-          const bakObj = JSON.parse(fs.readFileSync(bakPath, "utf8"));
-          if (bakObj && typeof bakObj === "object") {
-            const recovered = {
-              current: typeof bakObj.current === "string" ? bakObj.current : "",
-              secrets: bakObj.secrets && typeof bakObj.secrets === "object" ? bakObj.secrets : {},
-              actions: bakObj.actions && typeof bakObj.actions === "object" ? bakObj.actions : {},
-              audit: bakObj.audit && typeof bakObj.audit === "object" ? bakObj.audit : {},
-              gateway_harvest: bakObj.gateway_harvest && typeof bakObj.gateway_harvest === "object" ? bakObj.gateway_harvest : {},
-              pending_patterns: bakObj.pending_patterns && typeof bakObj.pending_patterns === "object" ? bakObj.pending_patterns : {},
-              r2_mounts: bakObj.r2_mounts && typeof bakObj.r2_mounts === "object" ? bakObj.r2_mounts : {},
-              harvest_queue: Array.isArray(bakObj.harvest_queue) ? bakObj.harvest_queue : [],
-              _ok: true,
-              _recovered_from_bak: true,
-            };
-            try {
-              fs.copyFileSync(bakPath, p);
-              const restat = fs.statSync(p);
-              _cachedState = recovered;
-              _cachedMtime = restat.mtimeMs;
-              _cachedSize = restat.size;
-              _cachedIno = restat.ino;
-              _cachedPath = p;
-            } catch (_) {}
-            return JSON.parse(JSON.stringify(recovered));
-          }
-        } catch (_) {}
-      }
-
-      _cachedState = null;
-      _cachedMtime = 0;
-      _cachedPath = null;
-      return {
-        secrets: {},
-        actions: {},
-        gateway_harvest: {},
-        pending_patterns: {},
-        r2_mounts: {},
-        harvest_queue: [],
-        _ok: false,
-        _corrupt: true,
-        _err: String(jsonErr && jsonErr.message || jsonErr),
-      };
+      return _recoverCorruptStateFile(p, raw, jsonErr);
     }
 
     if (!o || typeof o !== "object") {
-      const corruptPath = `${p}.corrupt.${Date.now()}`;
-      try { fs.renameSync(p, corruptPath); } catch (_) {}
-      const bakPath = `${p}.bak`;
-      if (fs.existsSync(bakPath)) {
-        try {
-          const bakObj = JSON.parse(fs.readFileSync(bakPath, "utf8"));
-          if (bakObj && typeof bakObj === "object") {
-            const recovered = {
-              current: typeof bakObj.current === "string" ? bakObj.current : "",
-              secrets: bakObj.secrets && typeof bakObj.secrets === "object" ? bakObj.secrets : {},
-              actions: bakObj.actions && typeof bakObj.actions === "object" ? bakObj.actions : {},
-              audit: bakObj.audit && typeof bakObj.audit === "object" ? bakObj.audit : {},
-              gateway_harvest: bakObj.gateway_harvest && typeof bakObj.gateway_harvest === "object" ? bakObj.gateway_harvest : {},
-              pending_patterns: bakObj.pending_patterns && typeof bakObj.pending_patterns === "object" ? bakObj.pending_patterns : {},
-              r2_mounts: bakObj.r2_mounts && typeof bakObj.r2_mounts === "object" ? bakObj.r2_mounts : {},
-              harvest_queue: Array.isArray(bakObj.harvest_queue) ? bakObj.harvest_queue : [],
-              _ok: true,
-              _recovered_from_bak: true,
-            };
-            try {
-              fs.copyFileSync(bakPath, p);
-              const restat = fs.statSync(p);
-              _cachedState = recovered;
-              _cachedMtime = restat.mtimeMs;
-              _cachedSize = restat.size;
-              _cachedIno = restat.ino;
-              _cachedPath = p;
-            } catch (_) {}
-            return JSON.parse(JSON.stringify(recovered));
-          }
-        } catch (_) {}
-      }
-      return { secrets: {}, actions: {}, gateway_harvest: {}, pending_patterns: {}, r2_mounts: {}, harvest_queue: [], _ok: false, _corrupt: true };
+      return _recoverCorruptStateFile(p, raw, new Error("state is not an object"));
     }
 
     const parsed = {
@@ -581,15 +572,25 @@ export function forgetR2Mount(database) {
     }
     if (changed) writeState(st);
   }
-  // 同时同步清除 _status.json 中的 r2 挂载卡片状态，杜绝已解绑的数据库被 _status.json 僵尸复活
+  // 同时同步清除 _status.json 与 _status.js 中的 r2 挂载卡片状态，杜绝已解绑的数据库被 _status.json/js 僵尸复活
   try {
     const p = STATUS_JSON_PATH;
+    const jsPath = p.replace(/\.json$/, ".js");
+    let o = null;
     if (fs.existsSync(p)) {
-      const o = JSON.parse(fs.readFileSync(p, "utf8"));
-      if (o && o.r2) {
-        delete o.r2;
-        fs.writeFileSync(p, JSON.stringify(o, null, 2));
-      }
+      try { o = JSON.parse(fs.readFileSync(p, "utf8")); } catch (_) {}
+    }
+    if ((!o || !o.r2) && fs.existsSync(jsPath)) {
+      try {
+        const text = fs.readFileSync(jsPath, "utf8");
+        const m = text.match(/window\.__memhubStatus\s*=\s*(\{[\s\S]*\});?\s*$/);
+        if (m) o = Object.assign({}, JSON.parse(m[1]), o || {});
+      } catch (_) {}
+    }
+    if (o && typeof o === "object" && o.r2) {
+      delete o.r2;
+      try { fs.writeFileSync(p, JSON.stringify(o, null, 2), "utf8"); } catch (_) {}
+      try { fs.writeFileSync(jsPath, `window.__memhubStatus = ${JSON.stringify(o, null, 2)};\n`, "utf8"); } catch (_) {}
     }
   } catch (_) {}
   return true;
@@ -690,8 +691,11 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
   let targetKey = fingerprint;
 
   // P0-3: 同 project + kind === "pitfall" 时做语义模糊去重
-  if (!entry && (kind === "pitfall" || options.kind === "pitfall") && payload) {
-    const curProject = String(options.project || payload.project || "").trim();
+  const isPitfall = kind === "pitfall" || options.kind === "pitfall" || (payload && payload.kind === "pitfall") || (typeof fingerprint === "string" && fingerprint.startsWith("p:"));
+  if (!entry && isPitfall && payload) {
+    const fpParts = typeof fingerprint === "string" ? fingerprint.split(":") : [];
+    const fpProj = fpParts.length >= 3 && fpParts[0] === "p" ? fpParts[1] : "";
+    const curProject = String(options.project || payload.project || fpProj || "").trim();
     const curComp = String(payload.component || "").trim().toLowerCase();
     const curSym = String(payload.symptom || payload.title || "").trim();
     const curSol = String(payload.solution || payload.root_cause || "").trim();
@@ -702,7 +706,9 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
         const candKind = cand.kind || (k.startsWith("p:") ? "pitfall" : "");
         if (candKind !== "pitfall") continue;
         const candPayload = cand.payload || {};
-        const candProject = String(candPayload.project || "").trim();
+        const candFpParts = typeof k === "string" ? k.split(":") : [];
+        const candFpProj = candFpParts.length >= 3 && candFpParts[0] === "p" ? candFpParts[1] : "";
+        const candProject = String(candPayload.project || candFpProj || "").trim();
         if (curProject && candProject && curProject !== candProject) continue;
         const candComp = String(candPayload.component || "").trim().toLowerCase();
         const candSym = String(candPayload.symptom || candPayload.title || "").trim();

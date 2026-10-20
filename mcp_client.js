@@ -143,12 +143,13 @@ export function buildSelect(table, params) {
     }
   }
   const limRaw = String(p.limit == null ? "" : p.limit).trim();
-  const limit = /^\d+$/.test(limRaw) && Number(limRaw) > 0 ? Math.floor(Number(limRaw)) : 200;
-  sql += " LIMIT " + Math.min(limit, 1000);
+  const rawLimit = /^\d+$/.test(limRaw) && Number(limRaw) > 0 ? Math.floor(Number(limRaw)) : 200;
+  const effectiveLimit = Math.min(rawLimit, 1000);
+  sql += " LIMIT " + effectiveLimit;
   const pageRaw = String(p.page == null ? "" : p.page).trim();
   const page = /^\d+$/.test(pageRaw) ? Number(pageRaw) : 0;
   const offRaw = String(p.offset == null ? "" : p.offset).trim();
-  const offset = /^\d+$/.test(offRaw) ? Number(offRaw) : (page > 1 ? (page - 1) * limit : 0);
+  const offset = /^\d+$/.test(offRaw) ? Number(offRaw) : (page > 1 ? (page - 1) * effectiveLimit : 0);
   if (offset > 0) sql += " OFFSET " + Math.floor(offset);
   return sql;
 }
@@ -266,9 +267,14 @@ export function makeMcpClient(cfg, signal) {
       if (!id) {
         // 拿不到 insertId 时回查一次，保证调用方拿得到 id
         try {
-          const backQuery = data.content_fingerprint
-            ? { project: data.project, content_fingerprint: data.content_fingerprint, order_by: "id DESC", limit: 1 }
-            : { project: data.project, title: data.title, order_by: "id DESC", limit: 1 };
+          let backQuery;
+          if (data.content_fingerprint) {
+            backQuery = { project: data.project, content_fingerprint: data.content_fingerprint, order_by: "id DESC", limit: 1 };
+          } else if (table === "pitfalls") {
+            backQuery = { project: data.project, symptom: data.symptom, order_by: "id DESC", limit: 1 };
+          } else {
+            backQuery = { project: data.project, title: data.title, order_by: "id DESC", limit: 1 };
+          }
           const back = await run(buildSelect(table, backQuery));
           const row = (back.rows || [])[0];
           return Object.assign({}, data, { id: (row && row.id) || 0 });
