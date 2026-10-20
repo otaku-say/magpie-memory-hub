@@ -162,6 +162,40 @@ export function overlapCoefficient(setA, setB) {
  * 纯数字 token 走 === 严格全等（防止 "80" 与 "8080" 误判为同一实体）；
  * 含字母 token 才允许 includes 子串包含匹配。
  */
+/**
+ * 数字冲突守卫（v6.32.0 新增，全仓库共用）
+ *
+ * 背景：normalizeSemanticText 会移除空格，使 "Port 80" 变成 "port80"，
+ * 从而绕过 /^\d+$/ 的纯数字检查，导致 "Port 80" 与 "Port 8080"、
+ * "Node 18" 与 "Node 20" 被误判为同一实体。
+ *
+ * 本函数直接在**原始文本**上提取数字串并比对：
+ *  - 两侧都无数字              => 不冲突
+ *  - 两侧数字集合完全相同       => 不冲突
+ *  - 任一侧数字集合不同        => 冲突（禁止合并）
+ *
+ * @param {string} a 原始文本 A
+ * @param {string} b 原始文本 B
+ * @returns {boolean} true 表示存在数字冲突，调用方必须拒绝判为同一实体
+ */
+export function hasConflictingNumbers(a, b) {
+  const extract = (t) => {
+    const raw = String(t == null ? "" : t);
+    // 抓取独立的数字串（含小数与常见版本号写法 v1.2.3 / 1.2.3）
+    const nums = raw.match(/\d+(?:\.\d+)*/g) || [];
+    return new Set(nums.map((x) => String(Number(x) === Number(x) ? Number(x) : x)));
+  };
+  const na = extract(a);
+  const nb = extract(b);
+  if (na.size === 0 && nb.size === 0) return false;
+  if (na.size === 0 || nb.size === 0) return false; // 一侧无数字，不构成冲突
+  if (na.size !== nb.size) return true;
+  for (const x of na) {
+    if (!nb.has(x)) return true;
+  }
+  return false;
+}
+
 export function isAlphaTokenMatch(a, b) {
   if (typeof a !== "string" || typeof b !== "string") return false;
   if (a === b) return true;
@@ -170,6 +204,9 @@ export function isAlphaTokenMatch(a, b) {
   if (aIsDigit || bIsDigit) {
     return a === b;
   }
+  // v6.32.0：字母粘连数字（port80 / node18）必须先做数字冲突校验，
+  // 否则 includes 会把 port80 与 port8080 判为同一实体
+  if (hasConflictingNumbers(a, b)) return false;
   return a.includes(b) || b.includes(a);
 }
 
