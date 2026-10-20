@@ -133,15 +133,83 @@ export const FORBIDDEN_PREFIXES = [
   "/home",
 ];
 
+/**
+ * 校验路径是否位于 /var 下允许的白名单子域（仅允许 minis, folders, tmp）。
+ * 若为 /var 自身或其它未允许子域（如 /var/log），则返回 false。
+ */
+export function isVarSubdomainAllowed(p) {
+  if (!p || typeof p !== "string") return true;
+  const norm = p.replace(/\\/g, "/");
+  let rest = null;
+  if (norm === "/private/var" || norm.startsWith("/private/var/")) {
+    rest = norm.slice("/private/var".length);
+  } else if (norm === "/var" || norm.startsWith("/var/")) {
+    rest = norm.slice("/var".length);
+  }
+  if (rest === null) return true; // not under /var
+  if (rest === "" || rest === "/") return false; // /var 自身禁止
+  const sub = rest.replace(/^\/+/, "").split("/")[0];
+  return sub === "minis" || sub === "folders" || sub === "tmp";
+}
+
 export function isWhitelistedGatewayDir(normPath) {
   if (!normPath || typeof normPath !== "string") return false;
   const p = normPath.replace(/\\/g, "/");
 
+  // 第一步：严格校验真实父目录与根域是否命中敏感黑名单
+  // 1. /var 或 /private/var 下仅允许 minis / folders / tmp 三个子域，其它（如 /var/log）一律拒
+  if (!isVarSubdomainAllowed(p)) {
+    return false;
+  }
+
+  // 2. 检查真实父目录/祖先链是否命中敏感黑名单或敏感子路径
+  try {
+    let cur = path.resolve(normPath);
+    while (cur && cur !== path.dirname(cur)) {
+      if (fs.existsSync(cur)) {
+        try {
+          const realCur = fs.realpathSync(cur).replace(/\\/g, "/");
+          // 真实祖先若在 /var 的某个子域下，同样只允许 minis / folders / tmp
+          if (realCur.startsWith("/var/") || realCur.startsWith("/private/var/")) {
+            if (!isVarSubdomainAllowed(realCur)) {
+              return false;
+            }
+          }
+          // 检查真实祖先是否命中 HARD_FORBIDDEN_PREFIXES
+          for (const prefix of HARD_FORBIDDEN_PREFIXES) {
+            if (realCur === prefix || realCur.startsWith(prefix + "/")) {
+              return false;
+            }
+          }
+          // 检查真实祖先是否命中敏感子路径
+          const segs = realCur.split(/[\/\\]+/);
+          const SENSITIVE_SEGMENTS = new Set([
+            ".ssh",
+            ".gnupg",
+            ".aws",
+            ".docker",
+            ".kube",
+            ".magpie-memory-hub",
+          ]);
+          for (const s of segs) {
+            if (SENSITIVE_SEGMENTS.has(s)) return false;
+          }
+        } catch (_) {}
+        break;
+      }
+      cur = path.dirname(cur);
+    }
+  } catch (_) {}
+
+  // 第二步：白名单特征匹配
   // 1. Minis 工作目录与 macOS 临时目录
   if (p === "/var/minis" || p.startsWith("/var/minis/") || p === "/private/var/minis" || p.startsWith("/private/var/minis/")) {
     return true;
   }
   if (p === "/var/folders" || p.startsWith("/var/folders/") || p === "/private/var/folders" || p.startsWith("/private/var/folders/")) {
+    return true;
+  }
+  if (p === "/var/tmp" || p.startsWith("/var/tmp/") || p === "/private/var/tmp" || p.startsWith("/private/var/tmp/")) {
     return true;
   }
 
@@ -219,7 +287,12 @@ function checkPathForbidden(targetPath) {
     }
   }
 
-  // 3. /home、/root、/var 系统目录：根目录硬拦，子路径通过白名单放行，未命中白名单则拦截
+  // 3. /var 根域子域限制（仅允许 minis / folders / tmp，其它如 /var/log 一律拒）
+  if (!isVarSubdomainAllowed(norm)) {
+    throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${norm}`);
+  }
+
+  // 4. /home、/root、/var 系统目录：根目录硬拦，子路径通过白名单放行，未命中白名单则拦截
   if (norm === "/home" || norm === "/root" || norm === "/var" || norm === "/private/var") {
     throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录或根路径: ${norm}`);
   }
@@ -275,16 +348,23 @@ export function validateGatewayDir(customDir) {
         if (curStat) {
           try {
             const parentReal = fs.realpathSync(cur);
-            // 向上回溯时对每一层祖先都做完整校验（HARD_FORBIDDEN_PREFIXES + 敏感子路径黑名单 + 状态目录 + 白名单逻辑）
-            if (!isWhitelistedGatewayDir(realPath)) {
-              checkPathForbidden(parentReal);
-            } else {
-              checkSensitiveSubpaths(parentReal);
+            // 向上回溯时对每一层祖先的真实路径进行敏感黑名单与 /var 子域检查
+            for (const prefix of HARD_FORBIDDEN_PREFIXES) {
+              if (parentReal === prefix || parentReal.startsWith(prefix + path.sep)) {
+                throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${parentReal}`);
+              }
             }
+            if (parentReal.startsWith("/var" + path.sep) || parentReal.startsWith("/private/var" + path.sep)) {
+              if (!isVarSubdomainAllowed(parentReal)) {
+                throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${parentReal}`);
+              }
+            }
+            checkSensitiveSubpaths(parentReal);
 
             // 一旦解析出 parentReal 就用它替换 realPath 继续向上
             const rel = path.relative(cur, realPath);
             realPath = rel ? path.resolve(parentReal, rel) : parentReal;
+            // 无论是否白名单分支都必须对重构后的 realPath 执行 checkPathForbidden
             checkPathForbidden(realPath);
 
             cur = parentReal;
@@ -549,12 +629,32 @@ function turnFingerprint(turn) {
  * @param {object} context 宿主上下文（包含 client, cfg, saveMemory, pitfallSave, signal 等）
  */
 export function isTestMode() {
-  if (process.env.NODE_ENV === "test" || process.env.MAGPIE_TEST === "1") return true;
+  if (
+    process.env.NODE_ENV === "test" ||
+    process.env.MAGPIE_TEST === "1" ||
+    process.env.MEMHUB_TEST === "1"
+  ) {
+    return true;
+  }
   if (typeof process !== "undefined" && Array.isArray(process.argv)) {
-    const entry = String(process.argv[1] || "");
-    if (entry.includes("/tests/") || entry.includes("\\tests\\") || entry.includes("test_") || entry.endsWith(".test.mjs") || entry.endsWith(".test.js")) {
-      return true;
-    }
+    return process.argv.some((arg) => {
+      if (typeof arg !== "string") return false;
+      const base = path.basename(arg);
+      // 1) 匹配测试脚本文件名规则：以 test_ 开头或 .test.mjs / .test.js 结尾
+      if (/^test_.*\.mjs$/i.test(base) || /\.test\.(?:mjs|js)$/i.test(base)) {
+        return true;
+      }
+      // 2) 仅当以 .mjs 结尾且父目录名精确等于 "tests"
+      if (arg.endsWith(".mjs")) {
+        try {
+          const resolved = path.resolve(arg);
+          if (path.basename(path.dirname(resolved)) === "tests") {
+            return true;
+          }
+        } catch (_) {}
+      }
+      return false;
+    });
   }
   return false;
 }

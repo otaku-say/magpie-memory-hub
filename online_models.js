@@ -58,6 +58,7 @@ export const KNOWN_ERRORS_CHEAT_SHEET = `
    - 可执行步骤：① 检查当前网络与 DNS 设置；② 在浏览器中尝试访问 https://app.nocodebackend.com 验证远端服务状态；③ 稍后重试操作。
 `;
 
+export const ERROR_DIAGNOSE_SYSTEM_PROMPT_LEAD = "系统故障诊断专家";
 export const ERROR_DIAGNOSE_SYSTEM_PROMPT = `你是一个专业的云原生架构与系统故障诊断专家，专门协助排查 Magpie Memory Hub 插件（集成 NoCodeBackend、Cloudflare R2、MCP 协议与大模型网关）的运行异常。
 
 你的核心任务：将底层原始、晦涩的系统报错，转化为开发者和终端用户能一眼看懂的「人话结论」与「可执行的处理步骤」。
@@ -84,6 +85,7 @@ ${KNOWN_ERRORS_CHEAT_SHEET}
   ]
 }`;
 
+export const QUERY_REWRITE_SYSTEM_PROMPT_LEAD = "长期记忆检索改写助手";
 export const QUERY_REWRITE_SYSTEM_PROMPT = `你是一个专业的长期记忆检索改写助手。用户的查询可能是口语化、问句或自然语言描述，而记忆库主要依据「标题(权重5)」「标签(权重3)」「正文(权重1)」进行关键词检索。
 
 你的核心任务：将用户的自然语言查询改写为最适合关键词检索的高召回表达。
@@ -377,6 +379,7 @@ export async function rewriteSearchQuery({
 /**
  * 记忆全自动去重 System Prompt（单次模型调用完成判定与合并结果生成）
  */
+export const AUDIT_SYSTEM_PROMPT_LEAD = "长期记忆中枢全自动去重专家";
 export const AUDIT_SYSTEM_PROMPT = `你是一个专业的长期记忆中枢全自动去重专家。
 你的任务是在单次调用中同时完成「判定 + 生成合并结果」，识别重复记忆与踩坑条目。
 
@@ -542,6 +545,7 @@ export async function auditMemoriesWithModel({
 /**
  * 检索增强与语义重排 System Prompt
  */
+export const RERANK_SYSTEM_PROMPT_LEAD = "记忆中枢检索增强与语义重排专家";
 export const RERANK_SYSTEM_PROMPT = `你是一个专业的记忆中枢检索增强与语义重排专家。
 智能体根据用户的问题/任务，从知识库中粗筛召回了一组候选记忆/踩坑记录。
 你的任务是：根据与用户查询的「真实语义相关度」和「对解决问题的价值」，从候选列表中挑选最相关的条目并进行重排打分。
@@ -678,3 +682,10 @@ export async function rerankSearchResultsWithModel({
   }
 }
 
+
+export const CORE_SYSTEM_PROMPT_LEADS = [
+  ERROR_DIAGNOSE_SYSTEM_PROMPT_LEAD,
+  QUERY_REWRITE_SYSTEM_PROMPT_LEAD,
+  AUDIT_SYSTEM_PROMPT_LEAD,
+  RERANK_SYSTEM_PROMPT_LEAD,
+];

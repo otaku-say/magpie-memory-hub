@@ -106,12 +106,16 @@ export function getInternalModelHeaders(apiKey = "", extraHeaders = {}) {
  * - "长期记忆与踩坑经验提炼助手"：gateway_harvest.hooks.js HARVEST_SYSTEM_PROMPT
  * - "系统故障诊断专家"：online_models.js ERROR_DIAGNOSE_SYSTEM_PROMPT
  * - "长期记忆检索改写助手"：online_models.js QUERY_REWRITE_SYSTEM_PROMPT
+ * - "长期记忆中枢全自动去重专家"：online_models.js AUDIT_SYSTEM_PROMPT (P0-1 对齐实际提示词)
+ * - "长期记忆中枢体检与质量审阅专家"：历史兼容与旧版提示词
+ * - "记忆中枢检索增强与语义重排专家"：online_models.js RERANK_SYSTEM_PROMPT
  */
 export const INTERNAL_PROMPT_MARKERS = [
   "会话价值判定器",
   "长期记忆与踩坑经验提炼助手",
   "系统故障诊断专家",
   "长期记忆检索改写助手",
+  "长期记忆中枢全自动去重专家",
   "长期记忆中枢体检与质量审阅专家",
   "记忆中枢检索增强与语义重排专家",
 ];
@@ -171,9 +175,12 @@ export function isInternalHarvestRequest(body, ctx) {
       if (body.questions !== undefined && body.state !== undefined) return true;
 
       // 检查「所有可能承载 system prompt 的位置」：
-      // body.system、body.systemInstruction、body.instructions
+      // body.system、body.systemInstruction (驼峰) 与 body.system_instruction (snake_case)、body.instructions
       if (_checkPromptSnippet(body.system)) return true;
       if (_checkPromptSnippet(body.systemInstruction)) return true;
+      if (_checkPromptSnippet(body.system_instruction)) return true;
+      if (_checkPromptSnippet(body.systemInstructions)) return true;
+      if (_checkPromptSnippet(body.system_instructions)) return true;
       if (_checkPromptSnippet(body.instructions)) return true;
 
       // Gemini contents 形态：检查 contents[0] 与 contents 末元素，每个最多前 2000 字符
