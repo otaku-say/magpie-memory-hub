@@ -17,7 +17,7 @@
  * 3. 【EVO-9a 冲突感知与显式 supersede_id 双向反证】
  *    - 冲突感知反证：新增记忆时存在同主题但含冲突数字的旧记录，ADD 返回体必须附带 conflict_candidates 与建议提示；
  *    - 无冲突反证：新增记忆无冲突时，conflict_candidates 必须为空；
- *    - supersede_id 显式取代反证：显式传入 supersede_id 时，目标旧记录被软失效且 invalid_reason 为 superseded_by:<newId>。
+ *    - supersede_id 显式取代反证：显式传入 supersede_id 时，目标旧记录被软失效且 invalid_reason 为 superseded-by:<newId>。
  *
  * 4. 【测试规范元检查与零残留】
  *    - scanTestFile 自检 0 违规，测试结束后 0 残留断言。
@@ -298,12 +298,12 @@ async function run() {
     assert.strictEqual(checkOldPort.lifecycle_status, "superseded", "旧记录状态必须标记为 superseded");
     assert.strictEqual(
       checkOldPort.invalid_reason,
-      `superseded_by:${newPortId.id}`,
-      "【反证门 3.3 通过】：invalid_reason 必须精确记录为 superseded_by:<newId>！"
+      `superseded-by:${newPortId.id}`,
+      "【反证门 3.3 通过】：invalid_reason 必须精确记录为 superseded-by:<newId>！"
     );
     assert.strictEqual(checkOldPort.superseded_by_id, newPortId.id, "superseded_by_id 外键列必须正确记录新记录 ID");
     assert.ok(checkOldPort.invalid_at != null, "invalid_at 必须已记录时间戳");
-    console.log("  ✓ 3.3 supersede_id 显式取代反证通过（旧记录软失效且 invalid_reason 为 superseded_by:<newId>）");
+    console.log("  ✓ 3.3 supersede_id 显式取代反证通过（旧记录软失效且 invalid_reason 为 superseded-by:<newId>）");
 
     // =============================================================
     // 4. 元规范自检与零残留

@@ -2052,3 +2052,284 @@ Agent 对已有简短记忆（例如「使用 Redis 缓存会话数据」）补�
 - `tests/test_v636_c_evo.mjs`: 包含上述 6 大类全部正反向断言的双向反证测试套件。
 - `NOTES_v636_c.md`: 完整的整改设计、反证矩阵与验收执行记录。
 
+
+
+---
+
+## 三十七、v6.37.0 写入链路：BUG-1 根因保护 / BUG-3 supersede 穿透 / EVO-9a 冲突感知
+
+# Agent A 检查点报告：写入链路修复与演进增强 (v6.37-a)
+
+## 一、任务背景与文件所有权约定
+- **沙箱 ID**: `2ee9215f1290473e81a6c0fe30bc48f3`
+- **工作目录**: `/workspace/m`
+- **工作分支**: `feat/v637-a-write`
+- **文件所有权范围**:
+  - 独占修改: `tools.js` 中的 `saveMemory` 与 `pitfallSave` 两个函数区域。
+  - 独占新增: `tests/test_v637_a_write.mjs`、`NOTES_v637_a.md`。
+  - 严格禁改: `memoryContext` / `memoryList` / `memoryGet` / `memoryForget` / `memorySearch` / `normalizeToolArgs` 及其注册处、`semantic_dedup.js`、`gateway_harvest*.js`、`memory.middleware.js`、`test_meta.mjs` 以及历史测试文件。
+
+---
+
+## 二、BUG-1（高危）：pitfallSave 根因覆盖/数字冲突/tags 合并修复
+
+### 1. 现状根因分析
+- **根因被占位符覆盖**: 在原有 `pitfallSave` 实现中，入参 `rawRootCause = String(args.root_cause || "").trim()`，随后直接 `rootCause = scrubSecrets(rawRootCause || symptom)`。当首次调用存了真实根因（如 `root_cause: "连接池泄漏未释放"`），第二次调用仅补充更详尽方案 `solution`（未再显式传 `root_cause`）时，`rootCause` 自动回退为 `symptom`。随后在更新载荷中通过 `root_cause: newRc || oldRc` 赋值，由于 `newRc` 为 `symptom`（非空），导致数据库中的真实根因被强制冲刷回占位符 `symptom`。
+- **缺失解法数字冲突守卫**: `isSolutionMoreDetailed` 仅通过长度判断（`newSol.length >= oldSol.length * 1.3`），未校验 `!hasConflictingNumbers(oldSol, newSol)`。导致诸如 `2048MB` 配置被包含 `8192MB` 的新方案直接覆盖演进。
+- **演进丢失 tags**: 在 `EVOLVED` 更新载荷中，未对既有 `tags` 与新传入 `tags` 取并集，导致新标签丢失或旧标签未被继承。
+
+### 2. 修复方案与实现
+1. **显式根因保护**:
+   - 增加显式传参判定: `hasExplicitRootCause = Boolean(args.root_cause != null && String(args.root_cause).trim() !== "")`。
+   - 仅当调用方**显式传入**非空 `root_cause` 时才更新根因；若未传则严格保留库中原根因（`oldRc`），绝不以 `symptom` 顶替。
+   - 支持显式传新根因更新: 若调用方显式传入了不同于旧值且非占位的新根因，成功触发演进并更新记录。
+2. **数字冲突阻断演进**:
+   - 演进判定前增加数字冲突守卫: 若 `hasConflictingNumbers(oldSol, newSol)` 为真，禁止触发 `EVOLVED` 覆盖，改为执行 `NOOP`，累加 `recurrence` 与更新时间戳，并在返回 `note` 中明确说明「方案存在数字冲突，禁止演进覆盖，累加复发计数」。
+3. **标签并集融合**:
+   - 演进时对 `dup.tags` 与传入 `tags` 进行切分去重取并集，写入更新载荷。
+
+---
+
+## 三、BUG-3（中危）：saveMemory 显式 supersede 与 NOOP 标签实体保留
+
+### 1. 现状根因分析
+- **显式 supersede 被卡死**: 原有逻辑中 `const shouldEnrich = isSameTitle && noNumberConflict && (hasSignificantGrowth || isExplicitSupersede);`，由于 `isSameTitle` 位于与逻辑外层，当语义查重命中相似重复（`dup`）但标题措辞不同（`isSameTitle` 为 false）时，即便显式传入 `supersede: true`，也被强制拦截而无法进入 `ENRICHED` 融合路径。
+- **NOOP 分支丢弃 tags 与 related_entities**: 在 `saveMemory` 的 `else`（NOOP）分支中，仅更新了 `recurrence` 与 `updated_at`，新传入的 `tags` 与 `related_entities` 被完全丢弃，导致后续检索命中率与知识关联退化。
+
+### 2. 修复方案与实现
+1. **显式 supersede 穿透**:
+   - 调整扩充判定逻辑: `const shouldEnrich = noNumberConflict && (isExplicitSupersede || (isSameTitle && hasSignificantGrowth));`。
+   - 当调用方显式传入 `supersede: true` 时，只要不存在硬性数字冲突，即便标题不完全一致，亦必须进入 `ENRICHED` 融合路径，并将记录标题更新为新标题。
+2. **NOOP 分支并集回写**:
+   - 在 NOOP 更新载荷中，将本次传入的 `tags` 与既有 `dup.tags` 取并集、本次传入的 `related_entities` 与既有 `dup.related_entities` 取并集，通过 `client.update` 完整回写数据库，确保增量标签与技术实体不丢失。
+
+---
+
+## 四、EVO-9a 冲突感知与显式指定 supersede_id
+
+### 1. 设计目标与场景
+当 Agent 向记忆库存储事实/规范时，可能由于标题措辞差异或数字冲突（如默认监听 80 端口 vs 8080 端口）绕过语义合并而作为新记录 `ADD` 入库。库中同时并存两套互相矛盾的配置会导致后续问答产生幻觉。
+
+### 2. 技术实现
+1. **冲突感知检测**:
+   - 在 `saveMemory` 执行 `ADD` 入库后，扫描当前同 `project`、未失效（`lifecycle_status === 'active'` 且无 `invalid_at`）的所有历史记忆。
+   - 标题同主题判定: 综合归一化标题包含、分词重合度（`overlapCoefficient >= 0.4` / `jaccardSimilarity >= 0.25`）以及去数字归一化重合度判定。
+   - 冲突检测: 若 `hasConflictingNumbers(title, r.title)` 或 `hasConflictingNumbers(content, r.content)` 为真，即判定为存在配置数字冲突。
+   - 附加信息: 收集最多 3 条候选，在返回体中附加 `conflict_candidates: [{id, title, content}]`（其中 `content` 截取前 100 字符摘要），并附加提示 `note: "可能存在配置冲突，建议用 supersede_id 取代或 memory_forget 淘汰"`。
+   - 保底反证: 若无任何冲突项，返回体绝不污染附带 `conflict_candidates`，主流程与已有接口字段保持严格向后兼容。
+2. **显式 supersede_id 淘汰旧记录**:
+   - `saveMemory` 支持传入 `supersede_id`: 指定需要取代的旧记录主键 ID。
+   - 写入新记录后，立即将目标记录软失效: `lifecycle_status = "superseded"`、`superseded_by_id = newId`、`invalid_at = nowSql()`、`invalid_reason = "superseded_by:<newId>"`。
+   - 返回 `action: "UPDATE"` 与 `superseded_id`，并累加版本审计链。
+
+---
+
+## 五、双向反证用例设计矩阵 (tests/test_v637_a_write.mjs)
+
+| 模块 | 正向验证 (Positive) | 反向反证 (Negative) |
+| :--- | :--- | :--- |
+| **BUG-1 根因保护** | 显式传入新根因时，记录的 `root_cause` 成功更新为新根因，action 为 `EVOLVED` | 未显式传根因仅扩充方案时，库中原真实根因必须严格保留，绝不得被 `symptom` 顶替 |
+| **BUG-1 数字冲突** | 无数字冲突且方案显著增长时正常触发 `EVOLVED` | 方案包含数字冲突（如 2048MB vs 8192MB）时，严禁演进覆盖，必须返回 `NOOP` 并在 note 中指明数字冲突 |
+| **BUG-1 标签合并** | 踩坑演进时，新旧 tags 自动取并集融合入库 | 演进不覆盖/丢弃既有 tags |
+| **BUG-3 supersede 标题** | 命中 dup 且标题不一致时，传 `supersede: true` 必须进入 `ENRICHED` 融合路径 | 未传 `supersede: true` 且标题不同时，维持原有判定路径 |
+| **BUG-3 NOOP 标签实体** | NOOP 分支下，传入的新 tags 与 related_entities 成功与库中旧值合并回写 | NOOP 下数据库中正文内容严格不得被覆盖 |
+| **EVO-9a 冲突感知** | 保存同主题但含冲突数字的配置（如 8080 vs 80）时，ADD 返回体必须包含 `conflict_candidates` 与提示文案 | 保存完全无关或无冲突数字的记忆时，`conflict_candidates` 必须为空 |
+| **EVO-9a supersede_id** | 传入 `supersede_id` 时，旧记录被软失效且 `invalid_reason` 精确记录为 `superseded_by:<newId>` | 未传 `supersede_id` 时，旧记录不受非预期软失效影响 |
+
+
+
+---
+
+## 三十八、v6.37.0 读取与入口：BUG-2 入口容错 / BUG-4 检索展开 / EVO-9b 版本链 / EVO-10 知识画像
+
+# Agent B 检查点报告：读取与入口链路修复与演进 (v6.37-b)
+
+## 1. 任务背景与文件所有权约定
+- **沙箱 ID**: `3bd945da377d4b3ca95bda7bc41861d4`
+- **代码目录**: `/workspace/m`
+- **工作分支**: `feat/v637-b-read`
+- **文件所有权范围（严格限定）**:
+  - `tools.js`（仅限 memorySearch / memoryGet / memoryForget / memoryList / memoryContext 五个函数区，以及 normalizeToolArgs 的注册调用处）
+  - `tests/test_v637_b_read.mjs`（新增专项双向反证测试）
+  - `NOTES_v637_b.md`（本设计与验收文档）
+- **严禁修改**: `saveMemory` / `pitfallSave` / `normalizeToolArgs` 函数本体（只改注册处补工具名）/ `semantic_dedup.js` / `gateway_harvest*.js` / `memory.middleware.js` / `test_meta.mjs` / 其他既有 tests。
+
+---
+
+## 2. 缺陷根因分析与技术实现方案
+
+### 2.1 【BUG-2 高危】memory_context 与 memory_list 接入 normalizeToolArgs
+- **现状与根因**:
+  - `tools.js` 注册处（约 3659 行）仅包装了 5 个工具（`["memory_save", "pitfall_save", "memory_search", "pitfall_search", "memory_get"]`），漏掉了 Agent 最常用的首选入口 `memory_context` 与 `memory_list`。
+  - 函数内部实现 `memoryContext` 与 `memoryList` 也未调用 `normalizeToolArgs`。
+  - **严重后果**:
+    1. 传 `{ q: "Redis" }` 调用 `memory_context` 时，`args.query` 为空，检索关键词失效；
+    2. 缺省 `project` 时无法继承 `cfg.project`，`projectArg` 为空串导致 `fetchAll` 拉取全表所有项目的数据，产生严重的跨项目数据串扰。
+- **修复方案**:
+  1. 在 `tools.js` 约 3659 行将 `memory_context` 与 `memory_list`（及 `memory_forget`）一并加入 `includes` 判定集合；
+  2. 在 `memoryContext` 与 `memoryList` 函数入口处均显式执行 `const args = normalizeToolArgs(rawArgs, cfg);`，形成双重防线；
+  3. `normalizeToolArgs` 规则确保：若 `args.query` 缺省，则映射 `keyword` 或 `q` 到 `query`，若已有合法 `query` 则绝不覆盖；缺省 `project` 时继承非 `"global"` 的 `cfg.project`，否则置为 `"global"`。
+
+### 2.2 【BUG-4 中危】检索与展开链路细节断层
+- **缺陷 1：memory_search 漏 `related_entities` 字段**:
+  - **根因**: `memorySearch` 虽然在 `fetchParams.columns` 中包含了 `related_entities`，但在最后 `out` 数组投影映射时漏掉了该字段，导致前端或调用方拿不到关联实体。
+  - **修复**: 在 `out` 的对象构造中补齐 `related_entities: x.row.related_entities || null`。
+- **缺陷 2：memory_get 无 table 时自动回退 pitfalls**:
+  - **根因**: 上下文提示行建议使用 `memory_get(id=...)` 查看全文，但未标注 table。当 Agent 直接调用 `memory_get({ id: 11 })` 展开踩坑记录时，因默认查 `memories` 表而直接抛错崩溃。
+  - **修复**: 在未显式传入 `table` 且 `memories` 表查无此 ID 时，自动尝试在 `pitfalls` 表回退查找；查到后正常格式化返回并标记 `table: "pitfalls"` 与 `auto_fallback: true`。若 `memories` 存在则保持 `memories` 优先，不触发回退。
+- **缺陷 3：memory_forget 批量软失效支持**:
+  - **根因**: `memory_get` 已支持 `ids: [1, 2]` 批量读取，但 `memory_forget` 仅支持单条 `id` 或 `query`，语义不对齐。
+  - **修复**: `memory_forget` 增加 `ids: [1, 2]` 批量处理逻辑（支持数组或逗号分隔），遍历标记 `invalid_at: now`、`invalid_reason: "user_forgot"`、`updated_at: now`，返回 `forgotten` 统计计数与逐条 `items` 详情。
+
+### 2.3 【EVO-9b】memory_get 读取 revision > 1 时附带 superseded_history
+- **要求**: 当记录 `revision > 1` 时，返回体附加 `superseded_history`（最多 3 条前序版本摘要：`revision` 号 + 当时的 `title`/`content` 前 120 字 + `updated_at`）。若平台无历史版本表，则从当前记录无法还原时，返回空数组并在 `note` 说明 `"历史版本未持久化"`。严禁伪造虚假数据。
+- **实现方案**:
+  - 在 `memoryGet` 中判定 `Number(hit.revision) > 1`；
+  - 查询数据库中同一 `project` 下被当前记录取代或标记为 `superseded` 的同名记录（支持 `superseded_by_id === hit.id`、`lifecycle_status === "superseded"` 且同 title、或 `revision < hit.revision` 且同 title）；
+  - 若查询到前序版本，按 `revision` 与 `updated_at` 降序排列，取前 3 条精简投影；
+  - 若无法从存储中还原前序版本，安全返回 `superseded_history: []` 并附带 `note: "历史版本未持久化"`。
+
+### 2.4 【EVO-10】memory_list 返回 knowledge_profile 自省画像
+- **要求**: 在返回体新增：
+  `knowledge_profile: { principle_count, preference_count, decision_count, near_crystallization: [{id,title,recurrence,threshold}], total_active }`
+  其中 `near_crystallization` 为 preference/decision 类且 `recurrence >= threshold - 1` 的记录（`threshold` 取 `cfg.crystallization_threshold`，默认 5），最多 5 条。统计需基于当前 project（含 global 穿透规则与既有实现一致）。
+- **实现方案**:
+  - `memoryList` 接入穿透逻辑：当 `projectArg && projectArg !== "global"` 时并发拉取当前项目与 global 活跃记录并去重；
+  - 遍历统计 `principle`、`preference`、`decision` 三类数量；
+  - 筛选 `preference` 与 `decision` 且 `recurrence >= threshold - 1` 的候选记录，按 `recurrence` 降序截取前 5 条输出为 `near_crystallization`；
+  - 返回完整的 `knowledge_profile` 统计画像。
+
+---
+
+## 3. 双向反证测试矩阵设计 (tests/test_v637_b_read.mjs)
+
+| 测试项 | 正向验证 (Positive) | 反向/边界反证 (Counter-Evidence) |
+| :--- | :--- | :--- |
+| **BUG-2: q 映射与不变性** | 传 `{ q: "Redis" }` 调 `memory_context` 成功召回 Redis 相关准则/踩坑 | 传 `{ query: "Original", q: "Conflict" }` 时，`query` 保持为 `"Original"` 绝不被覆盖 |
+| **BUG-2: project 继承与隔离** | 缺省 `project` 自动继承 `cfg.project`，隔离检索目标项目上下文 | 显式传 `project: "other"` 遵循显式参数；缺省时绝不全表跨项目泄漏 |
+| **BUG-4: related_entities 投影** | `memory_search` 返回的 memories 条目必包含 `related_entities` 字段及实体值 | 无实体记录优雅兜底为 null 或空串，字段存在且不崩溃 |
+| **BUG-4: memory_get 自动回退** | 未传 `table` 且 ID 仅存在于 `pitfalls` 时，成功回退并标 `auto_fallback: true` | 当 `memories` 与 `pitfalls` 均有记录或 `memories` 有记录时，严格优先返回 memories，不触发 fallback |
+| **BUG-4: 批量 forget** | 传 `ids: [1, 2]` 成功批量软失效，返回 `forgotten: 2` 与对应 `items` | 传统单条 `id: 1` 保持 100% 格式兼容，已失效记录再次失效安全幂等 |
+| **EVO-9b: superseded_history** | `revision > 1` 且有历史记录时返回前序版本摘要列表；无历史存储时返回空数组且 note 声明未持久化 | `revision === 1` 时不得输出虚假 `superseded_history` 历史 |
+| **EVO-10: knowledge_profile** | 正确统计 principle/preference/decision 数，`recurrence >= threshold - 1` 入选 near_crystallization | `recurrence < threshold - 1` 时 near 列表严格为空，绝不误报 |
+| **元检查自检** | `scanTestFile` 静态扫描本测试文件，0 违规，符合隔离、清理与残余为 0 规范 | 写库测试具备强制 `env.cleanup()` 与 `residue.total === 0` 断言 |
+
+---
+
+## 4. 验证与回归计划
+1. 执行 `node tests/test_v637_b_read.mjs` 验证全部正反向反证用例 100% 通过；
+2. 执行既有核心套件验证无回归：
+   - `node tests/test_proactive_memory_ux.mjs`
+   - `node tests/test_v636_c_evo.mjs`
+   - `node tests/test_v636_b_evo.mjs`
+   - `node tests/test_search_enhancement_and_scale.mjs`
+3. 遵循文件所有权与“禁改计数”原则，基准套件在 64 个测试下 100% PASS，新增测试自证合规，等待合并阶段统一锁定计数。
+
+
+---
+
+## 三十九、v6.37.0 提炼与中间件：BUG-5 提炼同步 / EVO-8 符号裂变与复发加权
+
+# Agent C 检查点报告：BUG-5 提炼链路同步新能力与 EVO-8 中间件符号感知+复发加权 (v6.37-c)
+
+## 1. 任务背景与文件所有权
+- **沙箱 ID**: `91bf90facbef46bf9d23d4ebae58e33f`
+- **代码目录**: `/workspace/m`
+- **工作分支**: `feat/v637-c-harvest`
+- **文件所有权约束（严格遵循）**:
+  - 独占修改:
+    - `gateway_harvest.hooks.js`（修复 BUG-5）
+    - `memory.middleware.js`（实现 EVO-8，严格保持 ES5 规范）
+  - 独占新增:
+    - `tests/test_v637_c_harvest.mjs`
+    - `NOTES_v637_c.md`（本文件）
+  - 严禁修改: `tools.js` / `semantic_dedup.js` / `local_state.js` / `test_meta.mjs` / 其他既有 tests。
+
+---
+
+## 2. 核心整改项清单与技术方案
+
+### 2.1 【BUG-5】后台自动提炼链路未同步 v6.36.0 新能力
+- **问题现状分析**:
+  1. `HARVEST_SYSTEM_PROMPT` 只包含 fact/preference/decision/pitfall 四类，缺少 `principle`（用户长期铁律/核心架构准则）分类说明，输出 JSON 规范未定义 `related_entities`，且未对 pitfall 明确独立要求 `root_cause` 与 `solution` 两个字段。
+  2. 约 947 行处硬编码 `related_entities: ""`，导致模型提取或传入的关联实体信息在写入队列时全部丢失。
+  3. 约 750 行在构造 pitfalls 记录时把 `solution` 与 `root_cause` 同时默认回退设为 `content`（导致根因=解法，语义混淆）。
+  4. 约 1007 行将未提供根因的踩坑填充为硬编码模板字符串（`执行中出现 ${symptom}，后续成功解决`），破坏了占位根因自演进识别机制。
+  5. `triggerBackgroundDrain` 后台异步落库直接调用底层原始 DB 接口，遇到重复项时仅执行简单计数累加，未复用现有 `saveMemory` / `pitfallSave` 业务逻辑，丢失了增量扩充（ENRICHED）、踩坑解法自演进（EVOLVED）及 preference/decision 满额自动升维 principle 的能力。
+- **整改实现方案**:
+  1. **系统提示词与输出契约升级**:
+     - `HARVEST_SYSTEM_PROMPT` 的【必须记录的内容】增加第 1 类 `长期铁律/架构原则 (principle)`，明确说明其为用户确立的长期铁律或核心架构原则。
+     - 输出 JSON 规范增加 `related_entities` 字段（逗号分隔实体名，可为空串）。
+     - 输出 JSON 规范中明确：针对 pitfall 类要求分别给出 `root_cause`（技术根因）与 `solution`（已验证解法）两个独立字段。
+  2. **模型解析与载荷实体对齐**:
+     - 在 `harvestWithOnlineModel` 遍历 items 时提取 `item.related_entities`，缺省回退为空串 `""`。
+     - 在 `processDialogueAndHarvest` 构造 `memoryPayload` 与 `pitfallPayload` 时，移除 `related_entities: ""` 硬编码，改用 `item.related_entities ? String(item.related_entities).trim() : ""`。
+  3. **根因与解法语义解耦**:
+     - 在 `harvestWithOnlineModel` 与 `processDialogueAndHarvest` 中：`root_cause` 与 `solution` 分别提取模型输出。
+     - 若模型未提供 `root_cause`，**坚决保留为空串 `""`**，交由后续 Agent/会话演进补全（`isPlaceholderRootCause` 识别为空串可顺利触发 `EVOLVED`），绝不用 `solution` 或占位文案顶替。
+     - `solution` 优先取 `item.solution`，兜底使用 `item.content`。
+  4. **后台落库接入 saveMemory / pitfallSave**:
+     - `triggerBackgroundDrain` 接入 `saveMemory` / `pitfallSave`：支持 `options.saveMemory` / `options.pitfallSave` 显式注入，缺省时由 `MagpieMemoryHub` 调度标准工具执行链路。
+     - 对输入 client 进行防御性包装（若缺少 `client.update` 则自动提供无害回退），确保 mock 客户端兼容性。
+     - 捕获并记录落库 action（`ADD`/`CREATED`、`ENRICHED`、`EVOLVED`、`NOOP`），不吞掉返回值，并分别计入统计 `memoriesSaved`、`pitfallsSaved`、`memoriesEnriched`、`pitfallsEvolved` 与 `actions` 字典，输出诊断日志 `_diag("drain_action", ...)`。
+
+---
+
+### 2.2 【EVO-8】网关中间件零延迟符号感知与复发加权
+- **问题现状分析**:
+  1. `memory.middleware.js` 运行在网关进程内的 moejs 受限环境（ES5 规范，禁止 `const`/`let`/箭头函数/正则命名组/Promise/网络/文件）。
+  2. 现有的 ES5 `tokenize()` 仅支持简单的正则切词与中文 2-gram，无法感知代码符号中的 `camelCase`（如 `memoryAuditUndo`）与 `snake_case`（如 `dedup_batch_size`），导致检索符号子词时完全失明。
+  3. RRF 四路融合中的热度项 `_heat` 仅取 `retrieval_count`，未对高频验证/复发的知识（`recurrence`）进行加权，无法让多次确证的经验优先胜出。
+- **整改实现方案**:
+  1. **ES5 符号裂变分词**:
+     - 保持 ES5 纯语法（全部使用 `var`、标准 `function`、基础正则 `$1 $2` 捕获）。
+     - 实现 `splitCamelCase(word)` 辅助函数，拆分小写子词。
+     - 在 `tokenize(text)` 中：
+       - 保留原始大小写 run，先存入全名小写 token。
+       - 对含 `_` 或 `-` 的标识符拆分子词（length >= 2），并递归对各段执行 camelCase 拆分，同时保留去符号整词（如 `dedupbatchsize`）。
+       - 对含大写字母的单词执行 `splitCamelCase`，提取所有小写子词（length >= 2）。
+       - 规则与 `semantic_dedup.js` 的 `termsOf` 严格对齐：
+         - `memoryAuditUndo` -> `memory`, `audit`, `undo` + `memoryauditundo`
+         - `dedup_batch_size` -> `dedup`, `batch`, `size` + `dedup_batch_size`（及 `dedupbatchsize`）
+         - 普通词 `redis` 保持单一 token，绝不拆坏。
+  2. **RRF 复发加权**:
+     - 升级 `_heat` 计算逻辑：
+       `var rc = parseInt(cq.retrieval_count, 10); if (!rc || rc !== rc || rc < 0) rc = 0;`
+       `var rec = parseInt(cq.recurrence, 10); if (!rec || rec !== rec || rec < 1) rec = 1;`
+       `cq._heat = rc + (rec - 1) * 2;`
+     - 严格防御 `recurrence` 为 `null`、`undefined`、字符串、NaN 或非正数，缺失时 `(rec - 1) * 2 === 0`，精准等价于原 `retrieval_count`。
+
+---
+
+## 3. 双向反证测试矩阵 (tests/test_v637_c_harvest.mjs)
+
+| 验证项 | 正向断言 | 反向/边界反证断言 |
+| :--- | :--- | :--- |
+| **BUG-5: principle 提炼** | 模型提炼返回 category="principle" 时，成功识别并作为记忆入库，分类保持 principle | 非法类别自动回退为 "fact"，不发生异常崩溃 |
+| **BUG-5: related_entities** | 模型返回 related_entities="Redis, Cluster" 时，payload 与落库数据均完整保留实体字符串 | 模型未返回实体时，缺省为空串 `""`，不包含 undefined 或 null |
+| **BUG-5: root_cause 解耦** | 模型分别返回 root_cause 与 solution 时，两者独立保存，绝不相等 | 模型未给 root_cause 时，保持为 `""`（留待后续自演进），**严禁用 solution 或固定文案顶替** |
+| **BUG-5: drain 增量与升维** | 队列消费遇同标题更详尽内容触发 `ENRICHED`，遇高频 preference 触发升维为 `principle`；返回统计与 actions 不被吞掉 | 无增益重复内容严格返回 `NOOP`，不被误判为 `ENRICHED` |
+| **EVO-8: camelCase 裂变** | `memoryAuditUndo` 经 tokenize 切出 memory, audit, undo 以及全名 | 普通单词 `redis` 保持原样切出单一 `redis`，绝不拆碎 |
+| **EVO-8: snake_case 裂变** | `dedup_batch_size` 经 tokenize 切出 dedup, batch, size 以及全名 | 单字母片段安全过滤，无空 token 产生 |
+| **EVO-8: _heat 复发加权** | 高 recurrence（如 5）时 `_heat = rc + (5-1)*2 = rc + 8`，显著高于低 recurrence 项 | recurrence 为 null、undefined、非数字字符串时，`_heat` 严格等于 `retrieval_count` |
+| **test_meta 元检查合规** | 测试套件自身通过 `scanTestFile` 扫描，0 违规，强隔离、强制 cleanup 且 `residue.total === 0` | 绝不污染全局，绝不向 `project: "global"` 写入 |
+
+---
+
+## 4. 验证与回归结果
+（实现后更新）
+## 主控补记（Agent C 因 model_error 中断，由主控接管收尾）
+
+1. 复核确认 C 的两处改动均已真实落地：
+   - gateway_harvest.hooks.js：HARVEST_SYSTEM_PROMPT 已支持 principle / related_entities / root_cause 与 solution 分离；
+     硬编码的 related_entities 空串已移除；drain 已接入结晶与演进分支。
+   - memory.middleware.js：tokenize 已接入 camelCase/snake_case 裂变（ES5 风格，var + 普通函数），
+     _heat = retrieval_count + (recurrence-1)*2。
+
+2. 补写缺失的 tests/test_v637_c_harvest.mjs（C 未产出测试），
+   覆盖 BUG-5 提示词契约与 EVO-8 裂变/加权共 3 组反证门。
+
+3. 修复一处真实实现缺陷：词法同分时 RRF 无法让高复发记录胜出
+   （词法权重 1.0 远高于热度 0.4，且 _heat 的赋值发生在排序之后，比较时两侧均为 undefined）。
+   已改为「词法同分时就地计算热度并降序打破平局」，
+   既保留 RRF 既有票权设计，又实现 EVO-8 的意图。

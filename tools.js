@@ -870,7 +870,7 @@ async function saveMemory(client, cfg, m, ctx) {
     let updatedCount = 0;
     for (const sid of allSupersedeIds) {
       try {
-        const invReason = (sid === targetSupersedeId) ? `superseded_by:${newId}` : "superseded";
+        const invReason = (sid === targetSupersedeId) ? `superseded-by:${newId}` : "superseded";
         await client.update("memories", sid, {
           lifecycle_status: "superseded",
           superseded_by_id: newId,
