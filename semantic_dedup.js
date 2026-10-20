@@ -371,3 +371,74 @@ export function findSemanticDuplicate(candidates, title, content, normFp) {
 
   return null;
 }
+
+/* ---------------- 符号裂变与检索分词 (EVO-3) ---------------- */
+
+export const CJK_STOP_BIGRAMS = new Set([
+  "怎么", "如何", "什么", "为什", "么办", "请问", "帮我", "一下", "这个", "那个"
+]);
+
+/**
+ * 拆分 camelCase / PascalCase 标识符为小写子词
+ */
+export function splitCamelCase(word) {
+  if (!word || typeof word !== "string") return [];
+  const s = word
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z0-9])/g, "$1 $2");
+  return s.split(/\s+/).map((w) => w.toLowerCase()).filter((w) => w.length >= 2);
+}
+
+/**
+ * 提取查询词元（EVO-3 增强）：
+ * 1. 英文/数字专有标识（如 r2, redis, mysql 等）
+ * 2. 代码符号裂变（camelCase -> 小写子词 + 全名；snake_case -> 子词 + 全名）
+ * 3. 中文 2-gram 分词并过滤 CJK_STOP_BIGRAMS 虚词
+ */
+export function termsOf(q) {
+  if (typeof q !== "string") {
+    if (typeof q === "number") q = String(q);
+    else return [];
+  }
+  const raw = q.toLowerCase().trim();
+  if (!raw) return [];
+  const parts = raw.split(/[\s,，、;；]+/).map((s) => s.trim()).filter((s) => s.length >= 2);
+  const terms = new Set(parts);
+
+  // 1. 提取英文/数字专有标识（如 r2, redis, mysql, v6, api 等）
+  const words = raw.match(/[a-z0-9_-]{2,}/g) || [];
+  for (const w of words) terms.add(w);
+
+  // 2. 符号裂变：camelCase 与 snake_case（只加不减，保留原词与裂变子词）
+  const rawIdentifiers = String(q).match(/[A-Za-z0-9_-]+/g) || [];
+  for (const id of rawIdentifiers) {
+    // a) snake_case / kebab-case 裂变
+    if (id.includes("_") || id.includes("-")) {
+      const segs = id.split(/[_-]+/).filter((s) => s.length >= 2);
+      for (const seg of segs) {
+        terms.add(seg.toLowerCase());
+        // 段内可能含有 camelCase
+        splitCamelCase(seg).forEach((sub) => terms.add(sub));
+      }
+      const stripped = id.replace(/[_-]+/g, "").toLowerCase();
+      if (stripped.length >= 2) terms.add(stripped);
+    }
+    // b) camelCase 裂变
+    splitCamelCase(id).forEach((sub) => terms.add(sub));
+  }
+
+  // 3. 对中文连续串提取 2-gram 并过滤 CJK_STOP_BIGRAMS
+  const cjkRuns = raw.match(/[一-鿿]+/g) || [];
+  for (const run of cjkRuns) {
+    for (let i = 0; i + 2 <= run.length; i++) {
+      const bg = run.slice(i, i + 2);
+      if (!CJK_STOP_BIGRAMS.has(bg)) {
+        terms.add(bg);
+      }
+    }
+  }
+  for (const stop of CJK_STOP_BIGRAMS) {
+    terms.delete(stop);
+  }
+  return [...terms];
+}
