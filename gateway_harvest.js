@@ -152,6 +152,71 @@ export function isVarSubdomainAllowed(p) {
   return sub === "minis" || sub === "folders" || sub === "tmp";
 }
 
+/**
+ * 校验路径是否位于 /home/<user> 或 /root 下允许的安全子域。
+ * 仅当满足以下之一才允许：
+ *   1. 是当前运行用户 os.homedir() 的直接子路径 GatewayConversations（或 gateway-conversations）
+ *   2. 是当前运行用户 home 下的 .config/magpie（含子路径）
+ * 对其它用户目录（如 /home/otheruser）或未授权深层目录（如 /root/private_secrets、.ssh 等）一律拒绝。
+ * 若路径不在 /home 或 /root 域下，返回 true（放行给后续规则判定）。
+ */
+export function isHomeOrRootAllowed(p, customHome = null) {
+  if (!p || typeof p !== "string") return true;
+  let norm = p.replace(/\\/g, "/");
+  while (norm.length > 1 && norm.endsWith("/")) {
+    norm = norm.slice(0, -1);
+  }
+
+  const isUnderRoot = norm === "/root" || norm.startsWith("/root/");
+  const isUnderHome = norm === "/home" || norm.startsWith("/home/");
+  if (!isUnderRoot && !isUnderHome) {
+    return true; // 不在 /home 或 /root 域，放行给后续规则判定
+  }
+
+  // /home 与 /root 根目录自身一律禁止
+  if (norm === "/home" || norm === "/root") {
+    return false;
+  }
+
+  let userHome = customHome;
+  if (!userHome) {
+    try {
+      userHome = os.homedir();
+    } catch (_) {}
+  }
+
+  if (!userHome || typeof userHome !== "string") {
+    return false;
+  }
+
+  userHome = userHome.replace(/\\/g, "/");
+  while (userHome.length > 1 && userHome.endsWith("/")) {
+    userHome = userHome.slice(0, -1);
+  }
+
+  // 必须严格属于当前运行用户的 home 目录
+  if (norm === userHome || !norm.startsWith(userHome + "/")) {
+    return false;
+  }
+
+  const rel = norm.slice(userHome.length + 1);
+  if (!rel) return false;
+
+  // 1. 是当前运行用户 home 的直接子路径 GatewayConversations（或 gateway-conversations）
+  const directChild = rel.split("/")[0];
+  if (/^(?:gateway[-_]?conversations)$/i.test(directChild)) {
+    return true;
+  }
+
+  // 2. 是当前用户 home 下的 .config/magpie（含子路径）
+  if (rel === ".config/magpie" || rel.startsWith(".config/magpie/")) {
+    return true;
+  }
+
+  return false;
+}
+
+
 export function isWhitelistedGatewayDir(normPath) {
   if (!normPath || typeof normPath !== "string") return false;
   const p = normPath.replace(/\\/g, "/");
@@ -162,7 +227,12 @@ export function isWhitelistedGatewayDir(normPath) {
     return false;
   }
 
-  // 2. 检查真实父目录/祖先链是否命中敏感黑名单或敏感子路径
+  // 2. /home 与 /root 域归属校验：仅允许当前用户 home 下直接子目录 GatewayConversations 或 .config/magpie
+  if (!isHomeOrRootAllowed(p)) {
+    return false;
+  }
+
+  // 3. 检查真实父目录/祖先链是否命中敏感黑名单或敏感子路径
   try {
     let cur = path.resolve(normPath);
     while (cur && cur !== path.dirname(cur)) {
@@ -194,6 +264,25 @@ export function isWhitelistedGatewayDir(normPath) {
           for (const s of segs) {
             if (SENSITIVE_SEGMENTS.has(s)) return false;
           }
+
+          // 重构真实目标路径：防止祖先软链接指向 /root 或 /home 越权借道
+          const rel = path.relative(cur, path.resolve(normPath));
+          const reconstructedReal = (rel ? path.resolve(realCur, rel) : realCur).replace(/\\/g, "/");
+          if (!isVarSubdomainAllowed(reconstructedReal)) {
+            return false;
+          }
+          if (!isHomeOrRootAllowed(reconstructedReal)) {
+            return false;
+          }
+          for (const prefix of HARD_FORBIDDEN_PREFIXES) {
+            if (reconstructedReal === prefix || reconstructedReal.startsWith(prefix + "/")) {
+              return false;
+            }
+          }
+          const recSegs = reconstructedReal.split(/[\/\\]+/);
+          for (const s of recSegs) {
+            if (SENSITIVE_SEGMENTS.has(s)) return false;
+          }
         } catch (_) {}
         break;
       }
@@ -221,11 +310,13 @@ export function isWhitelistedGatewayDir(normPath) {
     return true;
   }
 
-  // 3. 用户显式指定的环境变量目录
+  // 3. 用户显式指定的环境变量目录（必须同样受 /var、/home、/root 与敏感黑名单约束）
   if (process.env.MEMHUB_GATEWAY_CONV_DIR && process.env.MEMHUB_GATEWAY_CONV_DIR.trim()) {
     const envDir = path.resolve(process.env.MEMHUB_GATEWAY_CONV_DIR.trim()).replace(/\\/g, "/");
-    if (p === envDir || p.startsWith(envDir + "/")) {
-      return true;
+    if (isVarSubdomainAllowed(envDir) && isHomeOrRootAllowed(envDir)) {
+      if (p === envDir || p.startsWith(envDir + "/")) {
+        return true;
+      }
     }
   }
 
@@ -292,7 +383,12 @@ function checkPathForbidden(targetPath) {
     throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${norm}`);
   }
 
-  // 4. /home、/root、/var 系统目录：根目录硬拦，子路径通过白名单放行，未命中白名单则拦截
+  // 4. /home 与 /root 域归属校验（仅允许当前运行用户 home 下的 GatewayConversations 或 .config/magpie）
+  if (!isHomeOrRootAllowed(norm)) {
+    throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${norm}`);
+  }
+
+  // 5. /home、/root、/var 系统目录：根目录硬拦，子路径通过白名单放行，未命中白名单则拦截
   if (norm === "/home" || norm === "/root" || norm === "/var" || norm === "/private/var") {
     throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录或根路径: ${norm}`);
   }
