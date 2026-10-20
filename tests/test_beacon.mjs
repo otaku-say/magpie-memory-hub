@@ -3,6 +3,7 @@
  * 信标机制验收：幂等、确认门、状态文件丢失时的 fail-closed、反证测试与测试隔离
  */
 import assert from "node:assert";
+import { statePath } from "../local_state.js";
 import { readFileSync, existsSync, rmSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -65,7 +66,7 @@ assert.notStrictEqual(
   "【安全红线拦截】信标 reset 验收涉及 DROP 表，绝不允许在用户真实库 41694_agent_memory 上执行！"
 );
 
-const STATE = join(homedir(), ".magpie-memory-hub", "state.json");
+const STATE = statePath();
 const cfg = { instance: env.instance, ncbKey: env.mcpKey, mcpKey: env.mcpKey, secret: env.secret };
 
 let fail = 0;

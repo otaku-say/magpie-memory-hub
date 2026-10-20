@@ -120,7 +120,7 @@ function readOptions(options) {
     dedup_weekday: Number(o.dedup_weekday) || 1,
     dedup_day: Number(o.dedup_day) || 1,
     dedup_batch_size: Math.max(20, Math.min(Number(o.dedup_batch_size || 50), 1000)),
-    dedup_fetch_limit: Math.max(20, Math.min(Number(o.dedup_fetch_limit || o.db_fetch_limit || o.dedup_batch_size || 200), 1000)),
+    dedup_fetch_limit: Math.max(20, Math.min(Number(o.dedup_fetch_limit || o.dedup_batch_size || 200), 1000)),
     classify_endpoint: o.classify_endpoint || "auto",
     search_rewrite: o.search_rewrite !== false,
     search_rerank: o.search_rerank !== false,
@@ -633,7 +633,7 @@ async function saveMemory(client, cfg, m, ctx) {
     }
 
     try {
-      await client.update("memories", crossDup.id, updatePayload);
+      await client.update("memories", crossDup.id, Object.assign({}, updatePayload, { updated_at: now }));
       markRecent("m:" + (fp || crossDup.content_fingerprint));
       return {
         action: "NOOP",

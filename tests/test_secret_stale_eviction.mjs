@@ -28,6 +28,7 @@
  */
 
 import fs from "node:fs";
+import { statePath } from "../local_state.js";
 import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -41,10 +42,7 @@ const { r2List, r2Delete, cleanProbes, r2Upload } = await import(
 );
 const { NcbMcp } = await import(new URL("../ncb_mcp.js", import.meta.url).href);
 
-const candidate = [
-  path.join(os.homedir(), ".magpie-memory-hub", "state.json"),
-  "/config/home/.magpie-memory-hub/state.json",
-].find((p) => fs.existsSync(p)) || path.join(os.homedir(), ".magpie-memory-hub", "state.json");
+const candidate = statePath();
 
 let origState = null;
 let testFailures = 0;

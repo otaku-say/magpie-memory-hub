@@ -1003,3 +1003,181 @@ true !== false
 - [ ] 6. P0-5a 修复 tests/test_model_ux.mjs:395 (Bigram 命中 >= 1)
 - [ ] 7. P0-5b 清理 tests/ 下硬编码 .py 脚本 (git rm)
 - [ ] 8. 新增 tests/test_v631_c_runtime.mjs，跑通全量测试套件
+
+
+---
+
+## 二十三、v6.32.0 tools.js 高危整改（审计自删/游标/principle/数字短路/调度器闭包）
+
+# Agent A 检查点：tools.js 高危项整改验收报告 (v6.32)
+
+## 任务背景
+在沙箱 `9c04f4d59e1942e29a21c39ec7ddfb08` 的 `/workspace/m` 目录、`feat/v632-a-tools` 分支，独占修改 `tools.js` 完成 5 项高危整改，并新建专项反证测试 `tests/test_v632_a_tools.mjs`，确保全量测试通过并提交推送。
+
+## 5 项核心整改项完成状态
+
+1. **【P0-4 最紧急】memoryAudit 模型仲裁自删主记录修复 (tools.js 约 2015-2026、2167-2178)** [已完成]
+   - **根因**: 重构解耦拉取批与模型分块后，`dItems` 过滤映射丢失了 `id !== pId` 与全局已消费过滤。若模型返回的 duplicate_ids 中包含了 primary_id，主记忆会被错误软失效、主踩坑会被误删。
+   - **修复**:
+     - 记忆与踩坑两段模型仲裁均恢复严格三重过滤：`dIds.includes(r.id) && r.id !== pId && !modelDupIds.has(r.id)`。
+     - 每消费一个 id 立即加入 `modelDupIds`，防止跨组重复消费。
+     - 在后续软失效与删除执行循环中追加双保险断言：`if (!d || d.id === p.id) continue;`，彻底杜绝自删主记录。
+
+2. **【P1-2】memoryAudit 全量截断游标丢失与配置断层修复 (tools.js 约 121、1890、1990、2284、2360)** [已完成]
+   - **根因**: 原实现只在 `isIncremental === true` 时保存游标；当 `full: true` 扫描达到 `fetch_limit` 截断退出时，未持久化游标，导致后续增量扫描永远从第 1 条重扫陷入死循环；且 `readOptions` 将 `dedup_batch_size` 限制在 200，忽略了设置页配置的 1000 上限。
+   - **修复**:
+     - 截断退出时保存游标：`if (isIncremental || truncated) saveAuditCursor(...)`，确保全量截断后二次调用可从断点处无缝续跑。
+     - `readOptions` 与 `memoryAudit` 支持 `dedup_batch_size` 高达 1000（fetch 上限硬顶 1000），优先读取 `args.fetch_limit || args.limit || args.batch_size || cfg.dedup_fetch_limit || cfg.dedup_batch_size`。
+     - `groups.length === 0` 时绝不跳过模型仲裁：仍将整批候选提交给 `auditMemoriesWithModel`（受 `maxModelBatches` 预算约束）。
+
+3. **【P1-3】principle 准则免降级与免软删保护 (tools.js 约 596-629、1957-1983)** [已完成]
+   - **根因**: `saveMemory` 跨类去重命中旧 fact 时直接复用旧分类将准则降级为 fact；`memoryAudit` 规则合并仅按 recurrence / updated_at 排序，导致准则被当成 duplicate 软失效。
+   - **修复**:
+     - `saveMemory`: 跨类去重命中时检测 `isNewPrinciple = category === "principle" && crossDup.category !== "principle"`。命中时将既有记录在库中升级为 `principle` 并保留准则内容，绝不降级。
+     - `memoryAudit`: 规则合并排序时增加权重，组内存在 `category === "principle"` 时强制排在首位作为 primary；并在模型仲裁合并与软失效循环中多重校验，绝不软失效准则。
+
+4. **【P1-1】tools.js 内 5 处前置短路数字冲突守卫 (约 534、1277、1320、1973、2127)** [已完成]
+   - **根因**: `saveMemory` 踩坑优先、`pitfallSave` 记忆软失效、`pitfallSave` 踩坑去重、`memoryAudit` 记忆查重、`memoryAudit` 踩坑查重 5 处在调用 `isSemanticallySimilar` 之前均有 `includes` 或 `overlapCoefficient` 短路条件，绕过了数字冲突守卫，直接将不同端口（80 vs 8080）或版本（Node 18 vs Node 20）误判为重复。
+   - **修复**: 从 `./semantic_dedup.js` 导入 `hasConflictingNumbers`，在全部 5 处前置短路分支前均严格校验 `!hasConflictingNumbers(a, b)`。
+
+5. **【P2-4】ensureAuditScheduler 闭包陈旧修复 (tools.js 约 2360-2480、2780)** [已完成]
+   - **根因**: 定时器闭包内捕获的 `cfg` 和 `client` 是模块加载期初始快照，用户在设置页修改了 `project`、`dedup_batch_size` 或连接凭据后定时去重无法感知。
+   - **修复**:
+     - `ensureAuditScheduler(client, cfg, optionsGetter)` 支持传入 `optionsGetter`。
+     - 宿主挂载时传入 `() => readOptions(input || options)`。
+     - 定时器每次触发时调用 `getFreshCfg()` 动态获取最新配置，并按需构建最新 client，保证 project 与 batch/fetch 上限永远最新。
+
+## 验收测试套件 tests/test_v632_a_tools.mjs 覆盖
+
+- **反证门 a**: 故意构造模型返回 `primary_id` 包含在 `duplicate_ids` 中的响应，验证主记录（记忆与踩坑）绝对不被软失效或物理删除，且 recurrence 正确累加。
+- **反证门 b**: `full: true` 配合 `fetch_limit: 2` 触发全量截断，验证本地状态游标成功保存，二次增量调用无缝续跑绝不重扫前 2 条。
+- **反证门 c**: 跨类去重与 audit 规则合并双场景验证 `principle` 准则免降级与免软删保护。
+- **反证门 d**: Port 80 vs Port 8080 与 Node 18 vs Node 20 跨全部短路场景验证数字冲突守卫严格生效。
+- **调度器测试**: 动态 options 响应测试，验证设置页参数动态读取。
+- **元规范自检**: 集成 `scanTestFile` 自检，0 违规，且零残留断言通过。
+
+## 测试运行结果
+- `node tests/test_meta.mjs` -> ✅ PASS (50/50 测试合规)
+- `node tests/test_exports.mjs` -> ✅ PASS (导出面 100% 合规)
+- `node tests/test_dedup_and_audit.mjs` -> ✅ PASS
+- `node tests/test_auto_dedup_and_undo.mjs` -> ✅ PASS
+- `node tests/test_dedup_semantics.mjs` -> ✅ PASS
+- `node tests/test_v631_a_tools.mjs` -> ✅ PASS
+- `node tests/test_v632_a_tools.mjs` -> ✅ PASS
+
+
+---
+
+## 二十四、v6.32.0 安全与状态整改（跨账号清库/路径白名单/信标副作用/状态覆盖/多项目游标）
+
+# v6.32 Agent B 安全与状态项整改规划
+
+## 1. 任务背景与文件所有权
+分支：`feat/v632-b-security`
+文件所有权限制（严格）：
+- `db_tools.js`
+- `gateway_harvest.js`
+- `gateway_harvest.hooks.js`
+- `page_actions.js`
+- `settings.js`
+- `tests/test_v632_b_security.mjs`
+- `NOTES_v632_b.md`
+
+严禁修改：`tools.js` / `local_state.js` / `semantic_dedup.js` / `mcp_client.js` / `ncb_mcp.js` / `model_budget.js` / `tests/lib/testenv.mjs` / `package.json` / 其他已有测试。
+
+## 2. 整改项清单与技术方案
+
+### 2.1 【P0-1】跨账号前缀越权清库（db_tools.js:203-223）
+- **现状**：`isSameDatabaseTarget` 无条件剥离双端任意 `^\d+_` 前缀，导致配置 `41694_memory` 传入 `99999_memory` 也能通过，随后 `dbOf` 优先取 `args.database` 并在该库上 DROP TABLE。
+- **修复方案**：
+  1. 归一化时提取前缀 `const m = /^(\d+)_/`；若两侧都有前缀且前缀不等 -> 判定不同账号，返回 `false`。
+  2. 若一侧无前缀一侧有前缀 -> 视为同一库（逻辑名 vs 物理真实名），比对去除前缀后的部分，相等则允许。
+  3. 若双侧前缀相同 -> 去掉前缀比较余下部分。
+  4. `dbReset` 执行 DROP 时，强制使用**配置侧库名**（`cfg.instance` / `ncb_instance` 解析出的物理库名），绝不使用 `args.database` 直接执行。`args.database` 仅用于一致性校验。
+- **反证验证**：配置 `41694_memory`，传入 `99999_memory` 必须抛出 `FORBIDDEN_DATABASE`。
+
+### 2.2 【P0-3】validateGatewayDir 误杀合法目录（gateway_harvest.js:107-170）
+- **现状**：`FORBIDDEN_PREFIXES` 硬编码封禁 `/home`、`/root`、`/var`，导致 `~/GatewayConversations`、`/var/minis`、macOS `/var/folders` 全被拦截。
+- **修复方案**：改为「敏感子路径黑名单 + 白名单放行」：
+  1. 硬拦截系统目录：`/etc`、`/proc`、`/sys`、`/dev`、`/boot`、`/bin`、`/sbin`、`/usr`、`/lib`、`/lib64`。
+  2. `/home`、`/root`、`/var` 改为放行非敏感子路径，仅拦截高危敏感子路径：
+     - `.ssh`、`.gnupg`、`.aws`、`.config/gcloud`、`.docker`、`.kube`
+     - 状态目录：`os.homedir()/.magpie-memory-hub` 和 `process.env.MEMHUB_STATE_DIR`。
+  3. 保留 `..` 段拦截、`realpathSync` 校验、跳过符号链接 `isSymbolicLink`。
+- **反证验证**：`~/GatewayConversations`、`/var/minis`、`/tmp/xxx` 放行；`~/.ssh`、`~/.magpie-memory-hub`、``、`/etc` 拦截。
+
+### 2.3 【P1-4】harvest_gateway 信标触发生产副作用 + 去重状态竞态（page_actions.js:272-310、433-512）
+- **现状**：调用完整 `MagpieMemoryHub` 获取 `saveMemory`/`pitfallSave` 误触发 `autoInit`、`autoHarvest`、定时调度器。
+- **修复方案**：
+  1. 避免触发全量副作用，构造最小 opts（显式传入 `auto_init:false`, `auto_harvest:false`, `dedup_schedule:off`，清理 `_action`）或内部安全获取工具句柄。
+  2. `memory_audit` 分支：先写“进行中”状态 `writeCardStatus` 落盘，再启动异步 IIFE，杜绝状态倒退或覆盖竞态。
+
+### 2.4 【P1-5】旧去重状态覆盖最新模型检测（settings.js:610-625）
+- **现状**：`renderAllStatus` 渲染 `statusData.model` 后无条件被 `statusData.audit` 覆盖 `#model_action_status`。
+- **修复方案**：比对两者 `at` 时间戳，仅当 `audit.at > model.at` 且该卡片归属 audit 时才渲染 audit，否则保留 model 结果。或基于操作类型区分卡片状态归属。
+
+### 2.5 【P1-6】dbReset 未清空多项目游标与采集指纹（db_tools.js:246-260）
+- **现状**：清库后遗留多项目游标与已采集指纹，造成清库后数据游标脱节或重复采集断流。
+- **修复方案**：清库成功后遍历 `state.audit.cursors` 清空**全部 project**（不仅仅是当前 project），并清空 gateway_harvest 指纹缓存（lookupGatewayHarvest 对应的 processed 记录）、`harvest_queue`、`pending_patterns`；严禁整体抹平 secrets/actions/r2_mounts。
+
+### 2.6 【P1-1 部分】gateway_harvest.hooks.js:1313 前置短路绕过数字守卫
+- **现状**：在调用 `isSemanticallySimilar` 前的 includes/词集重叠短路判定缺少数字守卫，导致 Port80/Port8080 等包含冲突数字的文本被直接短路命中。
+- **修复方案**：短路前置条件追加 `!hasConflictingNumbers(a, b)`（从 `./semantic_dedup.js` 导入）。
+
+## 3. 测试与验证策略
+- 单元与集成测试：新建 `tests/test_v632_b_security.mjs`，包含 6 大整改点的针对性反证与边界测试。
+- 回归测试：运行全部要求回归的测试套件。
+
+
+---
+
+## 二十五、v6.32.0 状态与测试隔离整改（测试tmpdir隔离/数字总闸/hasMore/监听器/预算开销）
+
+# v6.32 Track C (State / Dedup / MCP / Budget) Implementation Notes
+
+## 目标与整改清单
+本任务负责 Track C（独占文件：local_state.js、semantic_dedup.js、mcp_client.js、ncb_mcp.js、model_budget.js、tests/lib/testenv.mjs、package.json、tests/test_v632_c_state.mjs）。
+
+### 1. [P0-2] 测试状态隔离（双保险）
+- **问题**：测试可能污染或抹平宿主机真实 `~/.magpie-memory-hub/state.json`。
+- **方案**：
+  - `local_state.js`: `statePath()` 检测测试环境（`MAGPIE_TEST === "1"` / `NODE_ENV === "test"` / `MEMHUB_TEST === "1"`）且无显式 `MEMHUB_STATE_DIR` 时，自动重定向到 `os.tmpdir()/memhub-test-state-<pid>` 并递归建目录。
+  - `tests/lib/testenv.mjs`: `setup()` 最早阶段生成独立临时目录赋予 `process.env.MEMHUB_STATE_DIR`，在 `cleanup()` 时清理。
+  - **反证**：测试运行期间绝不能触碰 `os.homedir()/.magpie-memory-hub`。
+
+### 2. [P1-1] semantic_dedup.js 数字冲突总闸
+- **问题**：文本存在不同数字实体（如 Port 80 vs 8080，Node 18 vs 20）时易被语义相似度误判为重复。
+- **方案**：
+  - 校验 `hasConflictingNumbers` 并确保其在 `isSemanticallySimilar` 最顶层作为第一道守卫（短路返回 false）：`if (hasConflictingNumbers(title1, title2) || hasConflictingNumbers(content1, content2)) return false;`。
+  - **反证**：测试 Port 80 vs 8080、Node 18 vs Node 20 必定返回 false，相同数字不误伤。
+
+### 3. [P2-1] mcp_client.js hasMore 基于截断后的 effectiveLimit
+- **问题**：`list()` 中计算 `hasMore` 时如果使用未截断的 `limit`，在 limit > 1000 时逻辑出现偏差或恒为 false/true。
+- **方案**：
+  - `hasMore` 计算必须严格使用 `effectiveLimit`（与 SQL LIMIT / 实际拉取条数一致）。
+
+### 4. [P2-2] ncb_mcp.js rpc() timeoutSig 监听器泄漏修复
+- **问题**：`rpc()` 绑定的 timeoutSig abortListener 在请求完成后未注销，造成内存泄漏及 EventEmitter 警告。
+- **方案**：
+  - 在 `finally` 块中通过 `removeEventListener` 注销 abort 监听。
+
+### 5. [P2-3] local_state.js recordPendingEvidence 补充 memory 类型语义去重
+- **问题**：`recordPendingEvidence` 仅对 `pitfall` 做了 `isSemanticallySimilar` 语义去重，`memory` 仍走精确指纹。
+- **方案**：
+  - 为 `kind === "memory"` 补充基于 `isSemanticallySimilar` 的语义去重分支，受 `minEvidence` 门禁。
+
+### 6. [P2-5] model_budget.js 请求体指纹开销优化与 x-magpie-internal 请求头识别
+- **问题**：全量 `JSON.stringify(body)` 开销过大；且未优先识别 `x-magpie-internal: memory-hub` 请求头。
+- **方案**：
+  - 优先检测 `headers['x-magpie-internal'] === 'memory-hub'`。
+  - 指纹计算改为仅截取最后一条 user message 前 N 个字符（如 500 字符），避免全 body 序列化。
+
+### 7. [P2-6] package.json 默认配置声明补齐
+- **方案**：
+  - 在 package.json 的 `magpie.options` 补齐 `search_rerank`、`dedup_fetch_limit`、`dedup_batch_size`、`harvest_max_per_min`、`harvest_max_total`、`audit_max_batches`、`audit_chunk_size` 的默认值声明。
+
+## 验收计划
+1. 新建 `tests/test_v632_c_state.mjs`，包含上述 7 项整改的严格正反测试与反证门。
+2. 回归现有核心测试集，确保所有测试全绿。
+3. 校验宿主机 `~/.magpie-memory-hub/state.json` 的 mtime 在测试前后完全不变。
+4. Git 提交并推送至 `feat/v632-c-state`。

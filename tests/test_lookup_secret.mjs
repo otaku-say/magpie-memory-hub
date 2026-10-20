@@ -12,6 +12,7 @@
  * 【反证】末尾构造「多条记录 + 未知库名」，断言不会被兜底误取（防串库）。
  */
 import fs from "node:fs";
+import { statePath } from "../local_state.js";
 import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -21,10 +22,7 @@ const { resolveRealDatabase, deriveLegalBucketName, isR2Mounted, r2Check } = awa
 const { secretCheck } = await import(new URL("../db_tools.js", import.meta.url).href);
 
 // 找到实际使用的 state 文件路径（local_state.js 自己算的）
-const candidate = [
-  path.join(os.homedir(), ".magpie-memory-hub", "state.json"),
-  "/config/home/.magpie-memory-hub/state.json",
-].find((p) => fs.existsSync(p)) || path.join(os.homedir(), ".magpie-memory-hub", "state.json");
+const candidate = statePath();
 
 let fail = 0;
 const t = (desc, got, want) => {
