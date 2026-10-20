@@ -35,6 +35,7 @@ import {
   tokenize,
   overlapCoefficient,
   jaccardSimilarity,
+  hasConflictingNumbers,
 } from "./semantic_dedup.js";
 
 const NCB_BASE = "https://api.nocodebackend.com";
@@ -118,8 +119,8 @@ function readOptions(options) {
     dedup_time: o.dedup_time || "02:00",
     dedup_weekday: Number(o.dedup_weekday) || 1,
     dedup_day: Number(o.dedup_day) || 1,
-    dedup_batch_size: Math.max(20, Math.min(Number(o.dedup_batch_size || 50), 200)),
-    dedup_fetch_limit: Math.max(20, Math.min(Number(o.dedup_fetch_limit || 200), 1000)),
+    dedup_batch_size: Math.max(20, Math.min(Number(o.dedup_batch_size || 50), 1000)),
+    dedup_fetch_limit: Math.max(20, Math.min(Number(o.dedup_fetch_limit || o.db_fetch_limit || o.dedup_batch_size || 200), 1000)),
     classify_endpoint: o.classify_endpoint || "auto",
     search_rewrite: o.search_rewrite !== false,
     search_rerank: o.search_rerank !== false,
@@ -530,12 +531,15 @@ async function saveMemory(client, cfg, m, ctx) {
       const pitfallRows = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT }));
       const normTitle = normalizeSemanticText(title);
       const matchedPitfall = pitfallRows.find((p) => {
+        if (hasConflictingNumbers(title, p.symptom)) return false;
         const pSym = normalizeSemanticText(p.symptom);
-        if (pSym && (pSym === normTitle || normTitle.includes(pSym) || pSym.includes(normTitle))) return true;
+        if (pSym && (pSym === normTitle || normTitle.includes(pSym) || pSym.includes(normTitle))) {
+          if (!hasConflictingNumbers(title, p.symptom)) return true;
+        }
         const tTok = tokenize(title);
         const sTok = tokenize(p.symptom);
         if (overlapCoefficient(tTok.tokens, sTok.tokens) >= 0.5 || jaccardSimilarity(tTok.tokens, sTok.tokens) >= 0.3) {
-          return true;
+          if (!hasConflictingNumbers(title, p.symptom)) return true;
         }
         return isSemanticallySimilar(title, content, p.symptom, p.solution || p.root_cause);
       });
@@ -597,6 +601,7 @@ async function saveMemory(client, cfg, m, ctx) {
   const normTitle = normalizeSemanticText(title);
   const otherCategoryRows = allActiveRows.filter((r) => r.category !== category);
   const crossDup = otherCategoryRows.find((r) => {
+    if (hasConflictingNumbers(title, r.title)) return false;
     const rNormTitle = normalizeSemanticText(r.title);
     if (rNormTitle && rNormTitle === normTitle) return true;
     return isSemanticallySimilar(title, content, r.title, r.content || r.full_text);
@@ -608,20 +613,37 @@ async function saveMemory(client, cfg, m, ctx) {
     const existingTags = String(crossDup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
     const newTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
     const mergedTags = Array.from(new Set([...existingTags, ...newTags])).join(", ");
+
+    // 【P1-3】principle 准则保护：若新记录是 principle 且旧记录不是 principle，
+    // 升级旧记录为 principle 并保留准则内容与指纹，绝不允许把 principle 降级为普通分类
+    const isNewPrinciple = category === "principle" && crossDup.category !== "principle";
+    const targetCategory = isNewPrinciple ? "principle" : crossDup.category;
+
+    const updatePayload = {
+      recurrence: next,
+      tags: mergedTags || crossDup.tags,
+      updated_at: now,
+    };
+    if (isNewPrinciple) {
+      updatePayload.category = "principle";
+      if (content) updatePayload.content = content;
+      if (fullText) updatePayload.full_text = fullText;
+      if (title) updatePayload.title = title;
+      if (fp) updatePayload.content_fingerprint = fp;
+    }
+
     try {
-      await client.update("memories", crossDup.id, {
-        recurrence: next,
-        tags: mergedTags || crossDup.tags,
-        updated_at: now,
-      });
-      markRecent("m:" + (crossDup.content_fingerprint || fp));
+      await client.update("memories", crossDup.id, updatePayload);
+      markRecent("m:" + (fp || crossDup.content_fingerprint));
       return {
         action: "NOOP",
         id: crossDup.id,
-        category: crossDup.category,
+        category: targetCategory,
         recurrence: next,
         retrieval_count: Number(crossDup.retrieval_count) || 0,
-        note: `跨类别去重命中（既有记录分类: ${crossDup.category}，传入分类: ${category}），已合并至既有记录并累加复发计数`,
+        note: isNewPrinciple
+          ? `跨类别去重命中（既有记录分类: ${crossDup.category} 已升级为 principle），已保留准则版本并累加复发计数`
+          : `跨类别去重命中（既有记录分类: ${crossDup.category}，传入分类: ${category}），已合并至既有记录并累加复发计数`,
       };
     } catch (e) {
       if (!/404|not found/i.test(String(e.message))) throw e;
@@ -1273,12 +1295,15 @@ async function pitfallSave(client, cfg, args, ctx) {
     const normSym = normalizeSemanticText(symptom);
     const supersededMems = memRows.filter((m) => {
       if (m.category === "principle") return false;
+      if (hasConflictingNumbers(m.title, symptom)) return false;
       const mTitle = normalizeSemanticText(m.title);
-      if (mTitle && (mTitle === normSym || mTitle.includes(normSym) || normSym.includes(mTitle))) return true;
+      if (mTitle && (mTitle === normSym || mTitle.includes(normSym) || normSym.includes(mTitle))) {
+        if (!hasConflictingNumbers(m.title, symptom)) return true;
+      }
       const tTok = tokenize(m.title);
       const sTok = tokenize(symptom);
       if (overlapCoefficient(tTok.tokens, sTok.tokens) >= 0.5 || jaccardSimilarity(tTok.tokens, sTok.tokens) >= 0.3) {
-        return true;
+        if (!hasConflictingNumbers(m.title, symptom)) return true;
       }
       return isSemanticallySimilar(m.title, m.content || m.full_text, symptom, solution || rootCause);
     });
@@ -1301,15 +1326,16 @@ async function pitfallSave(client, cfg, args, ctx) {
   let dup = activePitfalls.find((r) => r.content_fingerprint === fp);
   if (!dup) {
     dup = activePitfalls.find((r) => {
+      if (hasConflictingNumbers(r.symptom, symptom)) return false;
       const rSym = normalizeSemanticText(r.symptom);
       const curSym = normalizeSemanticText(symptom);
       if (rSym && curSym && (rSym === curSym || rSym.includes(curSym) || curSym.includes(rSym))) {
-        return true;
+        if (!hasConflictingNumbers(r.symptom, symptom)) return true;
       }
       const rTok = tokenize(r.symptom);
       const sTok = tokenize(symptom);
       if (overlapCoefficient(rTok.tokens, sTok.tokens) >= 0.5 || jaccardSimilarity(rTok.tokens, sTok.tokens) >= 0.3) {
-        return true;
+        if (!hasConflictingNumbers(r.symptom, symptom)) return true;
       }
       return isSemanticallySimilar(symptom, solution || rootCause, r.symptom, r.solution || r.root_cause);
     });
@@ -1887,7 +1913,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
     // a) dbFetchLimit：只管从数据库拉取多少条数据（默认 200，上限 1000）
     // d) maxModelBatches：模型仲裁预算独立（默认 2 = 最多 2 次分块调用），超出部分仅用规则结果 fail-open
     // f) 单次调用最坏耗时估算：2 次模型调用 × 15s = 30s < 55s（硬超时防线）
-    const dbFetchLimit = Math.max(20, Math.min(Number(args.fetch_limit || args.limit || args.batch_size || cfg.dedup_fetch_limit || 200), 1000));
+    const dbFetchLimit = Math.max(1, Math.min(Number(args.fetch_limit || args.limit || args.batch_size || cfg.dedup_fetch_limit || cfg.dedup_batch_size || 200), 1000));
     const maxModelBatches = Math.max(1, Math.min(Number(args.max_model_batches || args.max_batches || cfg.audit_max_batches || 2), 10));
     const batchTs = Date.now();
     const now = nowSql();
@@ -1954,7 +1980,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
     memLastId = rows[rows.length - 1].id;
     totalScannedMemories += rows.length;
 
-    // b) 内存中全量规则级查重（指纹相同 / 归一化标题相同 / tags 交集）覆盖整批 200 条
+    // b) 内存中全量规则级查重（指纹相同 / 归一化标题相同 / tags 交集）覆盖整批记录
     const batchDupIds = new Set();
     const groups = [];
     for (let i = 0; i < rows.length; i++) {
@@ -1964,37 +1990,49 @@ export async function memoryAudit(client, cfg, args, ctx) {
       for (let j = i + 1; j < rows.length; j++) {
         const b = rows[j];
         if (batchDupIds.has(b.id)) continue;
+        if (hasConflictingNumbers(a.title, b.title)) continue;
         const sameFp = a.content_fingerprint && b.content_fingerprint && a.content_fingerprint === b.content_fingerprint;
         const normTitleA = normalizeSemanticText(a.title);
         const normTitleB = normalizeSemanticText(b.title);
-        const sameTitle = normTitleA && normTitleB && normTitleA === normTitleB;
+        const sameTitle = normTitleA && normTitleB && normTitleA === normTitleB && !hasConflictingNumbers(a.title, b.title);
         const similar = isSemanticallySimilar(a.title, a.content || a.full_text, b.title, b.content || b.full_text);
         const tagIntersect = hasTagsIntersection(a.tags, b.tags);
         const titleOverlap = Boolean(normTitleA && normTitleB && (normTitleA.includes(normTitleB) || normTitleB.includes(normTitleA)));
-        if (sameFp || sameTitle || similar || (tagIntersect && titleOverlap)) {
+        if (sameFp || sameTitle || similar || (tagIntersect && titleOverlap && !hasConflictingNumbers(a.title, b.title))) {
           grp.push(b);
           batchDupIds.add(b.id);
         }
       }
       if (grp.length > 1) {
         batchDupIds.add(a.id);
-        grp.sort((x, y) => (Number(y.recurrence) || 1) - (Number(x.recurrence) || 1) || (new Date(y.updated_at) - new Date(x.updated_at)));
+        // 【P1-3】若组内存在 category === "principle"，必须强制选它为 primary，绝不允许 principle 被当作 duplicate 软失效
+        grp.sort((x, y) => {
+          const xIsPrinciple = x.category === "principle" ? 1 : 0;
+          const yIsPrinciple = y.category === "principle" ? 1 : 0;
+          if (xIsPrinciple !== yIsPrinciple) return yIsPrinciple - xIsPrinciple;
+          return (Number(y.recurrence) || 1) - (Number(x.recurrence) || 1) || (new Date(y.updated_at) - new Date(x.updated_at));
+        });
         groups.push({ primary: grp[0], duplicates: grp.slice(1) });
       }
     }
 
-    // c) 只把规则筛出的候选组交给 auditMemoriesWithModel 做模型仲裁，模型分块仍是 40 条
-    // d) 模型仲裁预算独立：maxModelBatches（默认 2 = 最多 2 次分块调用），超出部分仅用规则结果，fail-open
+    // c) 模型仲裁：groups.length === 0 时不要直接跳过模型仲裁，仍应把整批交给 auditMemoriesWithModel 做一轮语义仲裁（受 maxModelBatches 预算约束）
     const auditOptions = Object.assign({}, cfg, args);
     const auditModel = String(auditOptions.audit_model || auditOptions.extract_model || "").trim();
-    if (auditModel && auditModel !== "off" && auditModel !== "none" && groups.length > 0) {
+    if (auditModel && auditModel !== "off" && auditModel !== "none" && rows.length > 1) {
       const candidateItemMap = new Map();
-      for (const g of groups) {
-        candidateItemMap.set(g.primary.id, g.primary);
-        for (const d of g.duplicates) candidateItemMap.set(d.id, d);
+      let candidateList = [];
+      if (groups.length > 0) {
+        for (const g of groups) {
+          candidateItemMap.set(g.primary.id, g.primary);
+          for (const d of g.duplicates) candidateItemMap.set(d.id, d);
+        }
+        candidateList = Array.from(candidateItemMap.values());
+      } else {
+        candidateList = rows;
+        for (const r of rows) candidateItemMap.set(r.id, r);
       }
-      const candidateList = Array.from(candidateItemMap.values());
-      const MODEL_CHUNK = 40;
+      const MODEL_CHUNK = Math.max(10, Math.min(Number(auditOptions.dedup_batch_size || auditOptions.batch_size || 40), 60));
       const modelBudgetItems = maxModelBatches * MODEL_CHUNK;
       const forModel = candidateList.slice(0, modelBudgetItems);
 
@@ -2011,13 +2049,37 @@ export async function memoryAudit(client, cfg, args, ctx) {
               const allInModel = modelReviewedIds.has(g.primary.id) && g.duplicates.every((d) => modelReviewedIds.has(d.id));
               return !allInModel;
             });
+            // 【P0-4】恢复三重过滤 dIds.includes(r.id) && r.id !== pId && !batchDupIds.has(r.id)
+            // 每消费一个 id 立即加入 batchDupIds，防止跨组重复消费与自删主记录
+            const modelDupIds = new Set();
+            for (const rg of remainingGroups) {
+              for (const d of rg.duplicates) modelDupIds.add(d.id);
+            }
             for (const dg of mDups) {
               const pId = Number(dg.primary_id);
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
               if (pId && dIds.length > 0) {
-                const pItem = rows.find((r) => r.id === pId) || candidateItemMap.get(pId);
-                const dItems = dIds.map((id) => rows.find((r) => r.id === id) || candidateItemMap.get(id)).filter(Boolean);
+                let pItem = rows.find((r) => r.id === pId) || candidateItemMap.get(pId);
+                const dItems = (forModel.length ? forModel : rows).filter(
+                  (r) => dIds.includes(r.id) && r.id !== pId && !modelDupIds.has(r.id)
+                );
+                for (const dId of dIds) {
+                  if (dId !== pId && !modelDupIds.has(dId) && !dItems.some((r) => r.id === dId)) {
+                    const fallbackItem = rows.find((r) => r.id === dId) || candidateItemMap.get(dId);
+                    if (fallbackItem) dItems.push(fallbackItem);
+                  }
+                }
+                // 【P1-3】组内存在 principle 时强制将其选为 primary
+                if (pItem && pItem.category !== "principle") {
+                  const princIdx = dItems.findIndex((d) => d.category === "principle");
+                  if (princIdx >= 0) {
+                    const princItem = dItems[princIdx];
+                    dItems.splice(princIdx, 1, pItem);
+                    pItem = princItem;
+                  }
+                }
                 if (pItem && dItems.length > 0) {
+                  for (const d of dItems) modelDupIds.add(d.id);
                   remainingGroups.push({ primary: pItem, duplicates: dItems });
                 }
               }
@@ -2035,6 +2097,8 @@ export async function memoryAudit(client, cfg, args, ctx) {
       const p = g.primary;
       const dups = g.duplicates;
       for (const d of dups) {
+        if (!d || d.id === p.id) continue; // 双保险：杜绝自删/自失效主记录
+        if (d.category === "principle") continue; // 准则保护：绝不软失效准则
         try {
           await client.update("memories", d.id, {
             invalid_at: now,
@@ -2047,10 +2111,11 @@ export async function memoryAudit(client, cfg, args, ctx) {
         } catch (_) {}
       }
       try {
-        const dupRecurrenceSum = dups.reduce((acc, d) => acc + (Number(d.recurrence) || 1), 0);
+        const validDups = dups.filter((d) => d && d.id !== p.id && d.category !== "principle");
+        const dupRecurrenceSum = validDups.reduce((acc, d) => acc + (Number(d.recurrence) || 1), 0);
         const nextRec = (Number(p.recurrence) || 1) + dupRecurrenceSum;
-        const mergedTags = mergeCommaSeparated(p.tags, ...dups.map((d) => d.tags));
-        const mergedEntities = mergeCommaSeparated(p.related_entities, ...dups.map((d) => d.related_entities));
+        const mergedTags = mergeCommaSeparated(p.tags, ...validDups.map((d) => d.tags));
+        const mergedEntities = mergeCommaSeparated(p.related_entities, ...validDups.map((d) => d.related_entities));
         await client.update("memories", p.id, {
           recurrence: nextRec,
           updated_at: now,
@@ -2108,7 +2173,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
     pitLastId = rows[rows.length - 1].id;
     totalScannedPitfalls += rows.length;
 
-    // b) 内存中全量规则级查重覆盖整批 200 条
+    // b) 内存中全量规则级查重覆盖整批记录
     const batchDupIds = new Set();
     const groups = [];
     for (let i = 0; i < rows.length; i++) {
@@ -2118,14 +2183,15 @@ export async function memoryAudit(client, cfg, args, ctx) {
       for (let j = i + 1; j < rows.length; j++) {
         const b = rows[j];
         if (batchDupIds.has(b.id)) continue;
+        if (hasConflictingNumbers(a.symptom, b.symptom)) continue;
         const sameFp = a.content_fingerprint && b.content_fingerprint && a.content_fingerprint === b.content_fingerprint;
         const normSymA = normalizeSemanticText(a.symptom);
         const normSymB = normalizeSemanticText(b.symptom);
-        const sameSym = normSymA && normSymB && normSymA === normSymB;
+        const sameSym = normSymA && normSymB && normSymA === normSymB && !hasConflictingNumbers(a.symptom, b.symptom);
         const similar = isSemanticallySimilar(a.symptom, a.solution || a.root_cause, b.symptom, b.solution || b.root_cause);
         const tagIntersect = hasTagsIntersection(a.tags, b.tags);
         const symOverlap = Boolean(normSymA && normSymB && (normSymA.includes(normSymB) || normSymB.includes(normSymA)));
-        if (sameFp || sameSym || similar || (tagIntersect && symOverlap)) {
+        if (sameFp || sameSym || similar || (tagIntersect && symOverlap && !hasConflictingNumbers(a.symptom, b.symptom))) {
           grp.push(b);
           batchDupIds.add(b.id);
         }
@@ -2137,18 +2203,23 @@ export async function memoryAudit(client, cfg, args, ctx) {
       }
     }
 
-    // c) 只把规则筛出的候选组交给 auditMemoriesWithModel 做模型仲裁
-    // d) 模型仲裁预算独立：maxModelBatches（默认 2 = 最多 2 次分块调用），超出部分仅用规则结果，fail-open
+    // c) 只把规则筛出的候选组交给 auditMemoriesWithModel 做模型仲裁（groups.length===0 时也不跳过，整批提交受预算约束）
     const auditOptions = Object.assign({}, cfg, args);
     const auditModel = String(auditOptions.audit_model || auditOptions.extract_model || "").trim();
-    if (auditModel && auditModel !== "off" && auditModel !== "none" && groups.length > 0) {
+    if (auditModel && auditModel !== "off" && auditModel !== "none" && rows.length > 1) {
       const candidateItemMap = new Map();
-      for (const g of groups) {
-        candidateItemMap.set(g.primary.id, g.primary);
-        for (const d of g.duplicates) candidateItemMap.set(d.id, d);
+      let candidateList = [];
+      if (groups.length > 0) {
+        for (const g of groups) {
+          candidateItemMap.set(g.primary.id, g.primary);
+          for (const d of g.duplicates) candidateItemMap.set(d.id, d);
+        }
+        candidateList = Array.from(candidateItemMap.values());
+      } else {
+        candidateList = rows;
+        for (const r of rows) candidateItemMap.set(r.id, r);
       }
-      const candidateList = Array.from(candidateItemMap.values());
-      const MODEL_CHUNK = 40;
+      const MODEL_CHUNK = Math.max(10, Math.min(Number(auditOptions.dedup_batch_size || auditOptions.batch_size || 40), 60));
       const modelBudgetItems = maxModelBatches * MODEL_CHUNK;
       const forModel = candidateList.slice(0, modelBudgetItems);
 
@@ -2163,13 +2234,27 @@ export async function memoryAudit(client, cfg, args, ctx) {
               const allInModel = modelReviewedIds.has(g.primary.id) && g.duplicates.every((d) => modelReviewedIds.has(d.id));
               return !allInModel;
             });
+            // 【P0-4】恢复三重过滤 dIds.includes(r.id) && r.id !== pId && !batchDupIds.has(r.id)
+            const modelDupIds = new Set();
+            for (const rg of remainingGroups) {
+              for (const d of rg.duplicates) modelDupIds.add(d.id);
+            }
             for (const dg of pDups) {
               const pId = Number(dg.primary_id);
               const dIds = Array.isArray(dg.duplicate_ids) ? dg.duplicate_ids.map(Number) : [];
               if (pId && dIds.length > 0) {
                 const pItem = rows.find((r) => r.id === pId) || candidateItemMap.get(pId);
-                const dItems = dIds.map((id) => rows.find((r) => r.id === id) || candidateItemMap.get(id)).filter(Boolean);
+                const dItems = (forModel.length ? forModel : rows).filter(
+                  (r) => dIds.includes(r.id) && r.id !== pId && !modelDupIds.has(r.id)
+                );
+                for (const dId of dIds) {
+                  if (dId !== pId && !modelDupIds.has(dId) && !dItems.some((r) => r.id === dId)) {
+                    const fallbackItem = rows.find((r) => r.id === dId) || candidateItemMap.get(dId);
+                    if (fallbackItem) dItems.push(fallbackItem);
+                  }
+                }
                 if (pItem && dItems.length > 0) {
+                  for (const d of dItems) modelDupIds.add(d.id);
                   remainingGroups.push({ primary: pItem, duplicates: dItems });
                 }
               }
@@ -2187,6 +2272,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
       const p = g.primary;
       const dups = g.duplicates;
       for (const d of dups) {
+        if (!d || d.id === p.id) continue; // 双保险：对 pitfalls remove/update 前再断言 d.id !== pId，绝不自删主记录
         try {
           await client.update("pitfalls", d.id, {
             invalid_at: now,
@@ -2198,9 +2284,10 @@ export async function memoryAudit(client, cfg, args, ctx) {
         } catch (_) {}
       }
       try {
-        const dupRecurrenceSum = dups.reduce((acc, d) => acc + (Number(d.recurrence) || 1), 0);
+        const validDups = dups.filter((d) => d && d.id !== p.id);
+        const dupRecurrenceSum = validDups.reduce((acc, d) => acc + (Number(d.recurrence) || 1), 0);
         const nextRec = (Number(p.recurrence) || 1) + dupRecurrenceSum;
-        const mergedTags = mergeCommaSeparated(p.tags, ...dups.map((d) => d.tags));
+        const mergedTags = mergeCommaSeparated(p.tags, ...validDups.map((d) => d.tags));
         await client.update("pitfalls", p.id, {
           recurrence: nextRec,
           updated_at: now,
@@ -2281,7 +2368,8 @@ export async function memoryAudit(client, cfg, args, ctx) {
     const newMemLastId = memLastId || cursor.last_memory_id || null;
     const newPitLastId = pitLastId || cursor.last_pitfall_id || null;
     const maxIdSeen = Math.max(Number(newMemLastId) || 0, Number(newPitLastId) || 0, Number(cursor.last_id) || 0) || null;
-    if (isIncremental) {
+    // 【P1-2】full:true 扫满 fetch_limit 截断退出时，必须保存游标（不能只在 isIncremental 时保存）
+    if (isIncremental || truncated) {
       saveAuditCursor(project, {
         last_memory_id: newMemLastId,
         last_pitfall_id: newPitLastId,
@@ -2357,7 +2445,8 @@ async function checkScheduledDedup(client, cfg) {
       project: cfg.project || "global",
       schedule,
       updated_after: updatedAfter,
-      batch_size: cfg.dedup_batch_size || 1000,
+      batch_size: cfg.dedup_batch_size || cfg.dedup_fetch_limit || 1000,
+      fetch_limit: cfg.dedup_fetch_limit || 1000,
     });
     return res;
   } catch (err) {
@@ -2366,21 +2455,49 @@ async function checkScheduledDedup(client, cfg) {
   }
 }
 
-function ensureAuditScheduler(client, cfg) {
-  /* 调度器自建 client：加载期传入的 client 可能尚未就绪 ✗ 绝不能因此抛错 ✓ */
-  function safeClient() {
-    if (client && typeof client.list === "function") return client;
+// 【P2-4】ensureAuditScheduler 闭包陈旧：定时器触发时通过 optionsGetter 重新读取最新配置与 client
+function ensureAuditScheduler(client, cfg, optionsGetter) {
+  function getFreshCfg() {
+    let latest = cfg;
     try {
-      if (cfg && (cfg.mcpKey || cfg.mcp_key)) return makeClient(cfg);
+      if (typeof optionsGetter === "function") {
+        const res = optionsGetter();
+        if (res && typeof res === "object") latest = res;
+      } else if (optionsGetter && typeof optionsGetter === "object") {
+        latest = readOptions(optionsGetter);
+      }
     } catch (_) {}
+    return latest || cfg;
+  }
+
+  function getFreshClient(freshCfg) {
+    try {
+      if (freshCfg && isCfgShape(freshCfg)) {
+        const c = makeClient(freshCfg);
+        if (c && typeof c.list === "function") return c;
+      }
+    } catch (_) {}
+    if (client && typeof client.list === "function") return client;
     return null;
   }
-  const _origCheck = checkScheduledDedup;
+
   if (_auditSchedulerStarted) return;
   _auditSchedulerStarted = true;
-  checkScheduledDedup(safeClient(), cfg).catch((e) => { console.error("[memory-hub] 启动去重检查跳过:", (e && e.message) || e); });
+
+  const runScheduled = async () => {
+    const freshCfg = getFreshCfg();
+    const freshClient = getFreshClient(freshCfg);
+    return await checkScheduledDedup(freshClient, freshCfg);
+  };
+
+  runScheduled().catch((e) => {
+    console.error("[memory-hub] 启动去重检查跳过:", (e && e.message) || e);
+  });
+
   _auditTimer = setInterval(() => {
-    checkScheduledDedup(safeClient(), cfg).catch((e) => { console.error("[memory-hub] 定时去重跳过:", (e && e.message) || e); });
+    runScheduled().catch((e) => {
+      console.error("[memory-hub] 定时去重跳过:", (e && e.message) || e);
+    });
   }, 5 * 60 * 1000);
   if (_auditTimer && _auditTimer.unref) _auditTimer.unref();
 }
@@ -2778,7 +2895,7 @@ export const MagpieMemoryHub = async (input, options) => {
    * 默认 off，关闭时不执行任何后台操作；超期触发后立即分批执行去重，绝不产出冗余卡片。 */
   const dedupSched = cfg.dedup_schedule || cfg.audit_interval || cfg.auditInterval || (options && (options.dedup_schedule || options.audit_interval)) || "off";
   if (dedupSched !== "off" && !isTestMode()) {
-    ensureAuditScheduler(client, cfg);
+    ensureAuditScheduler(client, cfg, () => readOptions(input || options));
   }
 
   const tool = {};
