@@ -1,0 +1,64 @@
+{
+  "name": "magpie-memory-hub",
+  "version": "6.30.5",
+  "description": "Magpie 网关的透明记忆层：自动提炼上下文存入 NoCodeBackend，向 agent 提供记忆检索与 R2 文件存储 MCP 工具；内置幂等的数据库初始化与清空。",
+  "type": "module",
+  "main": "./tools.js",
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "memory",
+    "mcp",
+    "nocodebackend",
+    "headroom"
+  ],
+  "author": "otaku-say",
+  "license": "MIT",
+  "files": [
+    "*.js",
+    "settings.html",
+    "settings.css",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "magpie": {
+    "hooks": "./gateway_harvest.hooks.js",
+    "middleware": "./memory.middleware.js",
+    "icon": "./icon.svg",
+    "maxConcurrency": 4,
+    "page": {
+      "title": "记忆中枢设置",
+      "file": "./settings.html",
+      "icon": "./icon.svg"
+    },
+    "options": {
+      "gatewayTimeoutMs": 8000,
+      "disabled": false,
+      "ncb_instance": "memory",
+      "ncb_secret": "",
+      "inline_extract": true,
+      "max_inject_count": 5,
+      "max_budget_chars": 2048,
+      "min_confidence": 0.6,
+      "memories": [],
+      "ccr_cards": false,
+      "inject_principles": true,
+      "max_principles": 2,
+      "mcp_key": "",
+      "auto_init": false,
+      "auto_harvest": false,
+      "on_exist": "reuse",
+      "extract_model": "",
+      "classify_model": "",
+      "audit_model": "",
+      "dedup_schedule": "off",
+      "dedup_time": "02:00",
+      "dedup_weekday": 1,
+      "dedup_day": 1,
+      "dedup_batch_size": 1000,
+      "classify_endpoint": "auto",
+      "search_rewrite": true
+    }
+  }
+}

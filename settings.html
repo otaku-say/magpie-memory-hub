@@ -1,0 +1,805 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Magpie Memory Hub · 设置</title>
+<link rel="stylesheet" href="settings.css">
+<script src="_magpie/bridge.js"></script>
+<script src="settings.js" defer></script>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="header-row">
+    <h1>记忆中枢</h1>
+    <span class="version-tag">v6.30.5</span>
+  </div>
+  <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、R2 存储。</p>
+
+  <!-- 介绍与快速上手区（克制可折叠设计，不挤占首屏操作） -->
+  <details class="intro-guide" id="intro_guide">
+    <summary class="intro-summary">
+      <span class="intro-title">💡 使用说明（快速上手三步）</span>
+      <span class="intro-badge">查看指南</span>
+    </summary>
+    <div class="intro-content">
+      <div class="intro-steps">
+        <div class="intro-step">
+          <span class="step-badge">1</span>
+          <div class="step-body">
+            <strong>填 MCP Key 与数据库名</strong>
+            <span>在下方「NoCodeBackend 数据库与密钥」卡片中填入 MCP Key（可在 NCB 后台 Developer 页面获取）与数据库名（推荐保持 <code>memory</code>）。</span>
+          </div>
+        </div>
+        <div class="intro-step">
+          <span class="step-badge">2</span>
+          <div class="step-body">
+            <strong>点击「一键创建数据库」</strong>
+            <span>点击「一键创建数据库与结构」，插件自动完成数据库、三张核心表、字段与唯一索引创建，并自动回填保存数据库密钥。</span>
+          </div>
+        </div>
+        <div class="intro-step">
+          <span class="step-badge">3</span>
+          <div class="step-body">
+            <strong>完成并开始使用</strong>
+            <span>主路径即刻就绪，所有 agent 均可通过 MCP 检索与沉淀长期记忆。可选：挂载 Cloudflare R2 存储与配置在线提炼模型；其余设置项均自带生产级推荐值，保持默认即可。</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <!-- 顶部状态条 -->
+  <div id="mode" class="mode warn" role="status">
+    <span class="dot"></span>
+    <span id="mode_text">⚠️ 未完成配置：请填写下方 MCP Key 与数据库名称，然后点击「一键创建数据库」</span>
+  </div>
+
+  <!-- ① NoCodeBackend 数据库与密钥 -->
+  <section>
+    <h2>NoCodeBackend 数据库与密钥</h2>
+    <div class="card">
+      <div class="row">
+        <div class="row-head">
+          <label for="ncb_instance">数据库名称</label>
+          <span class="badge rec">推荐 memory</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">NoCodeBackend 上的逻辑数据库名（系统会自动拼装账号前缀，实际在远端建成如 <code>41694_memory</code>）。</div>
+          <div class="hint-diff"><strong>填写</strong>：指定记忆和踩坑记录存储的目标库；<strong>留空</strong>：无法自动建库、读写或挂载存储。</div>
+        </div>
+        <div class="control input-with-prefix">
+          <span class="input-prefix mono" id="instance_prefix" title="只读的账号数字前缀">—</span>
+          <input class="mono" type="text" id="ncb_instance" placeholder="memory" spellcheck="false">
+        </div>
+        <div class="db-full-hint" id="instance_full_hint">
+          <span class="db-full-label">NCB 上的完整名称：</span><code id="instance_full_name">—</code>
+          <span class="db-full-tip" id="instance_full_tip">（点「检测 MCP Key」获取前缀）</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="mcp_key">MCP Key</label>
+          <span class="badge req">必填</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">在 NoCodeBackend 后台 Developer 页面获取的开发者调用凭据。</div>
+          <div class="hint-diff"><strong>填写</strong>：插件通过 MCP 协议自动建库、建表和挂载 R2 存储；<strong>留空</strong>：插件无法自动执行任何云端基础设施操作。</div>
+        </div>
+        <div class="control input-group">
+          <input class="mono" type="password" id="mcp_key" placeholder="粘贴 MCP Key" autocomplete="off" spellcheck="false">
+          <button type="button" class="tiny" id="toggle_mcp_key">显示</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="ncb_secret">数据库 Secret Key</label>
+          <span class="badge rec">推荐 填</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">数据库专属访问密钥，用于 R2 列举/删除与探针清理。Secret Key 只在建库时返回一次，MCP Key 无法读取，插件也无法自行取回。</div>
+          <div class="hint-diff"><strong>手动填写</strong>：前往 NoCodeBackend 控制台 → 数据库设置 → 复制 Secret Key 填入；<strong>留空</strong>：记忆读写不受影响，但 R2 列举与探针清理不可用。</div>
+        </div>
+        <div class="control">
+          <input class="mono" type="password" id="ncb_secret" placeholder="从 NCB 控制台复制 Secret Key 填入" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="on_exist">重名处理策略</label>
+          <span class="badge rec">推荐 复用已有库</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">一键创建数据库时，若远端已存在同名数据库的处理机制。</div>
+          <div class="hint-diff"><strong>复用已有库</strong>：补齐缺失数据表并保留既有数据；<strong>自动加后缀</strong>：另建带数字后缀的独立空库；<strong>报错</strong>：遇到同名立即中断建库。</div>
+        </div>
+        <div class="control">
+          <select id="on_exist">
+            <option value="reuse" selected>reuse 复用已有库（推荐）— 只补结构，不破坏数据</option>
+            <option value="auto_rename">auto_rename 允许自动加后缀（会新建一个独立空库）</option>
+            <option value="fail">fail 直接报错</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row split">
+        <div class="main">
+          <div class="row-head">
+            <label for="auto_init">启动时自愈</label>
+            <span class="badge rec">推荐 关</span>
+          </div>
+          <div class="hint">
+            <div class="hint-desc">插件在宿主每次初始化加载时自动检查并补齐缺失的数据库表与索引结构。</div>
+            <div class="hint-diff"><strong>开</strong>：表结构始终自愈保持最新；<strong>关</strong>：不产生启动时的额外网络探测，插件载入更轻快。</div>
+          </div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="auto_init"><span></span></label>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button type="button" class="primary" id="btn_db_provision">一键创建数据库</button>
+        <button type="button" id="btn_check_ncb">检测 MCP Key</button>
+        <button type="button" id="btn_check_secret">检测 Secret Key</button>
+        <button type="button" id="btn_db_status">检查状态</button>
+        <button type="button" class="danger" id="btn_db_reset">清空数据库</button>
+      </div>
+
+      <div class="action-status-box" id="db_action_status" style="display:none;"></div>
+
+      <div class="card-save-row">
+        <button type="button" class="btn-card-save" id="btn_save_card_ncb">保存本卡片</button>
+        <span class="status" id="status_card_ncb" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ② Cloudflare R2 对象存储 -->
+  <details class="card">
+    <summary>
+      <span class="chev"></span>
+      <span class="t">Cloudflare R2 对象存储</span>
+      <span class="sub">对象存储凭据 · S3 兼容 API · 自定义域名</span>
+    </summary>
+    <div class="body">
+      <div class="row">
+        <div class="row-head">
+          <label for="r2_account_id">Account ID</label>
+          <span class="badge req">必填</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">Cloudflare 仪表盘中的账户识别码（Account ID）。</div>
+          <div class="hint-diff">插件要用这三个值去连 Cloudflare R2。NoCodeBackend 账号里若已连接过 Cloudflare，也可以留空让它复用已有连接；<strong>但在 Cloudflare 轮换过密钥后必须填新的</strong>，否则 NCB 会拿旧凭据去连，挂载会「看似成功实际不可用」。</div>
+        </div>
+        <div class="control">
+          <input class="mono" type="text" id="r2_account_id" placeholder="粘贴 Cloudflare Account ID" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="r2_access_key_id">Access Key ID</label>
+          <span class="badge req">必填</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">Cloudflare R2 API 令牌的 Access Key ID。</div>
+          <div class="hint-diff">插件要用这三个值去连 Cloudflare R2。NoCodeBackend 账号里若已连接过 Cloudflare，也可以留空让它复用已有连接；<strong>但在 Cloudflare 轮换过密钥后必须填新的</strong>，否则 NCB 会拿旧凭据去连，挂载会「看似成功实际不可用」。</div>
+        </div>
+        <div class="control">
+          <input class="mono" type="text" id="r2_access_key_id" placeholder="粘贴 R2 Access Key ID" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="r2_secret_access_key">Secret Access Key</label>
+          <span class="badge req">必填</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">Cloudflare R2 API 令牌的 Secret Access Key。</div>
+          <div class="hint-diff">插件要用这三个值去连 Cloudflare R2。NoCodeBackend 账号里若已连接过 Cloudflare，也可以留空让它复用已有连接；<strong>但在 Cloudflare 轮换过密钥后必须填新的</strong>，否则 NCB 会拿旧凭据去连，挂载会「看似成功实际不可用」。</div>
+        </div>
+        <div class="control">
+          <input class="mono" type="password" id="r2_secret_access_key" placeholder="粘贴 R2 Secret Access Key" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="r2_bucket_name">Bucket 名称</label>
+          <span class="badge rec">推荐 留空</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">用于存放多媒体附件与记忆备份的 Cloudflare R2 存储桶名。</div>
+          <div class="hint-diff"><strong>留空</strong>：挂载时自动由数据库名派生合规桶名（如将下划线转为连字符，符合 S3/R2 命名规范）；<strong>填写</strong>：绑定并挂载到指定的已有存储桶（须符合 S3 命名规范）。</div>
+        </div>
+        <div class="control">
+          <input class="mono" type="text" id="r2_bucket_name" placeholder="留空自动生成" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="r2_public_url">公开访问地址</label>
+          <span class="badge rec">推荐 留空</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">R2 存储桶绑定的公开访问域名或 Cloudflare 自定义域 URL。</div>
+          <div class="hint-diff"><strong>留空</strong>：仅通过 S3 私有签名链路访问；<strong>填写</strong>：附件可直接通过 CDN 公开 URL 免鉴权快速读取。</div>
+        </div>
+        <div class="control">
+          <input class="mono" type="text" id="r2_public_url" placeholder="https://pub-xxx.r2.dev" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button type="button" id="btn_check_r2">检测 R2 密钥</button>
+        <button type="button" id="btn_clean_probe">清理探针文件</button>
+        <button type="button" id="btn_db_storage_setup">挂载 R2 存储</button>
+      </div>
+
+      <div class="action-status-box" id="r2_action_status" style="display:none;"></div>
+
+      <div class="card-save-row">
+        <button type="button" class="btn-card-save" id="btn_save_r2">保存本卡片</button>
+        <span class="status" id="r2_status" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </details>
+
+  <!-- 在线大模型与智能配置 -->
+  <details class="card" id="card_models" open>
+    <summary>
+      <span class="chev"></span>
+      <span class="t">在线大模型与智能配置</span>
+      <span class="sub">知识提炼 · 意图判定 · 错误智能诊断 · 搜索自然语言改写</span>
+    </summary>
+    <div class="body">
+      <div class="row">
+        <div class="row-head">
+          <label for="extract_model">提炼与诊断模型 (extract_model)</label>
+          <span class="badge rec">推荐配置</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">用于异步提炼高价值记忆/踩坑经验，以及为底层未知报错提供智能人话诊断与修复建议。</div>
+          <div class="hint-diff"><strong>留空</strong>：安全跳过模型提炼与智能诊断，零网络请求与额外开销；<strong>填写示例</strong>：<code>group/gemini-3.5-flash-lite</code>。</div>
+        </div>
+        <div class="control">
+          <input type="text" id="extract_model" placeholder="例如：group/gemini-3.5-flash-lite" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="classify_model">前置意图判定模型 (classify_model)</label>
+          <span class="badge">可选</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">提炼前对长对话进行前置轻量价值分类，快速过滤无长期价值对话，节省提炼成本。</div>
+          <div class="hint-diff"><strong>留空</strong>：跳过前置过滤直接提炼；<strong>填写示例</strong>：<code>group/clef</code>。</div>
+        </div>
+        <div class="control">
+          <input type="text" id="classify_model" placeholder="例如：group/clef" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="audit_model">去重与重排模型 (audit_model)</label>
+          <span class="badge">可选</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">用于「全自动去重」执行深度语义查重合并，以及「检索增强与重排」挑选最相关记忆。一个模型同时服务去重与检索重排。</div>
+          <div class="hint-diff"><strong>留空</strong>：自动回退至提炼模型 (extract_model)；<strong>填写示例</strong>：<code>group/claude-3-7-sonnet</code>。</div>
+        </div>
+        <div class="control">
+          <input type="text" id="audit_model" placeholder="例如：group/claude-3-7-sonnet（留空则回退至提炼模型）" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row" id="row_dedup_schedule">
+        <div class="row-head">
+          <label for="dedup_schedule">定时去重执行周期 (dedup_schedule)</label>
+          <span class="badge rec">默认 关闭</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">宿主长驻后台定时对库内记忆与踩坑进行全自动去重合并。到达设定时段后立即执行，只软失效绝不物理删除。</div>
+          <div class="hint-diff"><strong>关闭</strong>：仅允许手动触发；<strong>每天 / 每周 / 每月</strong>：到达设定时刻在后台自动触发去重。</div>
+        </div>
+        <div class="control schedule-control-box">
+          <div class="schedule-form-line">
+            <span class="schedule-label">执行周期</span>
+            <select id="dedup_schedule" class="schedule-select">
+              <option value="off" selected>关闭</option>
+              <option value="daily">每天</option>
+              <option value="weekly">每周</option>
+              <option value="monthly">每月</option>
+            </select>
+            <div id="wrap_dedup_weekday" class="schedule-cond" style="display:none;">
+              <select id="dedup_weekday" class="schedule-select">
+                <option value="1" selected>周一</option>
+                <option value="2">周二</option>
+                <option value="3">周三</option>
+                <option value="4">周四</option>
+                <option value="5">周五</option>
+                <option value="6">周六</option>
+                <option value="7">周日</option>
+              </select>
+            </div>
+            <div id="wrap_dedup_day" class="schedule-cond" style="display:none;">
+              <div class="input-with-suffix">
+                <input type="number" id="dedup_day" min="1" max="28" step="1" value="1">
+                <span class="input-suffix">天</span>
+              </div>
+            </div>
+            <div class="schedule-time-group" id="wrap_dedup_time">
+              <div class="input-with-suffix">
+                <input type="number" id="dedup_hour" min="0" max="23" step="1" value="2">
+                <span class="input-suffix">小时</span>
+              </div>
+              <div class="input-with-suffix">
+                <input type="number" id="dedup_minute" min="0" max="59" step="1" value="0">
+                <span class="input-suffix">分钟</span>
+              </div>
+            </div>
+            <input type="hidden" id="dedup_time" value="02:00">
+          </div>
+          <div class="schedule-preview-line" id="dedup_preview">已关闭定时去重</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="dedup_batch_size">全量去重批大小 (dedup_batch_size)</label>
+          <span class="badge rec">默认 1000</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">全量去重时每批处理的记录条数。上限 1000 因 NoCodeBackend 单次读取限制。</div>
+          <div class="hint-diff"><strong>范围</strong>：50~1000，推荐 1000。</div>
+        </div>
+        <div class="control">
+          <input type="number" id="dedup_batch_size" min="50" max="1000" step="50" value="1000">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label id="lbl_last_audit">上次去重时间</label>
+        </div>
+        <div class="hint">
+          <div class="hint-desc" id="last_audit_at_text">尚未执行过全自动去重（未记录）</div>
+          <div class="hint-desc" id="last_dedup_summary">上次去重：尚未执行</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="classify_endpoint">判定模型端点模式 (classify_endpoint)</label>
+          <span class="badge rec">默认 auto</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">判定模型调用的接口端点：auto 具备自适应探测与进程级缓存；systemone 走快速决策端点；chat 走标准对话补全。</div>
+          <div class="hint-diff"><strong>auto</strong>：自适应探测端点并缓存；<strong>systemone</strong>：强制使用决策模型端点；<strong>chat</strong>：强制走对话补全。</div>
+        </div>
+        <div class="control">
+          <select id="classify_endpoint">
+            <option value="auto">auto（自适应探测，推荐）</option>
+            <option value="systemone">systemone（决策端点）</option>
+            <option value="chat">chat（对话补全端点）</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row split">
+        <div class="main">
+          <div class="row-head">
+            <label for="search_rewrite">自然语言搜索改写 (search_rewrite)</label>
+            <span class="badge rec">推荐 开</span>
+          </div>
+          <div class="hint">
+            <div class="hint-desc">记忆检索时，调用提炼模型将自然语言转化为高召回实体关键词，并采用原词+改写词双路混合检索融合打分。</div>
+            <div class="hint-diff"><strong>开</strong>：提升自然语言与长问句检索召回率；<strong>关</strong>：仅使用原始输入词面检索。未配置提炼模型时自动静默回退。</div>
+          </div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="search_rewrite"><span></span></label>
+        </div>
+      </div>
+
+      <div class="row split">
+        <div class="main">
+          <div class="row-head">
+            <label for="search_rerank">检索增强与语义重排 (search_rerank)</label>
+            <span class="badge rec">推荐 开</span>
+          </div>
+          <div class="hint">
+            <div class="hint-desc">粗筛召回候选后，调用在线模型结合当前任务对候选记忆/踩坑记录执行语义相关度打分与重排，精准挑选最相关的条目，过滤噪音。</div>
+            <div class="hint-diff"><strong>开</strong>：双路保险，模型挑选与词面粗排融合，模型故障自动 fail-open；<strong>关</strong>：仅使用纯词面排序。</div>
+          </div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="search_rerank"><span></span></label>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="undo_before_time">回滚时间点 (可选)</label>
+          <span class="badge">可选</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">输入时间点（如 2026-10-19 03:00）将撤销该时刻之后的所有去重；留空则仅撤销最近一次。</div>
+          <div class="hint-diff"><strong>格式</strong>：<code>YYYY-MM-DD HH:MM</code>（如 2026-10-19 03:00），留空点「还原」撤销最近一次。</div>
+        </div>
+        <div class="control">
+          <div class="input-group undo-input-group">
+            <input type="text" id="undo_before_time" placeholder="如 2026-10-19 03:00（留空则仅撤销最近一次）" spellcheck="false">
+            <button type="button" id="btn_dedup_undo" class="btn-undo">还原</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="harvest_max_per_min">调用预算 · 每分钟上限 (harvest_max_per_min)</label>
+          <span class="badge rec">默认 20</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">60 秒滑动窗口内允许的模型调用次数。超出后自动跳过采集并打日志，不报错、不阻断网关。</div>
+          <div class="hint-diff"><strong>默认 20</strong>：正常一轮对话仅 0~1 次调用，20 足够覆盖突发；调小更省额度。</div>
+        </div>
+        <div class="control">
+          <input type="number" id="harvest_max_per_min" min="1" max="600" step="1" value="20">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="harvest_max_total">调用预算 · 单进程累计上限 (harvest_max_total)</label>
+          <span class="badge rec">默认 2000</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">网关进程累计模型调用熔断线。触达后本进程永久停止自动采集（重启网关恢复），超限跳过不报错。</div>
+          <div class="hint-diff"><strong>默认 2000</strong>：按一轮 1 次计可支撑约 2000 轮；熔断状态在「真实检测模型」结果中可见。</div>
+        </div>
+        <div class="control">
+          <input type="number" id="harvest_max_total" min="10" max="100000" step="10" value="2000">
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button type="button" id="btn_check_model">真实检测模型</button>
+        <button type="button" id="btn_memory_audit">立即全量去重</button>
+      </div>
+
+      <div class="action-status-box" id="model_action_status" style="display:none;"></div>
+
+      <div class="dedup-log-container">
+        <div class="dedup-log-header">去重运行日志（保留最近 30 行）</div>
+        <div class="dedup-rolling-logs" id="dedup_rolling_logs" role="log" aria-live="polite">
+          <div class="log-line">暂无去重日志</div>
+        </div>
+      </div>
+
+      <div class="card-save-row">
+        <button type="button" class="btn-card-save" id="btn_save_card_model">保存本卡片</button>
+        <span class="status" id="status_card_model" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </details>
+
+  <!-- ③ 记忆采集来源 -->
+  <details class="card" id="card_harvest">
+    <summary>
+      <span class="chev"></span>
+      <span class="t">记忆采集来源</span>
+      <span class="sub">网关异步自动记忆 · 对话录制离线扫描备选</span>
+    </summary>
+    <div class="body">
+      <div class="source-intro-box">
+        <div class="source-item">
+          <div class="source-item-title">
+            <span class="source-badge">路径一</span>
+            <strong>自动记忆</strong>
+            <span class="badge rec">推荐</span>
+          </div>
+          <p class="source-item-desc">由网关直接提供对话，<strong>不需要</strong>开启 Magpie 内置的「记录网关对话」，<strong>不占磁盘</strong>。开关是 <code>auto_harvest</code>。</p>
+        </div>
+        <div class="source-item">
+          <div class="source-item-title">
+            <span class="source-badge">路径二</span>
+            <strong>扫描对话录制</strong>
+            <span class="badge">备选</span>
+          </div>
+          <p class="source-item-desc">读 Magpie 内置录制，<strong>需要</strong>先在「设置 → 插件 →「会话」」里开启录制（会占用本地磁盘，官方上限 7 天 / 256 MiB）。对应「立即扫描对话录制」按钮。</p>
+        </div>
+      </div>
+
+      <div class="row split">
+        <div class="main">
+          <div class="row-head">
+            <label for="auto_harvest">自动记忆</label>
+            <span class="badge rec">推荐 关</span>
+          </div>
+          <div class="hint">
+            <div class="hint-desc">开启后网关上每次模型交互都会由异步钩子自动提炼事实、架构决策与避坑经验入库，基于在线模型抽取，不占磁盘。</div>
+            <div class="hint-diff"><strong>开</strong>：网关上每次模型交互都会被提炼入库；<strong>关（默认）</strong>：关闭自动记忆，关闭则零影响。</div>
+          </div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="auto_harvest"><span></span></label>
+          <input type="hidden" id="gatewayTimeoutMs" value="8000">
+        </div>
+      </div>
+
+      <div class="divider-note">
+        <p><strong>📦 备选路径：扫描对话录制（依赖本地磁盘落盘）</strong></p>
+        <p>
+          若需使用此备选路径扫描本地录制，需先在 Magpie 里开启对话录制：<br>
+          打开 <strong>设置 → 插件</strong>，找到内置插件 <strong>「会话」</strong> 把它打开（开关位于插件页中该插件的说明文字旁）。<br>
+          打开后该插件会显示 <strong>「正在记录网关对话」</strong>；其说明文字为 <strong>「已开启：Agent 经网关发送的内容和回复只保存在这台电脑上，最多 7 天（256 MiB），可在每个网关会话下查看」</strong>。<br>
+          若要关闭录制，点 <strong>「停止记录并清空已保存的对话」</strong>。<br>
+          <em>—— 插件本页只是读取该录制的结果，<strong>无法代你开启</strong>，需先去那里打开。若使用上方的推荐方案「自动记忆」，则<strong>完全无需开启</strong>此录制功能。</em>
+        </p>
+        <p>
+          <strong>本地落盘与隐私保护说明：</strong><br>
+          1. 开启录制意味着对话内容会写到本地磁盘（<code>/config/magpie/gateway-conversations</code>，受官方 7 天 / 256 MiB 配额限制）。<br>
+          2. 插件<strong>只把提炼后的结构化记忆入库，绝不把对话原文入库</strong>；提炼采用在线模型抽取。<br>
+          3. 若未开启录制或暂无录制文件，点击扫描将显示友好提示，不会报错。
+        </p>
+      </div>
+
+      <div class="btn-row">
+        <button type="button" id="btn_harvest_gateway">立即扫描对话录制</button>
+      </div>
+
+      <div class="action-status-box" id="harvest_action_status" style="display:none;"></div>
+
+      <div class="card-save-row">
+        <button type="button" class="btn-card-save" id="btn_save_card_harvest">保存本卡片</button>
+        <span class="status" id="status_card_harvest" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </details>
+
+  <!-- ③ 记忆提炼与入库门槛 -->
+  <details class="card">
+    <summary>
+      <span class="chev"></span>
+      <span class="t">记忆提炼与入库门槛</span>
+      <span class="sub">内联免模型提炼 · 候选记忆入库置信度门槛</span>
+    </summary>
+    <div class="body">
+      <div class="row split">
+        <div class="main">
+          <div class="row-head">
+            <label for="inline_extract">内联提炼</label>
+            <span class="badge rec">推荐 开</span>
+          </div>
+          <div class="hint">
+            <div class="hint-desc">在请求尾部轻量注入 [Memory Agent Guide] 指引，按意图动态引导当前模型主动调用 MCP 工具查存记忆，零额外模型调用。</div>
+            <div class="hint-diff"><strong>开</strong>：零模型免额外 API 成本，提炼随对话顺手完成；<strong>关</strong>：彻底关闭自动提炼，仅依赖手动录入或外部工具。</div>
+          </div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="inline_extract"><span></span></label>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="min_confidence">最低入库置信度</label>
+          <span class="badge rec">推荐 0.6</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">提炼出的候选记忆写入数据库的最低评分门槛（取值范围 0~1）。</div>
+          <div class="hint-diff"><strong>调高（如 0.8+）</strong>：记忆入库更严苛、数据更干净，但可能遗漏细节；<strong>调低（如 0.4）</strong>：采集更全面，但容易混入琐碎噪声。</div>
+        </div>
+        <div class="control">
+          <input type="number" id="min_confidence" min="0" max="1" step="0.05" value="0.6">
+        </div>
+      </div>
+
+      <div class="card-save-row">
+        <button type="button" class="btn-card-save" id="btn_save_card_extract">保存本卡片</button>
+        <span class="status" id="status_card_extract" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </details>
+
+  <!-- ④ 网关注入与上下文预算 -->
+  <details class="card">
+    <summary>
+      <span class="chev"></span>
+      <span class="t">网关注入与上下文预算</span>
+      <span class="sub">准则置顶 · CCR 摘要卡 · 字符预算与注入条数限制</span>
+    </summary>
+    <div class="body">
+      <div class="row split">
+        <div class="main">
+          <div class="row-head">
+            <label for="inject_principles">准则置顶</label>
+            <span class="badge rec">推荐 开</span>
+          </div>
+          <div class="hint">
+            <div class="hint-desc">在向当前会话注入相关记忆时，同步注入历史踩坑记录与行为准则。</div>
+            <div class="hint-diff"><strong>开</strong>：遇到相似场景主动提示过往避坑经验，避免重复踩坑；<strong>关</strong>：只注入普通事实记忆，略微精简上下文。</div>
+          </div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="inject_principles"><span></span></label>
+        </div>
+      </div>
+
+      <div class="row split">
+        <div class="main">
+          <div class="row-head">
+            <label for="ccr_cards">长内容摘要卡</label>
+            <span class="badge rec">推荐 关</span>
+          </div>
+          <div class="hint">
+            <div class="hint-desc">超过 160 字的长记忆只向上下文注入「摘要 + id」，完整内容按需动态展开。</div>
+            <div class="hint-diff"><strong>开</strong>：大幅节省提示词 Token，但 Agent 需额外调用 <code>memory_get</code> 展开；<strong>关</strong>：一次性注入完整记忆全文，Token 消耗较大。</div>
+          </div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="ccr_cards"><span></span></label>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="max_inject_count">最多注入条数</label>
+          <span class="badge rec">推荐 5</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">单次请求注入到系统上下文中的相关事实记忆最大数量。</div>
+          <div class="hint-diff"><strong>调大</strong>：检索注入的记忆参考面更广，但占用提示词空间；<strong>调小</strong>：严格精简上下文，只保留最强相关的少数条目。</div>
+        </div>
+        <div class="control">
+          <input type="number" id="max_inject_count" min="1" max="20" value="5">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="max_budget_chars">注入字符预算</label>
+          <span class="badge rec">推荐 2048</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">单次请求注入的所有记忆与踩坑规则允许占用的字符总上限。</div>
+          <div class="hint-diff"><strong>调大</strong>：允许注入更长更详细的记忆内容；<strong>调小</strong>：超出预算时自动截断或丢弃低分项，防止挤占模型上下文。</div>
+        </div>
+        <div class="control">
+          <input type="number" id="max_budget_chars" min="256" max="8192" step="128" value="2048">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="max_principles">最多置顶准则</label>
+          <span class="badge rec">推荐 2</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">单次请求注入到上下文中的避坑与原则规则最大数量。</div>
+          <div class="hint-diff"><strong>调大</strong>：覆盖更多相关的避坑教训；<strong>调小</strong>：仅提示权重最高的核心规则，防止过多规则分散模型注意力。</div>
+        </div>
+        <div class="control">
+          <input type="number" id="max_principles" min="0" max="10" value="2">
+        </div>
+      </div>
+
+      <div class="row split">
+        <div class="main">
+          <div class="row-head">
+            <label for="disabled">停用网关注入</label>
+            <span class="badge rec">推荐 关</span>
+          </div>
+          <div class="hint">
+            <div class="hint-desc">全局一键暂停记忆向提示词的注入功能。</div>
+            <div class="hint-diff"><strong>开</strong>：彻底暂停所有记忆和避坑注入，网关仅直通原始提示词；<strong>关</strong>：正常启用记忆检索与上下文增强。</div>
+          </div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="disabled"><span></span></label>
+        </div>
+      </div>
+
+      <div class="btn-row" style="margin-top: 10px;">
+        <button type="button" id="btn_sync_snapshot">刷新记忆快照到中间件</button>
+      </div>
+      <div class="action-status-box" id="inject_action_status" style="display:none;"></div>
+      <div class="hint-desc" style="margin-top: 6px; font-size: 12px; color: var(--magpie-text-muted, #888);">
+        中间件依赖离线快照实现准则置顶与离线兜底注入（低频受控单次刷新）；智能体实时检索由内置 MCP 工具直连数据库执行。
+      </div>
+
+      <div class="card-save-row">
+        <button type="button" class="btn-card-save" id="btn_save_card_inject">保存本卡片</button>
+        <span class="status" id="status_card_inject" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </details>
+
+  <!-- MCP 接入地址 -->
+  <section>
+    <h2>MCP 接入地址</h2>
+    <div class="card">
+      <div class="row">
+        <div class="row-head">
+          <label for="mcp_url">MCP 服务器地址</label>
+          <span class="badge">只读</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">在 <b>资源库 → MCP 服务器</b> 里添加该地址并勾选要启用的 agent，Magpie 会自动写进各 agent 配置，无需手动改配置。</div>
+          <div class="hint-diff">对外暴露的工具名形如 <code>magpie-memory-hub_memory_search</code>。</div>
+        </div>
+        <div class="control input-group">
+          <input class="mono" type="text" id="mcp_url" readonly spellcheck="false">
+          <button type="button" class="tiny primary" id="copy">复制</button>
+        </div>
+      </div>
+      <div class="divider-note">
+        地址生效前提：<b>设置 → 插件</b> 中开启内置的 <b>Plugin tools</b>，且本插件处于启用状态。
+      </div>
+    </div>
+  </section>
+
+  <!-- 底部整体保存栏 -->
+  <div class="footer-bar">
+    <button type="button" class="primary" id="save">保存</button>
+    <span id="status" class="status" role="status" aria-live="polite"></span>
+  </div>
+
+</div><!-- /.wrap -->
+
+<!-- 一键创建确认弹窗 -->
+<div id="modal_provision" class="modal-backdrop" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="modal_provision_title">
+  <div class="modal-box">
+    <h3 id="modal_provision_title">确认一键创建数据库</h3>
+    <div class="modal-body">
+      <p>将向宿主提交一键创建信标，自动执行以下操作：</p>
+      <ul>
+        <li>自动在 NoCodeBackend 上创建数据库（若不存在）</li>
+        <li>自动补齐缺失的数据表（<code>memories</code>、<code>pitfalls</code>、<code>schema_meta</code>）、列与索引</li>
+        <li><strong>若同名已存在不会破坏数据</strong>：将走复用/补齐策略，绝不删除已有数据</li>
+        <li><strong>不会动 R2 存储</strong>（如需挂载 R2，请在下方 R2 卡片单独点击「挂载 R2 存储」）</li>
+        <li><strong>新建库时自动保存密钥</strong>：若本次新建数据库，将保存 NCB 仅在建库时返回一次的 Secret Key；复用已有库则无法读取，须手动填入</li>
+      </ul>
+    </div>
+    <div class="modal-actions">
+      <button type="button" id="btn_cancel_provision">取消</button>
+      <button type="button" id="btn_confirm_provision" class="primary">确认提交</button>
+    </div>
+  </div>
+</div>
+
+<!-- 清空确认弹窗（强二次确认） -->
+<div id="modal_reset" class="modal-backdrop" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="modal_reset_title">
+  <div class="modal-box modal-danger">
+    <h3 id="modal_reset_title">⚠️ 确认清空数据库</h3>
+    <div class="modal-body">
+      <div class="danger-banner">
+        将删除 <code>memories</code> / <code>pitfalls</code> / <code>schema_meta</code> 三张表，<strong>表结构与全部数据一并删除，不可恢复</strong>；库中其它表不受影响。
+      </div>
+      <p class="reset-prompt">
+        请输入当前数据库名称以确认清空：<br>
+        <strong id="reset_target_name" class="reset-target"></strong>
+      </p>
+      <div class="field">
+        <input type="text" id="reset_instance_input" class="mono" spellcheck="false" placeholder="请在此输入上方数据库名">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" id="btn_cancel_reset">取消</button>
+      <button type="button" id="btn_confirm_reset" class="danger" disabled>我已知晓后果，确认清空</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
