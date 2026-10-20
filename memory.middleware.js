@@ -51,9 +51,23 @@ function cleanText(text) {
  * 为什么中文要切 bigram：无词典分词下若把整段中文当成一个 token，
  * 「端口冲突怎么处理」就永远匹配不到标题里的「端口冲突」，中文召回会大面积失效。
  */
+function splitCamelCase(word) {
+  if (!word || typeof word !== "string") return [];
+  var s = word
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z0-9])/g, "$1 $2");
+  var parts = s.split(/\s+/);
+  var res = [];
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i].toLowerCase();
+    if (p.length >= 2) res.push(p);
+  }
+  return res;
+}
+
 function tokenize(text) {
-  var s = String(text || "").toLowerCase();
-  var runs = s.match(/[a-z0-9_-]{2,}|[\u4e00-\u9fff]+/g) || [];
+  var rawStr = String(text || "");
+  var runs = rawStr.match(/[a-zA-Z0-9_-]{2,}|[\u4e00-\u9fff]+/g) || [];
   var seen = {};
   var out = [];
   for (var i = 0; i < runs.length; i++) {
@@ -67,9 +81,40 @@ function tokenize(text) {
         var g = t.substr(j, 2);
         if (!seen[g]) { seen[g] = 1; out.push(g); }
       }
-    } else if (!seen[t]) {
-      seen[t] = 1;
-      out.push(t);
+    } else {
+      var lower = t.toLowerCase();
+      if (!seen[lower]) {
+        seen[lower] = 1;
+        out.push(lower);
+      }
+      // a) snake_case / kebab-case 裂变
+      if (t.indexOf("_") !== -1 || t.indexOf("-") !== -1) {
+        var segs = t.split(/[_-]+/);
+        for (var si = 0; si < segs.length; si++) {
+          var seg = segs[si];
+          var segLower = seg.toLowerCase();
+          if (segLower.length >= 2 && !seen[segLower]) {
+            seen[segLower] = 1;
+            out.push(segLower);
+          }
+          var subCamel = splitCamelCase(seg);
+          for (var sci = 0; sci < subCamel.length; sci++) {
+            var sc = subCamel[sci];
+            if (!seen[sc]) { seen[sc] = 1; out.push(sc); }
+          }
+        }
+        var stripped = lower.replace(/[_-]+/g, "");
+        if (stripped.length >= 2 && !seen[stripped]) {
+          seen[stripped] = 1;
+          out.push(stripped);
+        }
+      }
+      // b) camelCase 裂变
+      var camels = splitCamelCase(t);
+      for (var ci = 0; ci < camels.length; ci++) {
+        var cItem = camels[ci];
+        if (!seen[cItem]) { seen[cItem] = 1; out.push(cItem); }
+      }
     }
   }
   return out;
@@ -723,7 +768,26 @@ function onRequestInner(body, ctx) {
 
       if (cand.length) {
         /* 词法命中为门槛：0 分的候选一律不注入（避免噪声） */
-        var lexSorted = cand.slice().sort(byDesc(function (x) { return x._lex; }));
+        /* EVO-8：词法同分时用热度（retrieval_count + 复发加权）打破平局。
+         * 若只靠 RRF 融合，词法权重 1.0 远高于热度 0.4，同分时名次由输入顺序决定，
+         * 会导致「多次印证的经验」无法优先胜出，与 EVO-8 目标相悖。
+         * 这里仅作为【同分】的次级排序键，不改变不同分之间的相对次序。 */
+        var lexSorted = cand.slice().sort(function (a, b) {
+          if (b._lex !== a._lex) return b._lex - a._lex;
+          // 注意：_heat 的赋值在本轮排序之后才执行，故此处必须就地现算，
+          // 否则比较时两侧均为 undefined，tie-break 完全失效。
+          var ha = (function (o) {
+            var rc = parseInt(o.retrieval_count, 10); if (!rc || rc !== rc || rc < 0) rc = 0;
+            var rec = parseInt(o.recurrence, 10); if (!rec || rec !== rec || rec < 1) rec = 1;
+            return rc + (rec - 1) * 2;
+          })(a);
+          var hb = (function (o) {
+            var rc = parseInt(o.retrieval_count, 10); if (!rc || rc !== rc || rc < 0) rc = 0;
+            var rec = parseInt(o.recurrence, 10); if (!rec || rec !== rec || rec < 1) rec = 1;
+            return rc + (rec - 1) * 2;
+          })(b);
+          return hb - ha;
+        });
 
         /* 候选封顶：宽查询（如单字中文）可能命中上千条，全部拖进 RRF 排序
          * 会让单次开销失控。只保留词法分最高的 CAND_CAP 条参与融合。 */
@@ -738,7 +802,11 @@ function onRequestInner(body, ctx) {
         for (var q = 0; q < cand.length; q++) {
           var cq = cand[q];
           cq._fresh = retention(cq, now);
-          cq._heat = (parseInt(cq.retrieval_count, 10) || 0);
+          var rc = parseInt(cq.retrieval_count, 10);
+          if (!rc || rc !== rc || rc < 0) rc = 0;
+          var rec = parseInt(cq.recurrence, 10);
+          if (!rec || rec !== rec || rec < 1) rec = 1;
+          cq._heat = rc + (rec - 1) * 2;
           cq._scope = SCOPE_AFFINITY[cq.scope_level] || 2;
         }
         var freshSorted = cand.slice().sort(byDesc(function (x) { return x._fresh; }));
