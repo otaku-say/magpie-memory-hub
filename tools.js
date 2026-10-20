@@ -1838,11 +1838,13 @@ export async function memoryAudit(client, cfg, args, ctx) {
 
   try {
     const project = String(args.project || (cfg && cfg.project) || "global").trim();
-    const batchSize = Math.max(20, Math.min(Number(args.batch_size || cfg.dedup_batch_size || 50), 200));
-    // 【v6.30.4】单次调用批次预算：防止一次调用跑完全库导致 MCP 客户端 55s 超时
-    // 每批最多 50 条、每次最多 2 批 => 单次调用上限 100 条，耗时可控在 25s 内
-    // 剩余部分靠游标断点续跑（定时调度器每 5 分钟自动接力）
-    const maxBatches = Math.max(1, Math.min(Number(args.max_batches || cfg.audit_max_batches || 2), 20));
+    // 【v6.30.5】把「批次数预算」升级为「模型调用次数预算」
+    // 关键不变量：批大小 == 模型分块大小（AUDIT_CHUNK），保证「1 批 = 1 次模型调用」
+    // 于是 maxBatches 直接等于单次调用的模型调用次数，耗时完全可预测
+    // 默认 2 次调用 => 最坏 2 x 15s = 30s，稳稳低于 MCP 客户端 55s 硬超时
+    const AUDIT_CHUNK = Math.max(10, Math.min(Number(cfg.audit_chunk_size || 40), 40));
+    const batchSize = Math.max(10, Math.min(Number(args.batch_size || cfg.dedup_batch_size || AUDIT_CHUNK), AUDIT_CHUNK));
+    const maxBatches = Math.max(1, Math.min(Number(args.max_batches || cfg.audit_max_batches || 1), 10));
     const batchTs = Date.now();
     const now = nowSql();
 

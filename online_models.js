@@ -426,7 +426,7 @@ export async function auditMemoriesWithModel({
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.audit_timeout_ms) || 25000;
+  const timeoutMs = Number(options.audit_timeout_ms) || 15000;
   const doFetch = options._fetch || globalThis.fetch;
 
   if (!modelBudgetCheck(options).allowed) return null;
