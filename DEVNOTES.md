@@ -1389,3 +1389,193 @@ true !== false
 2. 运行回归测试套件并确保全部通过。
 3. 检查 git diff 确保仅改动授权文件。
 4. 提交并推送到远端 `feat/v633-c-config` 分支。
+
+
+---
+
+## 二十九、v6.34.0 调度器启停与接力、readOptions 字段、模型仲裁边界、分页投影
+
+# Agent A 检查点报告：调度器接力与审计仲裁修复 (v6.34-a)
+
+## 任务背景
+- **沙箱 ID**: `88ae31e7d2ca494e966abb94d2152dbf`
+- **代码目录**: `/workspace/m`
+- **工作分支**: `feat/v634-a-tools`
+- **文件所有权**: 独占修改 `tools.js` 与 `tests/test_v634_a_tools.mjs`，编写 `NOTES_v634_a.md`。严禁修改其他共享模块与测试文件。
+
+## 4 项整改方案与技术实现
+
+### 1. 【P1-1】调度器关闭不彻底 + 定时接力被阻断（tools.js 约 2394、2500-2528、2990-2995）
+- **问题根因**:
+  - a) 当设置页把 `dedup_schedule` 改回 `off` 时，入口处原代码在 `if (dedupSched !== off)` 外直接跳过，既没有调用 `stopAuditScheduler()` 也没有刷新 `_auditOptionsGetter`，导致旧定时器句柄继续按原配置后台空转。
+  - b) `checkScheduledDedup` 定时触发调用 `memoryAudit` 时未传 `incremental: true`；且当单次达到批次上限截断（`has_more: true`）时，原代码仍无条件更新 `last_dedup_at: nowSql()`，导致 5 分钟后的自动接力触发被判定为「今天刚跑过」而跳过，截断数据永久卡死。
+- **修复方案**:
+  - a) 入口处无条件刷新模块闭包 `_auditOptionsGetter` 与基础配置，当 `dedupSched === off || dedupSched === none` 时显式调用 `stopAuditScheduler()` 并清理定时器句柄；`ensureAuditScheduler` 内部若检测到 schedule 为 off 亦显式停止。
+  - b) `checkScheduledDedup` 调用 `memoryAudit` 时显式传入 `incremental: true`；在 `memoryAudit` 结束持久化状态时，若本轮截断（`truncated === true`），保持原 `last_dedup_at` 不更新（或保留旧值）并置位 `last_dedup_pending: true`；`checkScheduledDedup` 检测到 `isPending` 时判定为超期并立刻接力执行。
+- **反证门 1 设计**:
+  1. 验证 daily → off 彻底停止：初始化 daily 调度器，随后传入 off 配置，断言定时器被清理、状态为 stopped，且手动触发 `runScheduled()` 立即拒绝执行。
+  2. 验证 has_more 自动接力：构造超出单批拉取上限的数据集，第一次触发返回 `has_more: true`，断言 `last_dedup_pending: true`；连续触发第二次调度，断言第二次调度被真实接力执行且成功处理下一分批。
+
+---
+
+### 2. 【P1-2】readOptions 漏字段 + dedup_fetch_limit 恒真遮蔽用户配置（tools.js 约 88-135、1916、2041、2258）
+- **问题根因**:
+  - a) `readOptions()` 漏拷贝 `project`、`audit_chunk_size`、`audit_max_batches`、`rerank_model`，导致下游在 `cfg` 中读取恒为 `undefined`。
+  - b) `package.json` 里 `dedup_fetch_limit` 默认声明为 200 恒为真值，原代码使用 `o.dedup_fetch_limit || o.dedup_batch_size || 200` 与 `cfg.dedup_fetch_limit || cfg.dedup_batch_size || 200`，导致 200 恒先命中，用户在设置页修改 `dedup_batch_size` 完全被遮蔽无效。
+- **修复方案**:
+  - a) `readOptions` 补齐 4 个字段并赋予严谨默认值：`project: global`、`audit_chunk_size: 40`、`audit_max_batches: 1`、`rerank_model: `。
+  - b) 拉取上限优先级调整为：显式调用参数 `args.fetch_limit` > 用户配置的 `cfg.dedup_batch_size` > `cfg.dedup_fetch_limit` > 200。
+  - c) `MODEL_CHUNK` 统一使用 `Math.max(5, Math.min(chunk, 60))` 增加 [5, 60] 范围守卫。
+- **反证门 2 设计**:
+  1. 配置 `dedup_batch_size = 300`，执行去重，断言实际拉取批上限为 300 而非被遮蔽的 200。
+  2. 配置 `audit_chunk_size = 25`，断言 `MODEL_CHUNK` 精确为 25；测试边界溢出值（如 70 与 2），断言分别被范围守卫钳制在 60 与 5。
+
+---
+
+### 3. 【P1-3】单条精确重复被丢弃 + 模型合并结果未过数字守卫（tools.js 约 2066-2114、2281-2320）
+- **问题根因**:
+  - a) 当规则组 `g.primary` 被模型仲裁命中为重复（或被选为主记录），而其原有规则精确重复列表 `unhandledDups` 仅剩 1 条时，原代码 `if (unhandledDups.length > 1)` 判断为假，该孤儿重复记录被直接忽略丢弃，既未参与模型合并也未作为规则组合并，永久漏删。
+  - b) 模型仲裁返回的从记录列表 `dItems` 未校验 `hasConflictingNumbers`，若模型发生幻觉将不同端口（如 3306 与 3307）或版本号判定为重复，将被直接合并，导致关键数字冲突数据损毁。
+- **修复方案**:
+  - a) 当 `unhandledDups.length === 1` 时，暂存该规则副本，并将其挂入主记录所属的模型组（无论是作为主记录还是作为从记录）中一并执行合并与软失效；未被模型组消费的孤儿安全回退合并。
+  - b) 模型仲裁解析每条从记录时，逐条执行 `hasConflictingNumbers(primary, duplicate)` 校验，出现标题、正文或全文本数字冲突的从记录立即剔除，绝不合并。
+- **反证门 3 设计**:
+  1. 构造规则组主记录被模型选为另一组 primary、且规则组仅剩 1 条 dup 的场景，断言该孤儿 dup 仍被正确软失效。
+  2. 构造模型模拟返回将 3306 与 3307 判定为同一组重复，断言数字冲突守卫拦截生效，两条记录均保持 valid，拒绝误合并。
+
+---
+
+### 4. 【P1-5】pitfalls 查询缺 invalid_at 过滤 + 分页提前断页 + 投影漏列（tools.js 约 1971、2197-2211、2373）
+- **问题根因**:
+  - a) `pitfalls` 列表查询未传 `invalid_at: null`，已软删记录仍被拉取；内存过滤软删记录后，有效行数 `rows.length < dbFetchLimit` 触发提前 `break`，导致批次误判为全部完成，`has_more` 恒为 `false`，后续未处理记录永久断页。
+  - b) `memories` 查询 columns 投影漏选 `related_entities`、`invalid_at`、`expires_at`，导致实体合并时 `p.related_entities` 恒为 `undefined` 无法合并，且在投影模式下 `r.invalid_at` 缺失影响有效性判定。
+- **修复方案**:
+  - a) `pitfalls` 查询显式传入 `invalid_at: null`；在分页截断判定处，一律使用未过滤前的原始数据行数 `rawRows.length < dbFetchLimit` 对比拉取上限，只要数据库返回了整页原始行即判定仍有数据。
+  - b) `memories` 查询 columns 投影补齐 `related_entities`、`invalid_at`、`expires_at`，保证实体合并与有效性判定完全正常。
+- **反证门 4 设计**:
+  构造「包含 1 条软失效记录 + 达到拉取批上限的有效记录」批次，断言过滤后即使有效条数小于上限，分页仍正确判定 `has_more: true`，且游标正确推进到后续记录。
+
+## 验收计划与执行顺序
+1. 编写 `NOTES_v634_a.md`（本文件）。
+2. 在 `tools.js` 独占实现上述 4 项修复。
+3. 创建 `tests/test_v634_a_tools.mjs`，包含 4 大专项反证测试，严格遵守 `test_meta.mjs` 规范（createTestEnv/env.project/cleanup/residue===0）。
+4. 运行验证全量核心测试套件。
+5. Git 提交并推送至 `feat/v634-a-tools`。
+
+
+---
+
+## 三十、v6.34.0 豁免文案单一真相源、/var 子域白名单、isTestMode 精确化
+
+# v6.34 Agent B 豁免漂移与白名单修复规划 (NOTES_v634_b.md)
+
+## 1. 任务背景与文件所有权
+- **沙箱 ID**：`c6de3847008c4a23905eb2db34e23c9e`
+- **代码目录**：`/workspace/m`
+- **工作分支**：`feat/v634-b-guard`
+- **文件所有权约束（严格独占）**：
+  - `model_budget.js`
+  - `online_models.js`
+  - `gateway_harvest.js`
+  - `tests/test_v634_b_guard.mjs`
+  - `NOTES_v634_b.md`
+- **严禁修改**：`tools.js` / `local_state.js` / `semantic_dedup.js` / `package.json` / `settings.*` / `README.md` / `DEVNOTES.md` / `test_meta.mjs` / 其他 tests。
+
+---
+
+## 2. 整改项清单与技术方案
+
+### 2.1 【P0-1 最紧急】自激豁免因「提示词文案与实际不一致」再次失效 (model_budget.js 约 115、176; online_models.js 约 380)
+- **根因 a**：`INTERNAL_PROMPT_MARKERS` 中填写的文案为「长期记忆中枢体检与质量审阅专家」，而 `online_models.js` 中 `AUDIT_SYSTEM_PROMPT` 实际首句为「长期记忆中枢全自动去重专家」，两者字面不一致，导致去重调用经 `isInternalHarvestRequest` 识别为 `false`，自激放大风险重现。
+- **根因 b**：漏检 Gemini API 官方使用的 snake_case 命名 `body.system_instruction`（及下划线复数/对象）。
+- **修复方案**：
+  1. 在 `online_models.js` 中导出各核心 System Prompt 的首句常量（如 `AUDIT_SYSTEM_PROMPT_LEAD` 等），确立文案单一真实来源；
+  2. 将实际首句「长期记忆中枢全自动去重专家」加入 `model_budget.js` 的 `INTERNAL_PROMPT_MARKERS`，并保留历史文案保障向前兼容；
+  3. `isInternalHarvestRequest` 增强字段提取：支持 `body.system_instruction`（snake_case）与 `body.systemInstruction`（camelCase）等所有承载形式（支持字符串与对象/parts 形态）；
+  4. 新增防漂移自检机制：在测试中遍历所有真实 Prompt 常量，断言其特征文案必须存在于 `INTERNAL_PROMPT_MARKERS` 中，阻断未来代码修改再度漂移。
+- **反证验证**：分别以真实的 `AUDIT_SYSTEM_PROMPT` / `QUERY_REWRITE_SYSTEM_PROMPT` / `HARVEST_SYSTEM_PROMPT` / `RERANK_SYSTEM_PROMPT` / `ERROR_DIAGNOSE_SYSTEM_PROMPT` 构造请求，断言 `isInternalHarvestRequest` 均返回 `true`；普通用户请求断言返回 `false`。
+
+### 2.2 【P0-2】白名单只看子串导致任意父目录可放置 GatewayConversations (gateway_harvest.js 约 145-158、277-288)
+- **根因 a**：`isWhitelistedGatewayDir` 仅凭正则匹配 `GatewayConversations` 子串直接返回 `true`，未检查父级真实根域，导致例如 `/var/log/GatewayConversations` 及指向非授权目录的软链直接逃逸。
+- **根因 b**：祖先回溯遍历时，针对已被判定为白名单的分支跳过了 `checkPathForbidden(parentReal)`。
+- **修复方案**：
+  1. 白名单两阶段校验：
+     - 先校验父目录与祖先真实路径（realpath）是否命中系统黑名单（`HARD_FORBIDDEN_PREFIXES` 与敏感凭据子路径）；
+     - 限制 `/var` 根域：在 `/var` 或 `/private/var` 下仅放行 `minis` / `folders` / `tmp` 三个授权子域，其它所有路径（如 `/var/log`）一律禁止；
+  2. 祖先回溯重构路径安全加固：无论是否判定为白名单，回溯中对 `parentReal` 以及重构后的 `realPath` 均无条件执行 `checkPathForbidden`。
+- **反证验证**：
+  - `/var/log/GatewayConversations` 与指向 `/var/log` 的祖先软链接必须被坚决拦截并抛出 `[SECURITY_BLOCKED]`；
+  - `/var/minis/x/GatewayConversations`、`~/GatewayConversations`、`/tmp/ok/GatewayConversations` 必须合法放行。
+
+### 2.3 【P1-4】isTestMode 用完整路径子串判定导致生产部署在含 test_ 的目录时全面停摆 (gateway_harvest.js 约 551-559)
+- **根因**：原判定通过 `entry.includes(test_)` 对完整 `argv[1]` 作包含判断，当生产环境部署路径包含 `test_`（如 `/var/minis/test_env/app.js`）时，误判为测试环境，导致 `auto_init` / `auto_harvest` / `dedup_schedule` / 实时提炼在生产中全部停摆。
+- **修复方案**：
+  - 与 `local_state.js` 对齐：针对 `process.argv`，仅取 `path.basename(arg)` 严格匹配测试脚本规则（如 `^test_.*\.mjs$`、`\.test\.(mjs|js)$ `），或要求脚本必须以 `.mjs` 结尾且其所在父目录名称精确等于 `tests`，彻底废弃全路径子串弱匹配。
+- **反证验证**：
+  - 当 `argv[1] = /var/minis/test_env/app.js` 且无测试环境变量时，断言 `isTestMode() === false`；
+  - 当 `argv[1] = /workspace/m/tests/test_x.mjs` 时，断言 `isTestMode() === true`。
+
+---
+
+## 3. 测试与验证策略
+- **新建测试**：`tests/test_v634_b_guard.mjs`，包含 3 项专项反证门与 `test_meta` 规范自检；
+- **回归套件**：
+  - `node tests/test_meta.mjs`（前置校验）
+  - `node tests/test_call_storm_fix.mjs`
+  - `node tests/test_gateway_harvest.mjs`
+  - `node tests/test_gateway_harvest_hooks.mjs`
+  - `node tests/test_v633_b_guard.mjs`
+  - `node tests/test_v634_b_guard.mjs`
+
+
+---
+
+## 三十一、v6.34.0 文档现实一致性门禁（徽章/复选框/工具数三向核对）
+
+# v6.34 Track C (Documentation Drift & Consistency Gate) Implementation Notes
+
+## 任务目标与文件所有权
+严格限定修改与新增文件：
+- README.md (修复顶部测试徽章漂移)
+- DEVNOTES.md (修复第 22 节历史遗留复选框漂移)
+- tests/test_v634_c_docs.mjs (新增「文档与现实一致性」自动化门禁测试)
+- NOTES_v634_c.md (本文件，任务执行笔记)
+
+严禁修改：tools.js / package.json / settings.* / test_meta.mjs / 其他 tests 文件。
+
+## 核心整改项设计与落地
+
+### 1. 【P2-1】README 测试徽章与 DEVNOTES 复选框漂移修复
+- **README.md 顶部测试徽章对齐**：
+  - 现象：顶部徽章仍遗留为 `tests-43 passed`，而代码库在 v6.33.0 合并后测试套件总数已达 55；
+  - 修复：更新为 `tests-55 passed`（在 `[![Tests](https://img.shields.io/badge/tests-55%20passed-brightgreen.svg)](tests/)` 中对齐），并在测试门禁中设计动态提取与比对机制，杜绝硬编码。
+- **DEVNOTES.md 历史整改状态对齐**：
+  - 现象：第 22 节（v6.31.0 运行时与测试卫生）在过去版本已全量合并落地（commit e5cea44 / ed4e4ed），但第 1/2/4/5/6/7/8 项及子项复选框仍标记为 `- [ ]`；
+  - 修复：将第 22 节全部 17 处未勾选复选框对齐修正为 `- [x]`，只更新状态，不改动任何正文技术结论与上下文分析。
+  - 全局扫描：经全文档正则扫描，确认全篇再无其他「正文已完成但复选框未勾选」的异常滞后项。
+
+### 2. 【交叉一致性核查】新建 tests/test_v634_c_docs.mjs 门禁测试
+设计「文档与现实一致性」静态反证门禁套件，覆盖三大核心维度：
+1. **测试文件数动态推导与徽章一致性**：
+   - 动态扫描 `tests/` 目录下的 `.mjs` 测试文件，排除辅助桩 `test_helpers.mjs` 与元检查器 `test_meta.mjs`；
+   - 动态通过正则从 `README.md` 提取徽章数字；
+   - 断言徽章数字与实际测试文件数一致（支持基准功能测试数 55 与含门禁测试数 56 的动态兼容，杜绝硬编码）；
+   - 反证门：故意注入篡改的徽章样本（如 43 或 99），断言门禁必须捕获并抛出拦截异常。
+2. **DEVNOTES 章节复选框一致性核查**：
+   - 遍历 `DEVNOTES.md` 中所有 `## ` 章节下的复选框行；
+   - 扫描是否存在同一行或紧邻上下文包含「完成 / 已闭环 / ✅ / 已修复」但复选框为 `[ ]` 的可疑漂移项；
+   - 反证门：故意构造「正文声明已完成但标记为 - [ ]」的假样本，断言检查函数必须精确识别并报错。
+3. **MCP 工具注册数动态推导与文档一致性**：
+   - 使用正则从 `tools.js` 动态提取 `const TOOLS = { ... }` 字典中注册的所有工具键列表与总数（当前 21 个）；
+   - 使用正则从 `README.md` 中提取声明的工具数（如「21 个」）；
+   - 断言文档声明工具数与源码注册工具数严格相等；
+   - 反证门：故意构造声明为「19 个」或「99 个」的假文档样本，断言比对门禁必须失败报错。
+4. **test_meta 规范元检查自证**：
+   - 本测试文件仅进行纯静态扫描与正则比对，不触碰数据库与持久化层，无需 `createTestEnv`；
+   - 引用 `scanTestFile` 执行规范自检，断言 0 违规，且具备非 0 退出路径与无空 catch 吞错。
+
+## 验收计划
+1. 执行 `node tests/test_v634_c_docs.mjs`，验证全部断言与反证门 100% 通过。
+2. 运行 `node tests/test_meta.mjs`，确保规范符合预期，且不修改其内部测试计数断言。
+3. 检查 `git status` 与 `git diff`，确保改动严格受限于授权文件。
+4. 提交并推送到远端 `feat/v634-c-docs` 分支。

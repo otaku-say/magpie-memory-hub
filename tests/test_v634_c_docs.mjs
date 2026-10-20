@@ -109,8 +109,9 @@ export function scanSuspiciousDevnotesCheckboxes(devnotesContent) {
       currentH2 = line;
     }
 
-    // 匹配 Markdown 复选框为未完成状态 [ ]
-    if (line.includes("- [ ]") || /^\s*\d+\.\s*\[ \]/.test(line)) {
+    // 只把「行首」的 Markdown 复选框视为真正未完成项：
+    // 正文里以反引号或引号出现的 `- [ ]` 是描述性文字（例如描述本 bug 或反证测试），不得误判
+    if (/^\s*(?:[-*+]|\d+\.)\s*\[ \]/.test(line)) {
       // 1. 同一行包含完成语义
       const sameLineHit = COMPLETION_REGEX.test(line);
 

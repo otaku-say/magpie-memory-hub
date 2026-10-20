@@ -2,13 +2,13 @@
 
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
-[![Version](https://img.shields.io/badge/version-v6.33.0-blue.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-55%20passed-brightgreen.svg)](tests/)
+[![Version](https://img.shields.io/badge/version-v6.34.0-blue.svg)](package.json)
+[![Tests](https://img.shields.io/badge/tests-58%20passed-brightgreen.svg)](tests/)
 [![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
 
 ---
 
-## 一、记忆工作模式与运行架构 (v6.33.0)
+## 一、记忆工作模式与运行架构 (v6.34.0)
 
 | 环节 | 运行时机制 | 协作方式与说明 |
 |---|---|---|
@@ -108,17 +108,17 @@ rm -rf /config/home/.cache/magpie/bun/install-cache/*
 
 # 3. 校验版本
 grep '"version"' /config/magpie/plugins/node_modules/magpie-memory-hub/package.json
-# 输出: "version": "6.33.0"
+# 输出: "version": "6.34.0"
 ```
 
 ---
 
 ## 五、测试与质量保证
 
-全套 **55 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
+全套 **58 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
 
 ```bash
-node tests/test_meta.mjs             # 55 个测试文件元检查（100% 隔离合规）
+node tests/test_meta.mjs             # 58 个测试文件元检查（100% 隔离合规）
 node tests/adversarial_v629_gate.mjs # 红队 6 大核心缺陷反证靶场（6/6 GREEN）
 node tests/test_proactive_memory_ux.mjs # 主动记忆、一站式召回与脱敏专项测试
 node tests/settings_page_test.mjs    # 设置页表单与 DOM 交互测试

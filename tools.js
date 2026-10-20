@@ -2053,7 +2053,10 @@ export async function memoryAudit(client, cfg, args, ctx) {
 
       // 【P1-2】MODEL_CHUNK 增加 [5, 60] 范围守卫并锚定 audit_chunk_size
       const rawChunk = Number(cfg.audit_chunk_size ?? auditOptions.audit_chunk_size ?? 40);
-      const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 40, 60));
+        // 【时间预算】单次 memory_audit 的最坏耗时估算：
+  // 2 次模型调用 × 15s = 30s < 55s（MCP 客户端硬超时），安全余量 25s。
+  // 新增任何模型调用时必须重算此预算，绝不允许突破 55s。
+const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 40, 60));
       const modelBudgetItems = maxModelBatches * MODEL_CHUNK;
       const forModel = candidateList.slice(0, modelBudgetItems);
 
