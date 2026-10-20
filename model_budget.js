@@ -39,6 +39,8 @@ import { readFileSync } from "node:fs";
 
 export const MEMHUB_INTERNAL_HEADER = "x-memhub-internal";
 export const MEMHUB_INTERNAL_VALUE = "1";
+export const MAGPIE_INTERNAL_HEADER = "x-magpie-internal";
+export const MAGPIE_INTERNAL_VALUE = "memory-hub";
 export const MEMHUB_CLIENT_NAME = "Memory";
 
 let _cachedUserAgent = null;
@@ -88,6 +90,7 @@ export function getInternalModelHeaders(apiKey = "", extraHeaders = {}) {
     "User-Agent": getClientUserAgent(),
     "X-Magpie-Agent": MEMHUB_CLIENT_NAME,
     [MEMHUB_INTERNAL_HEADER]: MEMHUB_INTERNAL_VALUE,
+    [MAGPIE_INTERNAL_HEADER]: MAGPIE_INTERNAL_VALUE,
     ...(extraHeaders || {}),
   };
   if (apiKey) {
@@ -126,13 +129,17 @@ export function isInternalHarvestRequest(body, ctx) {
     if (c.state && c.state.memhubInternal === true) return true;
     if (c.memhubInternal === true) return true;
 
-    // 2) 显式请求头（宿主若透出请求头则命中；不透出则走第 3 条，不依赖它）
+    // 2) 显式请求头（优先识别：宿主若透出请求头则立即命中）
     const headerSources = [c.headers, c.requestHeaders, c.httpHeaders, c.reqHeaders];
     for (const h of headerSources) {
       if (!h || typeof h !== "object") continue;
       for (const k of Object.keys(h)) {
-        if (String(k).toLowerCase() === MEMHUB_INTERNAL_HEADER &&
-            String(h[k]).trim() === MEMHUB_INTERNAL_VALUE) {
+        const lowerKey = String(k).toLowerCase();
+        const val = String(h[k]).trim().toLowerCase();
+        if (lowerKey === MEMHUB_INTERNAL_HEADER && val === MEMHUB_INTERNAL_VALUE) {
+          return true;
+        }
+        if (lowerKey === MAGPIE_INTERNAL_HEADER && val === MAGPIE_INTERNAL_VALUE) {
           return true;
         }
       }
@@ -143,26 +150,65 @@ export function isInternalHarvestRequest(body, ctx) {
       // systemone 决策请求体（{model, state, questions}）不可能是用户会话流量；
       // 钩子正常情况下见不到它（systemone 不触发钩子），防御性覆盖。
       if (body.questions !== undefined && body.state !== undefined) return true;
+
       if (Array.isArray(body.messages)) {
-        const blobs = [];
+        // 先检查 system 消息（内部提示词通常在此）
         for (const m of body.messages) {
           if (!m) continue;
-          if (typeof m.content === "string") blobs.push(m.content);
-          else if (m.content !== undefined) {
-            try { blobs.push(JSON.stringify(m.content)); } catch (_) {}
+          if (m.role === "system") {
+            const sysText = typeof m.content === "string" ? m.content : "";
+            for (const mk of INTERNAL_PROMPT_MARKERS) {
+              if (mk && sysText.includes(mk)) return true;
+            }
           }
         }
-        const text = blobs.join("\n");
-        for (const mk of INTERNAL_PROMPT_MARKERS) {
-          if (mk && text.includes(mk)) return true;
+        // 提示词指纹识别：只序列化最后一条 user message 的前 N 字符，绝不序列化整个 body 或整个长对话
+        const userMsgs = body.messages.filter((m) => m && m.role === "user");
+        const lastUser = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1] : null;
+        if (lastUser) {
+          let uText = "";
+          if (typeof lastUser.content === "string") {
+            uText = lastUser.content.slice(0, 2000);
+          } else if (lastUser.content !== undefined) {
+            try { uText = JSON.stringify(lastUser.content).slice(0, 2000); } catch (_) {}
+          }
+          if (uText) {
+            for (const mk of INTERNAL_PROMPT_MARKERS) {
+              if (mk && uText.includes(mk)) return true;
+            }
+          }
+        }
+        // 容错覆盖：若其他消息含有 marker，只看前 2000 字符
+        for (const m of body.messages) {
+          if (!m || m.role === "system" || m === lastUser) continue;
+          if (typeof m.content === "string") {
+            const shortC = m.content.slice(0, 2000);
+            for (const mk of INTERNAL_PROMPT_MARKERS) {
+              if (mk && shortC.includes(mk)) return true;
+            }
+          }
         }
       }
-      // Gemini contents / Responses input 形态的内部调用同样覆盖
-      if (Array.isArray(body.contents) || typeof body.input === "string" || Array.isArray(body.input)) {
-        let text = "";
-        try { text = JSON.stringify(body).slice(0, 20000); } catch (_) {}
+
+      // Gemini contents / Responses input 形态：只提取末尾内容的前 N 字符，绝不序列化整个 body
+      if (Array.isArray(body.contents)) {
+        const lastContent = body.contents[body.contents.length - 1];
+        let cText = "";
+        try { cText = JSON.stringify(lastContent).slice(0, 2000); } catch (_) {}
         for (const mk of INTERNAL_PROMPT_MARKERS) {
-          if (mk && text.includes(mk)) return true;
+          if (mk && cText.includes(mk)) return true;
+        }
+      } else if (typeof body.input === "string") {
+        const inText = body.input.slice(0, 2000);
+        for (const mk of INTERNAL_PROMPT_MARKERS) {
+          if (mk && inText.includes(mk)) return true;
+        }
+      } else if (Array.isArray(body.input)) {
+        const lastInput = body.input[body.input.length - 1];
+        let inText = "";
+        try { inText = (typeof lastInput === "string" ? lastInput : JSON.stringify(lastInput)).slice(0, 2000); } catch (_) {}
+        for (const mk of INTERNAL_PROMPT_MARKERS) {
+          if (mk && inText.includes(mk)) return true;
         }
       }
     }

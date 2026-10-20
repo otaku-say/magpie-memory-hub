@@ -32,6 +32,18 @@ export function statePath() {
       if (envDir.endsWith(STATE_FILENAME)) return envDir;
       return path.join(envDir, STATE_FILENAME);
     }
+    const isTestMode =
+      process.env.MAGPIE_TEST === "1" ||
+      process.env.NODE_ENV === "test" ||
+      process.env.MEMHUB_TEST === "1" ||
+      (Array.isArray(process.argv) && process.argv.some((arg) => /(^|[\/])test|\btests?\b/i.test(arg)));
+    if (isTestMode) {
+      const testDir = path.join(os.tmpdir(), `memhub-test-state-${process.pid}`);
+      try {
+        fs.mkdirSync(testDir, { recursive: true });
+      } catch (_) {}
+      return path.join(testDir, STATE_FILENAME);
+    }
     return path.join(os.homedir(), STATE_DIRNAME, STATE_FILENAME);
   } catch (e) {
     return null;
@@ -714,6 +726,36 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
         const candSym = String(candPayload.symptom || candPayload.title || "").trim();
         const candSol = String(candPayload.solution || candPayload.root_cause || "").trim();
         if (candSym && isSemanticallySimilar(`${curComp ? curComp + ' ' : ''}${curSym}`, curSol, `${candComp ? candComp + ' ' : ''}${candSym}`, candSol)) {
+          entry = cand;
+          targetKey = k;
+          break;
+        }
+      }
+    }
+  }
+
+  // P2-3: 同 project + kind === "memory" 时做语义模糊去重
+  const isMemory = kind === "memory" || options.kind === "memory" || (payload && payload.kind === "memory") || (typeof fingerprint === "string" && fingerprint.startsWith("m:"));
+  if (!entry && isMemory && payload) {
+    const fpParts = typeof fingerprint === "string" ? fingerprint.split(":") : [];
+    const fpProj = fpParts.length >= 3 && fpParts[0] === "m" ? fpParts[1] : "";
+    const curProject = String(options.project || payload.project || fpProj || "").trim();
+    const curTitle = String(payload.title || payload.desc || "").trim();
+    const curContent = String(payload.content || payload.detail || payload.solution || "").trim();
+
+    if (curTitle || curContent) {
+      for (const [k, cand] of Object.entries(pending)) {
+        if (!cand || typeof cand !== "object") continue;
+        const candKind = cand.kind || (k.startsWith("m:") ? "memory" : "");
+        if (candKind !== "memory") continue;
+        const candPayload = cand.payload || {};
+        const candFpParts = typeof k === "string" ? k.split(":") : [];
+        const candFpProj = candFpParts.length >= 3 && candFpParts[0] === "m" ? candFpParts[1] : "";
+        const candProject = String(candPayload.project || candFpProj || "").trim();
+        if (curProject && candProject && curProject !== candProject) continue;
+        const candTitle = String(candPayload.title || candPayload.desc || "").trim();
+        const candContent = String(candPayload.content || candPayload.detail || candPayload.solution || "").trim();
+        if ((candTitle || candContent) && isSemanticallySimilar(curTitle, curContent, candTitle, candContent)) {
           entry = cand;
           targetKey = k;
           break;

@@ -123,9 +123,10 @@ NcbMcp.prototype.rpc = async function (method, params, isNotification, callOpts)
   var ctrl = null;
   var timer = null;
   var abortListener = null;
+  var timeoutSig = null;
 
   if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-    var timeoutSig = AbortSignal.timeout(this.timeout || 15000);
+    timeoutSig = AbortSignal.timeout(this.timeout || 15000);
     if (effectiveSignal) {
       if (typeof AbortSignal.any === "function") {
         fetchSignal = AbortSignal.any([effectiveSignal, timeoutSig]);
@@ -160,10 +161,6 @@ NcbMcp.prototype.rpc = async function (method, params, isNotification, callOpts)
       signal: fetchSignal || effectiveSignal || (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(15000) : undefined),
     });
   } catch (e) {
-    if (timer) clearTimeout(timer);
-    if (externalSignal && abortListener) {
-      externalSignal.removeEventListener("abort", abortListener);
-    }
     var isExternal = externalSignal && externalSignal.aborted;
     var msg = isExternal
       ? "操作已被取消 (aborted)"
@@ -171,10 +168,16 @@ NcbMcp.prototype.rpc = async function (method, params, isNotification, callOpts)
     var err = new Error("连接 NoCodeBackend MCP 失败：" + msg);
     if (isExternal || (e && e.name === "AbortError")) err.name = "AbortError";
     throw err;
-  }
-  if (timer) clearTimeout(timer);
-  if (externalSignal && abortListener) {
-    externalSignal.removeEventListener("abort", abortListener);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (abortListener) {
+      if (effectiveSignal) {
+        try { effectiveSignal.removeEventListener("abort", abortListener); } catch (_) {}
+      }
+      if (timeoutSig) {
+        try { timeoutSig.removeEventListener("abort", abortListener); } catch (_) {}
+      }
+    }
   }
 
   // 记录会话（无状态端点通常不返回，返回了就用上）
