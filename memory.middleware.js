@@ -772,18 +772,25 @@ function onRequestInner(body, ctx) {
         used++;
       }
 
+      var pitfallThreshold = Number(opts.pitfall_recurrence_threshold ?? opts.pitfallRecurrenceThreshold ?? opts.crystallization_threshold ?? 3) || 3;
+
       for (var n = 0; n < finalList.length && used < maxItems; n++) {
         var it = finalList[n];
         if (String(it.category) === "principle") continue;  // 已在上面注入过
+        var isPitfall = String(it.category || "").toLowerCase().indexOf("pitfall") === 0 || !!it.symptom;
+        var itRec = Number(it.recurrence) || 1;
+        var isFrequent = isPitfall && itRec >= pitfallThreshold;
+        var prefix = isFrequent ? "[高频复发×" + itRec + "] " : "";
+        var suffix = isFrequent ? " 建议核查根因是否已根治" : "";
         var line;
         if (useCards && String(it.content || "").length > 160) {
           /* CCR：长内容只给摘要卡 + ID，Agent 需要时调 memory_get 展开 */
-          line = "- [" + (it.category || "fact") + "] " + cut(it.title, 60) +
+          line = "- " + prefix + "[" + (it.category || "fact") + "] " + cut(it.title, 60) +
                  ": " + cut(it.content, 120) +
-                 " (id=" + it.id + "，需要完整内容可调 memory_get)\n";
+                 " (id=" + it.id + "，需要完整内容可调 memory_get)" + suffix + "\n";
         } else {
-          line = "- [" + (it.category || "fact") + "] " + cut(it.title, 120) +
-                 ": " + cut(it.content, 400) + "\n";
+          line = "- " + prefix + "[" + (it.category || "fact") + "] " + cut(it.title, 120) +
+                 ": " + cut(it.content, 400) + suffix + "\n";
         }
         if (block.length + line.length > budget) break;
         block += line;

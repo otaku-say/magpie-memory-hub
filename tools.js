@@ -133,6 +133,13 @@ function readOptions(options) {
     // v6.20.0 调用预算与熔断（可配置，保守默认；见 model_budget.js）
     harvest_max_per_min: Number(o.harvest_max_per_min ?? o.model_max_per_min) > 0 ? Math.floor(Number(o.harvest_max_per_min ?? o.model_max_per_min)) : 20,
     harvest_max_total: Number(o.harvest_max_total ?? o.model_max_total) > 0 ? Math.floor(Number(o.harvest_max_total ?? o.model_max_total)) : 2000,
+    // EVO-4: 高频经验结晶与踩坑复发阈值（可配置，保守默认）
+    crystallization_threshold: Number(o.crystallization_threshold ?? o.crystallizationThreshold) > 0
+      ? Math.floor(Number(o.crystallization_threshold ?? o.crystallizationThreshold))
+      : 5,
+    pitfall_recurrence_threshold: Number(o.pitfall_recurrence_threshold ?? o.pitfallRecurrenceThreshold) > 0
+      ? Math.floor(Number(o.pitfall_recurrence_threshold ?? o.pitfallRecurrenceThreshold))
+      : 3,
     _fetch: o._fetch,
   };
 }
@@ -583,21 +590,109 @@ async function saveMemory(client, cfg, m, ctx) {
   if (dup) {
     const next = (Number(dup.recurrence) || 1) + initialRecurrence;
     const now = nowSql();
-    try {
-      await client.update("memories", dup.id, {
+
+    // EVO-1: 智能增量扩充检测（同标题重复 + 无数字冲突 + 信息量增长 ≥ 1.25 或显式传 supersede: true）
+    const normNewTitle = normalizeSemanticText(title);
+    const normOldTitle = normalizeSemanticText(dup.title);
+    const isSameTitle = (normNewTitle && normNewTitle === normOldTitle) ||
+      (String(dup.title || "").trim().toLowerCase() === String(title || "").trim().toLowerCase());
+
+    const noNumberConflict = !hasConflictingNumbers(title, dup.title) &&
+      !hasConflictingNumbers(content, dup.content || dup.full_text || "");
+
+    const oldContentStr = String(dup.content || dup.full_text || "").trim();
+    const newContentStr = String(content || "").trim();
+    const hasSignificantGrowth = newContentStr.length >= (oldContentStr.length * 1.25);
+    const isExplicitSupersede = m.supersede === true || m.supersede === "true";
+
+    const shouldEnrich = isSameTitle && noNumberConflict && (hasSignificantGrowth || isExplicitSupersede);
+
+    // EVO-4: 高频经验自动升维结晶（preference / decision 且 recurrence 达到阈值且 confidence_score ≥ 80）
+    const crystallizationThreshold = Number(m.crystallization_threshold ?? cfg?.crystallization_threshold ?? 5) || 5;
+    const isCrystallizable = ["preference", "decision"].includes(String(dup.category || "").toLowerCase());
+    const effectiveConfidence = (m.confidence !== undefined && m.confidence !== null && m.confidence !== "")
+      ? confidence
+      : (dup.confidence_score != null ? Number(dup.confidence_score) : confidence);
+    const isCrystallized = isCrystallizable && (next >= crystallizationThreshold) && (effectiveConfidence >= 80);
+    const targetCategory = isCrystallized ? "principle" : dup.category;
+
+    if (shouldEnrich) {
+      const mergedContent = (newContentStr.length >= oldContentStr.length) ? content : (dup.content || content);
+      const oldFullTextStr = String(dup.full_text || dup.content || "").trim();
+      const newFullTextStr = String(fullText || "").trim();
+      const mergedFullText = (newFullTextStr.length >= oldFullTextStr.length) ? fullText : (dup.full_text || fullText);
+
+      const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+      const newTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+      const mergedTags = Array.from(new Set([...existingTags, ...newTags])).join(", ");
+
+      const existingEntities = String(dup.related_entities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+      const newEntities = String(relatedEntities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+      const mergedEntities = Array.from(new Set([...existingEntities, ...newEntities])).join(", ");
+
+      const nextRevision = (Number(dup.revision) || 1) + 1;
+      const newFp = semanticFingerprint(project, targetCategory, dup.title, mergedContent, mergedTags);
+
+      const updatePayload = {
+        content: mergedContent,
+        full_text: mergedFullText,
+        tags: mergedTags || dup.tags,
+        related_entities: mergedEntities || dup.related_entities,
+        recurrence: next,
+        revision: nextRevision,
+        updated_at: now,
+      };
+      if (isCrystallized) {
+        updatePayload.category = "principle";
+      }
+      if (newFp) {
+        updatePayload.content_fingerprint = newFp;
+      }
+
+      try {
+        await client.update("memories", dup.id, updatePayload);
+        markRecent("m:" + (newFp || dup.content_fingerprint || fp));
+        return {
+          action: "ENRICHED",
+          id: dup.id,
+          category: targetCategory,
+          recurrence: next,
+          revision: nextRevision,
+          retrieval_count: Number(dup.retrieval_count) || 0,
+          note: isCrystallized
+            ? "智能增量扩充成功，融合更详尽细节，已升维为 principle"
+            : "智能增量扩充成功，融合更详尽细节，保留原记忆ID并递增版本",
+        };
+      } catch (e) {
+        if (!/404|not found/i.test(String(e.message))) throw e;
+      }
+    } else {
+      // 维持原 NOOP 行为，仅累加复发计数与时间戳，若满足升维则同步结晶
+      const updatePayload = {
         recurrence: next,
         updated_at: now,
-      });
-      markRecent("m:" + (dup.content_fingerprint || fp));
-      return {
-        action: "NOOP",
-        id: dup.id,
-        recurrence: next,
-        retrieval_count: Number(dup.retrieval_count) || 0,
-        note: dup.content_fingerprint === fp ? "内容未变化，累加复发计数" : "语义相似去重命中，累加复发计数",
       };
-    } catch (e) {
-      if (!/404|not found/i.test(String(e.message))) throw e;
+      if (isCrystallized) {
+        updatePayload.category = "principle";
+        const newFp = semanticFingerprint(project, "principle", dup.title, dup.content, dup.tags);
+        if (newFp) updatePayload.content_fingerprint = newFp;
+      }
+      try {
+        await client.update("memories", dup.id, updatePayload);
+        markRecent("m:" + (updatePayload.content_fingerprint || dup.content_fingerprint || fp));
+        const baseNote = dup.content_fingerprint === fp ? "内容未变化，累加复发计数" : "语义相似去重命中，累加复发计数";
+        const note = isCrystallized ? (baseNote + "，已升维为 principle") : baseNote;
+        return {
+          action: "NOOP",
+          id: dup.id,
+          category: targetCategory,
+          recurrence: next,
+          retrieval_count: Number(dup.retrieval_count) || 0,
+          note,
+        };
+      } catch (e) {
+        if (!/404|not found/i.test(String(e.message))) throw e;
+      }
     }
   }
 
@@ -621,7 +716,17 @@ async function saveMemory(client, cfg, m, ctx) {
     // 【P1-3】principle 准则保护：若新记录是 principle 且旧记录不是 principle，
     // 升级旧记录为 principle 并保留准则内容与指纹，绝不允许把 principle 降级为普通分类
     const isNewPrinciple = category === "principle" && crossDup.category !== "principle";
-    const targetCategory = isNewPrinciple ? "principle" : crossDup.category;
+
+    // EVO-4: 升维保护
+    const crystallizationThreshold = Number(m.crystallization_threshold ?? cfg?.crystallization_threshold ?? 5) || 5;
+    const isCrystallizable = ["preference", "decision"].includes(String(crossDup.category || "").toLowerCase()) ||
+                             ["preference", "decision"].includes(String(category || "").toLowerCase());
+    const effectiveConfidence = (m.confidence !== undefined && m.confidence !== null && m.confidence !== "")
+      ? confidence
+      : (crossDup.confidence_score != null ? Number(crossDup.confidence_score) : confidence);
+    const isCrystallized = !isNewPrinciple && isCrystallizable && (next >= crystallizationThreshold) && (effectiveConfidence >= 80);
+
+    const targetCategory = (isNewPrinciple || isCrystallized) ? "principle" : crossDup.category;
 
     const updatePayload = {
       recurrence: next,
@@ -634,20 +739,28 @@ async function saveMemory(client, cfg, m, ctx) {
       if (fullText) updatePayload.full_text = fullText;
       if (title) updatePayload.title = title;
       if (fp) updatePayload.content_fingerprint = fp;
+    } else if (isCrystallized) {
+      updatePayload.category = "principle";
+      const newFp = semanticFingerprint(project, "principle", crossDup.title, crossDup.content, mergedTags || crossDup.tags);
+      if (newFp) updatePayload.content_fingerprint = newFp;
     }
 
     try {
       await client.update("memories", crossDup.id, Object.assign({}, updatePayload, { updated_at: now }));
       markRecent("m:" + (fp || crossDup.content_fingerprint));
+      let crossNote = isNewPrinciple
+        ? ("跨类别去重命中（既有记录分类: " + crossDup.category + " 已升级为 principle），已保留准则版本并累加复发计数")
+        : ("跨类别去重命中（既有记录分类: " + crossDup.category + "，传入分类: " + category + "），已合并至既有记录并累加复发计数");
+      if (isCrystallized) {
+        crossNote += "，已升维为 principle";
+      }
       return {
         action: "NOOP",
         id: crossDup.id,
         category: targetCategory,
         recurrence: next,
         retrieval_count: Number(crossDup.retrieval_count) || 0,
-        note: isNewPrinciple
-          ? `跨类别去重命中（既有记录分类: ${crossDup.category} 已升级为 principle），已保留准则版本并累加复发计数`
-          : `跨类别去重命中（既有记录分类: ${crossDup.category}，传入分类: ${category}），已合并至既有记录并累加复发计数`,
+        note: crossNote,
       };
     } catch (e) {
       if (!/404|not found/i.test(String(e.message))) throw e;
@@ -711,10 +824,25 @@ async function saveMemory(client, cfg, m, ctx) {
       )[0];
       if (dupRow) {
         const next = (Number(dupRow.recurrence) || 1) + initialRecurrence;
+        const crystallizationThreshold = Number(m.crystallization_threshold ?? cfg?.crystallization_threshold ?? 5) || 5;
+        const isCrystallizable = ["preference", "decision"].includes(String(dupRow.category || "").toLowerCase());
+        const effectiveConfidence = (m.confidence !== undefined && m.confidence !== null && m.confidence !== "")
+          ? confidence
+          : (dupRow.confidence_score != null ? Number(dupRow.confidence_score) : confidence);
+        const isCrystallized = isCrystallizable && (next >= crystallizationThreshold) && (effectiveConfidence >= 80);
+        const targetCategory = isCrystallized ? "principle" : dupRow.category;
+
+        const updatePayload = { recurrence: next, updated_at: nowSql() };
+        if (isCrystallized) {
+          updatePayload.category = "principle";
+          const newFp = semanticFingerprint(project, "principle", dupRow.title, dupRow.content, dupRow.tags);
+          if (newFp) updatePayload.content_fingerprint = newFp;
+        }
         try {
-          await client.update("memories", dupRow.id, { recurrence: next, updated_at: nowSql() });
+          await client.update("memories", dupRow.id, updatePayload);
         } catch (_) {}
-        return { action: "NOOP", id: dupRow.id, recurrence: next, retrieval_count: Number(dupRow.retrieval_count) || 0, note: "唯一索引拦下重复，累加复发计数" };
+        const note = isCrystallized ? "唯一索引拦下重复，累加复发计数，已升维为 principle" : "唯一索引拦下重复，累加复发计数";
+        return { action: "NOOP", id: dupRow.id, category: targetCategory, recurrence: next, retrieval_count: Number(dupRow.retrieval_count) || 0, note };
       }
       return { action: "NOOP", id: null, note: "唯一索引拦下重复（写后读延迟内读不到既有行）" };
     }
@@ -740,9 +868,9 @@ async function saveMemory(client, cfg, m, ctx) {
         if (!/404|not found/i.test(String(e.message))) throw e;
       }
     }
-    return { action: "UPDATE", id: newId, superseded_id: superseded[0].id, superseded_count: updatedCount || superseded.length, recurrence: initialRecurrence };
+    return { action: "UPDATE", id: newId, category, superseded_id: superseded[0].id, superseded_count: updatedCount || superseded.length, recurrence: initialRecurrence };
   }
-  return { action: "ADD", id: newId, recurrence: initialRecurrence };
+  return { action: "ADD", id: newId, category, recurrence: initialRecurrence };
 }
 
 /* ================================================================== *
@@ -1217,10 +1345,16 @@ async function memoryContext(client, cfg, args) {
     n++;
   }
 
+  const pitfallThreshold = Number(args.pitfall_recurrence_threshold ?? cfg?.pitfall_recurrence_threshold ?? 3) || 3;
+
   for (const pit of topPitfalls) {
     if (n >= maxItems) break;
     const comp = pit.component || "general";
-    const line = `- [pitfall/${cut(comp, 40)}] ${cut(pit.symptom, 160)} → ${cut(pit.solution, 240)}\n`;
+    const rec = Number(pit.recurrence) || 1;
+    const isFrequent = rec >= pitfallThreshold;
+    const prefix = isFrequent ? ("[高频复发×" + rec + "] ") : "";
+    const suffix = isFrequent ? " 建议核查根因是否已根治" : "";
+    const line = "- " + prefix + "[pitfall/" + cut(comp, 40) + "] " + cut(pit.symptom, 160) + " → " + cut(pit.solution, 240) + suffix + "\n";
     if (block.length + line.length > budget) break;
     block += line;
     n++;
@@ -1228,7 +1362,13 @@ async function memoryContext(client, cfg, args) {
 
   for (const x of scored) {
     if (n >= maxItems) break;
-    const line = `- [${x.row.category || "fact"}] ${cut(x.row.title, 120)}: ${cut(x.row.content, 400)}\n`;
+    const cat = x.row.category || "fact";
+    const isPitfall = String(cat).toLowerCase().indexOf("pitfall") === 0;
+    const rec = Number(x.row.recurrence) || 1;
+    const isFrequent = isPitfall && rec >= pitfallThreshold;
+    const prefix = isFrequent ? ("[高频复发×" + rec + "] ") : "";
+    const suffix = isFrequent ? " 建议核查根因是否已根治" : "";
+    const line = "- " + prefix + "[" + cat + "] " + cut(x.row.title, 120) + ": " + cut(x.row.content, 400) + suffix + "\n";
     if (block.length + line.length > budget) break;
     block += line;
     matchedMemories.push(x.row);
