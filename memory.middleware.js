@@ -158,11 +158,39 @@ function signatureOf(memories) {
   return h;
 }
 
-function buildIndex(memories, now, version) {
+function countUserTurns(body) {
+  var count = 0;
+  if (body && typeof body === "object") {
+    if (Array.isArray(body.messages)) {
+      for (var i = 0; i < body.messages.length; i++) {
+        if (body.messages[i] && body.messages[i].role === "user") {
+          count++;
+        }
+      }
+    } else if (Array.isArray(body.contents)) {
+      for (var j = 0; j < body.contents.length; j++) {
+        var it = body.contents[j];
+        if (it && (it.role === "user" || !it.role)) {
+          count++;
+        }
+      }
+    } else if (Array.isArray(body.input)) {
+      for (var k = 0; k < body.input.length; k++) {
+        if (body.input[k] && body.input[k].role === "user") {
+          count++;
+        }
+      }
+    }
+  }
+  return Math.max(1, count);
+}
+
+function buildIndex(memories, now, version, project) {
   if (!memories || !memories.length) return null;
+  var currentProject = String(project || "").trim();
   /* 首选：离线管线在快照里带的版本号，O(1) 比较。
    * 兜底：没有版本号时才做一遍采样签名（仍远贵于版本号）。 */
-  var key = version != null && version !== "" ? "v:" + version : "s:" + signatureOf(memories);
+  var key = (version != null && version !== "" ? "v:" + version : "s:" + signatureOf(memories)) + ":p:" + currentProject;
   if (_cache && _cacheKey === key) return _cache;
 
   var idx = {};
@@ -170,6 +198,13 @@ function buildIndex(memories, now, version) {
   for (var i = 0; i < memories.length; i++) {
     var m = memories[i];
     if (!isValid(m, now)) continue;
+
+    if (currentProject) {
+      var rowProject = String((m && m.project) || "global").trim();
+      if (rowProject !== currentProject && rowProject !== "global") {
+        continue;
+      }
+    }
 
     /* 准则在建索引时一并抽出：放进缓存，避免每请求再全量扫一遍 */
     if (String(m.category) === "principle") {
@@ -596,6 +631,8 @@ function onRequestInner(body, ctx) {
   if (!userTurn) return body;
 
   var prompt = userTurn.getText();
+  var calculatedTurnNo = countUserTurns(body);
+  ctx.state.turnNo = calculatedTurnNo;
 
   /* ================= 存活探针 (__MEMHUB_PROBE__) =================
    * 依据：第三方插件 heaven-1314/magpie-plugin-claude-scrub 用 ctx.reject(418, msg) 做秒级存活确认。
@@ -611,7 +648,7 @@ function onRequestInner(body, ctx) {
       disabled: !!opts.disabled,
       memories_count: (opts.memories && Array.isArray(opts.memories)) ? opts.memories.length : 0,
       protocol: proto,
-      turn_no: (Number(ctx.state.turnNo) || 0) + 1,
+      turn_no: calculatedTurnNo,
       timestamp: Date.now ? Date.now() : 0
     };
     return ctx.reject(418, JSON.stringify(probePayload));
@@ -629,7 +666,7 @@ function onRequestInner(body, ctx) {
    * 曾误写成 st（周边全是 ctx.state，改名的残留），导致 st is not defined，
    * onRequest 对【每一条正常对话】都抛异常 → 记忆注入从未生效、
    * 线上表现为插件列表里成片的中间件失败。 */
-  ctx.state.turnNo = (Number(ctx.state.turnNo) || 0) + 1;
+  ctx.state.turnNo = calculatedTurnNo;
   ctx.state.agent = (ctx && ctx.agent) || ctx.state.agent || "";
   ctx.state.inlineExtract = !!opts.inline_extract;
   ctx.state.memHold = 0;
@@ -642,7 +679,7 @@ function onRequestInner(body, ctx) {
 
   /* --- ① 检索与注入 --- */
   if (prompt && opts.memories && opts.memories.length) {
-    var built = buildIndex(opts.memories, now, opts.memories_version);
+    var built = buildIndex(opts.memories, now, opts.memories_version, opts.project);
     var index = built && built.index;
     var tokens = tokenize(prompt);
     var finalList = [];

@@ -270,7 +270,44 @@ async function execute(action, cfg, fs, sp, state, options) {
       };
     }
     else if (action.op === "harvest_gateway") {
-      const res = await harvestGateway(action.args || {}, { options: options || {}, client });
+      let saveMemory = null;
+      let pitfallSave = null;
+      try {
+        const toolsMod = await import("./tools.js");
+        if (typeof toolsMod.saveMemory === "function" && typeof toolsMod.pitfallSave === "function") {
+          saveMemory = toolsMod.saveMemory;
+          pitfallSave = toolsMod.pitfallSave;
+        } else {
+          // tools.js 未直接导出这两个函数，通过 MagpieMemoryHub 实例获取
+          // 注意：传 safeOpts 剔除 _action 避免递归触发信标执行，仅在闭包内构建一次
+          const safeOpts = Object.assign({}, options || {}, cfg || {});
+          delete safeOpts._action;
+          delete safeOpts[ACTION_KEY];
+          safeOpts._client = client;
+          const hub = await toolsMod.MagpieMemoryHub(cfg || {}, safeOpts);
+          const hubTools = hub.tool;
+          saveMemory = async (cl, c, m, ctx) => {
+            const raw = await hubTools.memory_save.execute(m, { ...(ctx || {}), _ctx: ctx });
+            return typeof raw === "string" ? JSON.parse(raw) : raw;
+          };
+          pitfallSave = async (cl, c, p, ctx) => {
+            const raw = await hubTools.pitfall_save.execute(p, { ...(ctx || {}), _ctx: ctx });
+            return typeof raw === "string" ? JSON.parse(raw) : raw;
+          };
+        }
+      } catch (err) {
+        console.error("[page_actions] harvest_gateway resolve save functions error:", err);
+      }
+
+      const res = await harvestGateway(action.args || {}, {
+        _cfg: cfg,
+        cfg,
+        _client: client,
+        client,
+        options: options || {},
+        saveMemory,
+        pitfallSave,
+      });
       const ok = res && res.success !== false;
       const lines = [];
       if (res && res.message) lines.push(res.message);

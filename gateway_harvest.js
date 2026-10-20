@@ -104,20 +104,102 @@ export const FORBIDDEN_DIRS = new Set([
   "/home",
 ]);
 
+export const FORBIDDEN_PREFIXES = [
+  "/root",
+  "/var",
+  "/etc",
+  "/proc",
+  "/sys",
+  "/dev",
+  "/boot",
+  "/bin",
+  "/sbin",
+  "/usr",
+  "/lib",
+  "/lib64",
+  "/home",
+];
+
+function checkPathForbidden(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return;
+  const norm = path.resolve(targetPath);
+  const root = path.parse(norm).root;
+  if (norm === root || FORBIDDEN_DIRS.has(norm)) {
+    throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录或根路径: ${norm}`);
+  }
+  for (const prefix of FORBIDDEN_PREFIXES) {
+    if (norm === prefix || norm.startsWith(prefix + path.sep)) {
+      throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${norm}`);
+    }
+  }
+  let stateDir = null;
+  try {
+    stateDir = path.resolve(os.homedir(), ".magpie-memory-hub");
+  } catch (_) {}
+  if (stateDir && (norm === stateDir || norm.startsWith(stateDir + path.sep))) {
+    throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统状态目录: ${norm}`);
+  }
+}
+
 export function validateGatewayDir(customDir) {
   if (typeof customDir !== "string" || !customDir.trim()) {
     throw new Error("[SECURITY_BLOCKED] 对话录制目录路径非法或为空");
   }
-  const resolved = path.resolve(customDir.trim());
-  const root = path.parse(resolved).root;
-  if (resolved === root || FORBIDDEN_DIRS.has(resolved)) {
-    throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录或根路径: ${resolved}`);
+
+  const rawTrimmed = customDir.trim();
+
+  // 1. 拦截任何含 ".." 段的路径
+  const segments = rawTrimmed.split(/[\/\\]+/);
+  if (segments.includes("..")) {
+    throw new Error(`[SECURITY_BLOCKED] 禁止路径包含 .. 相对跳转: ${rawTrimmed}`);
   }
-  for (const prefix of ["/proc", "/sys", "/dev", "/etc", "/boot"]) {
-    if (resolved === prefix || resolved.startsWith(prefix + path.sep)) {
-      throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${resolved}`);
+
+  // 2. 展开波浪号 ~
+  let expanded = rawTrimmed;
+  if (expanded === "~" || expanded.startsWith("~" + path.sep) || expanded.startsWith("~/") || expanded.startsWith("~\\")) {
+    expanded = path.join(os.homedir(), expanded.slice(1));
+  }
+
+  const resolved = path.resolve(expanded);
+
+  // 3. 初始校验未解出真实路径前的 resolved
+  checkPathForbidden(resolved);
+
+  // 4. 用 fs.realpathSync 解出真实路径后再校验，防软链接绕过（realpath 失败则拒绝）
+  let realPath = resolved;
+  try {
+    const lst = fs.lstatSync(resolved);
+    try {
+      realPath = fs.realpathSync(resolved);
+    } catch (e) {
+      throw new Error(`[SECURITY_BLOCKED] 无法解析真实路径 (可能包含损坏的软链接): ${resolved}`);
+    }
+  } catch (err) {
+    if (err.message && err.message.includes("[SECURITY_BLOCKED]")) {
+      throw err;
+    }
+    // 目标路径尚不存在：向上校验存在的祖先真实路径，防止通过父级软链接绕过
+    let cur = path.dirname(resolved);
+    while (cur && cur !== path.dirname(cur)) {
+      try {
+        const curStat = fs.lstatSync(cur);
+        if (curStat) {
+          try {
+            const parentReal = fs.realpathSync(cur);
+            checkPathForbidden(parentReal);
+          } catch (pe) {
+            throw new Error(`[SECURITY_BLOCKED] 祖先路径软链接解析失败: ${cur}`);
+          }
+          break;
+        }
+      } catch (_) {}
+      cur = path.dirname(cur);
     }
   }
+
+  // 对真实路径再次进行前缀与敏感目录校验
+  checkPathForbidden(realPath);
+
   return resolved;
 }
 
@@ -216,7 +298,7 @@ function sig(s) {
 const MAX_SCAN_DEPTH = 3;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
-function collectConversationFiles(dir, maxDepth = MAX_SCAN_DEPTH) {
+export function collectConversationFiles(dir, maxDepth = MAX_SCAN_DEPTH) {
   const files = [];
   function walk(current, depth) {
     let entries = [];
@@ -226,6 +308,9 @@ function collectConversationFiles(dir, maxDepth = MAX_SCAN_DEPTH) {
       return;
     }
     for (const ent of entries) {
+      if (ent.isSymbolicLink && ent.isSymbolicLink()) {
+        continue;
+      }
       const full = path.join(current, ent.name);
       if (ent.isDirectory()) {
         if (depth < maxDepth) {
