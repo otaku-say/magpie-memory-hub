@@ -267,7 +267,7 @@ export function validateGatewayDir(customDir) {
     if (err.message && err.message.includes("[SECURITY_BLOCKED]")) {
       throw err;
     }
-    // 目标路径尚不存在：向上校验存在的祖先真实路径，防止通过父级软链接绕过
+    // 目标路径尚不存在：向上回溯存在的祖先真实路径，防止通过父级软链接绕过
     let cur = path.dirname(resolved);
     while (cur && cur !== path.dirname(cur)) {
       try {
@@ -275,21 +275,31 @@ export function validateGatewayDir(customDir) {
         if (curStat) {
           try {
             const parentReal = fs.realpathSync(cur);
-            checkSensitiveSubpaths(parentReal);
-            for (const prefix of HARD_FORBIDDEN_PREFIXES) {
-              if (parentReal === prefix || parentReal.startsWith(prefix + path.sep)) {
-                throw new Error(`[SECURITY_BLOCKED] 祖先路径指向系统敏感目录: ${parentReal}`);
-              }
+            // 向上回溯时对每一层祖先都做完整校验（HARD_FORBIDDEN_PREFIXES + 敏感子路径黑名单 + 状态目录 + 白名单逻辑）
+            if (!isWhitelistedGatewayDir(realPath)) {
+              checkPathForbidden(parentReal);
+            } else {
+              checkSensitiveSubpaths(parentReal);
             }
+
+            // 一旦解析出 parentReal 就用它替换 realPath 继续向上
+            const rel = path.relative(cur, realPath);
+            realPath = rel ? path.resolve(parentReal, rel) : parentReal;
+            checkPathForbidden(realPath);
+
+            cur = parentReal;
           } catch (pe) {
             if (pe.message && pe.message.includes("[SECURITY_BLOCKED]")) {
               throw pe;
             }
             throw new Error(`[SECURITY_BLOCKED] 祖先路径软链接解析失败: ${cur}`);
           }
-          break;
         }
-      } catch (_) {}
+      } catch (e) {
+        if (e.message && e.message.includes("[SECURITY_BLOCKED]")) {
+          throw e;
+        }
+      }
       cur = path.dirname(cur);
     }
   }

@@ -116,6 +116,25 @@ export const INTERNAL_PROMPT_MARKERS = [
   "记忆中枢检索增强与语义重排专家",
 ];
 
+function _checkPromptSnippet(val) {
+  if (val === null || val === undefined) return false;
+  let text = "";
+  if (typeof val === "string") {
+    text = val.slice(0, 2000);
+  } else {
+    try {
+      text = JSON.stringify(val).slice(0, 2000);
+    } catch (_) {
+      return false;
+    }
+  }
+  if (!text) return false;
+  for (const mk of INTERNAL_PROMPT_MARKERS) {
+    if (mk && text.includes(mk)) return true;
+  }
+  return false;
+}
+
 /**
  * 判定一次网关请求是否为本插件内部模型调用（命中则钩子必须立即豁免）。
  * @param {object} body 请求体（chat: {messages}；systemone: {state, questions}）
@@ -151,64 +170,38 @@ export function isInternalHarvestRequest(body, ctx) {
       // 钩子正常情况下见不到它（systemone 不触发钩子），防御性覆盖。
       if (body.questions !== undefined && body.state !== undefined) return true;
 
-      if (Array.isArray(body.messages)) {
-        // 先检查 system 消息（内部提示词通常在此）
-        for (const m of body.messages) {
-          if (!m) continue;
-          if (m.role === "system") {
-            const sysText = typeof m.content === "string" ? m.content : "";
-            for (const mk of INTERNAL_PROMPT_MARKERS) {
-              if (mk && sysText.includes(mk)) return true;
-            }
-          }
-        }
-        // 提示词指纹识别：只序列化最后一条 user message 的前 N 字符，绝不序列化整个 body 或整个长对话
-        const userMsgs = body.messages.filter((m) => m && m.role === "user");
-        const lastUser = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1] : null;
-        if (lastUser) {
-          let uText = "";
-          if (typeof lastUser.content === "string") {
-            uText = lastUser.content.slice(0, 2000);
-          } else if (lastUser.content !== undefined) {
-            try { uText = JSON.stringify(lastUser.content).slice(0, 2000); } catch (_) {}
-          }
-          if (uText) {
-            for (const mk of INTERNAL_PROMPT_MARKERS) {
-              if (mk && uText.includes(mk)) return true;
-            }
-          }
-        }
-        // 容错覆盖：若其他消息含有 marker，只看前 2000 字符
-        for (const m of body.messages) {
-          if (!m || m.role === "system" || m === lastUser) continue;
-          if (typeof m.content === "string") {
-            const shortC = m.content.slice(0, 2000);
-            for (const mk of INTERNAL_PROMPT_MARKERS) {
-              if (mk && shortC.includes(mk)) return true;
-            }
-          }
-        }
+      // 检查「所有可能承载 system prompt 的位置」：
+      // body.system、body.systemInstruction、body.instructions
+      if (_checkPromptSnippet(body.system)) return true;
+      if (_checkPromptSnippet(body.systemInstruction)) return true;
+      if (_checkPromptSnippet(body.instructions)) return true;
+
+      // Gemini contents 形态：检查 contents[0] 与 contents 末元素，每个最多前 2000 字符
+      if (Array.isArray(body.contents) && body.contents.length > 0) {
+        if (_checkPromptSnippet(body.contents[0])) return true;
+        if (_checkPromptSnippet(body.contents[body.contents.length - 1])) return true;
       }
 
-      // Gemini contents / Responses input 形态：只提取末尾内容的前 N 字符，绝不序列化整个 body
-      if (Array.isArray(body.contents)) {
-        const lastContent = body.contents[body.contents.length - 1];
-        let cText = "";
-        try { cText = JSON.stringify(lastContent).slice(0, 2000); } catch (_) {}
-        for (const mk of INTERNAL_PROMPT_MARKERS) {
-          if (mk && cText.includes(mk)) return true;
-        }
-      } else if (typeof body.input === "string") {
-        const inText = body.input.slice(0, 2000);
-        for (const mk of INTERNAL_PROMPT_MARKERS) {
-          if (mk && inText.includes(mk)) return true;
-        }
-      } else if (Array.isArray(body.input)) {
-        const lastInput = body.input[body.input.length - 1];
-        let inText = "";
-        try { inText = (typeof lastInput === "string" ? lastInput : JSON.stringify(lastInput)).slice(0, 2000); } catch (_) {}
-        for (const mk of INTERNAL_PROMPT_MARKERS) {
-          if (mk && inText.includes(mk)) return true;
+      // Responses input 形态：支持 string 或 array（检查 input[0] 与 input 末元素）
+      if (typeof body.input === "string") {
+        if (_checkPromptSnippet(body.input)) return true;
+      } else if (Array.isArray(body.input) && body.input.length > 0) {
+        if (_checkPromptSnippet(body.input[0])) return true;
+        if (_checkPromptSnippet(body.input[body.input.length - 1])) return true;
+      } else if (body.input && typeof body.input === "object") {
+        if (_checkPromptSnippet(body.input)) return true;
+      }
+
+      // Chat messages 形态：检查 messages[0]、末元素、及带有 system role 或包含 marker 的消息
+      if (Array.isArray(body.messages) && body.messages.length > 0) {
+        if (_checkPromptSnippet(body.messages[0])) return true;
+        if (_checkPromptSnippet(body.messages[body.messages.length - 1])) return true;
+
+        for (const m of body.messages) {
+          if (!m) continue;
+          if (m.role === "system" || typeof m.content === "string") {
+            if (_checkPromptSnippet(m.content)) return true;
+          }
         }
       }
     }

@@ -36,7 +36,15 @@ export function statePath() {
       process.env.MAGPIE_TEST === "1" ||
       process.env.NODE_ENV === "test" ||
       process.env.MEMHUB_TEST === "1" ||
-      (Array.isArray(process.argv) && process.argv.some((arg) => /(^|[\/])test|\btests?\b/i.test(arg)));
+      (Array.isArray(process.argv) && process.argv.some((arg) => {
+          if (typeof arg !== "string" || !arg.endsWith(".mjs")) return false;
+          try {
+            const resolved = path.resolve(arg);
+            return path.basename(path.dirname(resolved)) === "tests";
+          } catch (_) {
+            return false;
+          }
+        }));
     if (isTestMode) {
       const testDir = path.join(os.tmpdir(), `memhub-test-state-${process.pid}`);
       try {
