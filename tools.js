@@ -1839,6 +1839,10 @@ export async function memoryAudit(client, cfg, args, ctx) {
   try {
     const project = String(args.project || (cfg && cfg.project) || "global").trim();
     const batchSize = Math.max(20, Math.min(Number(args.batch_size || cfg.dedup_batch_size || 50), 200));
+    // 【v6.30.4】单次调用批次预算：防止一次调用跑完全库导致 MCP 客户端 55s 超时
+    // 每批最多 50 条、每次最多 2 批 => 单次调用上限 100 条，耗时可控在 25s 内
+    // 剩余部分靠游标断点续跑（定时调度器每 5 分钟自动接力）
+    const maxBatches = Math.max(1, Math.min(Number(args.max_batches || cfg.audit_max_batches || 2), 20));
     const batchTs = Date.now();
     const now = nowSql();
 
@@ -1881,6 +1885,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
   // ==========================================
   let memLastId = isIncremental && Number(cursor.last_memory_id ?? cursor.last_id) > 0 ? Number(cursor.last_memory_id ?? cursor.last_id) : null;
   let memBatchNum = 0;
+  let memTruncated = false;
   while (true) {
     memBatchNum++;
     const q = {
@@ -2006,6 +2011,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
     } catch (_) {}
 
     if (rows.length < batchSize) break;
+    if (memBatchNum >= maxBatches) { memTruncated = true; break; }
   }
 
   // ==========================================
@@ -2013,6 +2019,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
   // ==========================================
   let pitLastId = isIncremental && Number(cursor.last_pitfall_id ?? cursor.last_id) > 0 ? Number(cursor.last_pitfall_id ?? cursor.last_id) : null;
   let pitBatchNum = 0;
+  let pitTruncated = false;
   while (true) {
     pitBatchNum++;
     const q = {
@@ -2128,8 +2135,10 @@ export async function memoryAudit(client, cfg, args, ctx) {
     } catch (_) {}
 
     if (rows.length < batchSize) break;
+    if (pitBatchNum >= maxBatches) { pitTruncated = true; break; }
   }
 
+  const truncated = memTruncated || pitTruncated;
   const totalBatches = Math.max(1, memBatchNum + pitBatchNum);
   const totalDeduped = totalDedupedMemories + totalDedupedPitfalls;
 
@@ -2150,7 +2159,9 @@ export async function memoryAudit(client, cfg, args, ctx) {
   const finalLines = [
     `扫描记忆: ${totalScannedMemories} 条 · 去重合并: ${totalDedupedMemories} 条`,
     `扫描踩坑: ${totalScannedPitfalls} 条 · 去重合并: ${totalDedupedPitfalls} 条`,
-    `批次: ${totalBatches}/${totalBatches}  ·  状态: 已完成`
+    truncated
+      ? `批次: ${totalBatches} 批（本次预算 ${maxBatches} 批）· 状态: 本轮完成，仍有剩余`
+      : `批次: ${totalBatches}/${totalBatches}  ·  状态: 已完成`
   ];
 
   try {
@@ -2185,7 +2196,11 @@ export async function memoryAudit(client, cfg, args, ctx) {
       success: true,
       data_changed: totalDeduped > 0,
       batch: `${totalBatches}/${totalBatches}`,
-      status: "已完成", // db-col-ok: 去重任务运行状态
+      status: truncated ? "部分完成" : "已完成", // db-col-ok: 去重任务运行状态
+      has_more: truncated,
+      next_action: truncated
+        ? "本轮已达单次批次数上限（防 55s 超时），游标已保存。请再次调用 memory_audit（incremental: true）继续；或等待定时调度器每 5 分钟自动接力。"
+        : "",
       incremental: isIncremental,
       cursor: {
         previous_last_memory_id: cursor.last_memory_id || null,
