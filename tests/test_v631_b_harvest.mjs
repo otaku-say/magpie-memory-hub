@@ -382,13 +382,15 @@ console.log("▶ [Test 4] turnNo 真实轮次计算与快照项目隔离测试..
 console.log("▶ [Test 5] testModelConnectivity 可选模型留空不判失败测试...");
 {
   // 5.1 classify_model 留空单测
+  // 独立检测如实报告「未配置」（ok:false + skipped:true），聚合层才会将其剔除
   const classifyEmpty = await testClassificationModel({ classify_model: "" });
-  assert.strictEqual(classifyEmpty.skipped, true);
-  assert.strictEqual(classifyEmpty.ok, true);
+  assert.strictEqual(classifyEmpty.skipped, true, "未配置必须标记 skipped");
+  assert.strictEqual(classifyEmpty.ok, false, "独立检测须如实报告未配置");
+  assert.ok(String(classifyEmpty.error || "").includes("未配置判定模型"), "必须给出未配置原因");
 
   const classifyOff = await testClassificationModel({ classify_model: "off" });
   assert.strictEqual(classifyOff.skipped, true);
-  assert.strictEqual(classifyOff.ok, true);
+  assert.strictEqual(classifyOff.ok, false);
 
   // 5.2 整体连通性检测：extract 配置且连通，classify 留空
   const mockFetchSuccess = async () => ({
@@ -411,7 +413,7 @@ console.log("▶ [Test 5] testModelConnectivity 可选模型留空不判失败�
 
   assert.strictEqual(resConn.extract.ok, true, "已配置的提炼模型必须为 ok: true");
   assert.strictEqual(resConn.classify.skipped, true, "未配置的判定模型必须标记为 skipped: true");
-  assert.strictEqual(resConn.classify.ok, true, "未配置的判定模型子项 ok 必须为 true");
+  assert.strictEqual(resConn.classify.ok, false, "子项如实反映未配置（ok:false + skipped:true）");
   assert.strictEqual(resConn.ok, true, "整体 ok 只由已配置模型决定，不得因可选模型留空判 false！");
 
   // 5.3 反证测试：若已配置模型本身执行失败，整体 ok 必须为 false

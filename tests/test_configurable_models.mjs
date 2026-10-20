@@ -356,14 +356,27 @@ pytest tests/unit/ -v 24 passed in 0.5s OK done!
   assert.strictEqual(checkSuccess.sampleResult[0].title, "包管理工具");
 
   // 5.5 批量检测入口 testModelConnectivity
+  // v6.31.0 起：classify_model 属可选模型，未配置时聚合层视为 skipped 并从判定中剔除，
+  // 不再误报整体失败；但「已配置却真失败」必须仍判 false（下方 5.6 覆盖）。
   const allCheck = await testModelConnectivity("all", {
     extract_model: "group/gemini-3.5-flash-lite",
-    classify_model: "", // 故意漏配一个
+    classify_model: "", // 可选模型留空
     _fetch: mockSuccessFetch,
   });
-  assert.strictEqual(allCheck.ok, false, "单项检测失败整体必须判定为 false");
-  assert.strictEqual(allCheck.extract.ok, true);
-  assert.strictEqual(allCheck.classify.ok, false);
+  assert.strictEqual(allCheck.ok, true, "可选模型留空不得误判整体失败");
+  assert.strictEqual(allCheck.extract.ok, true, "已配置的提炼模型必须 ok");
+  assert.strictEqual(allCheck.classify.skipped, true, "未配置的判定模型必须标记 skipped");
+  assert.strictEqual(allCheck.classify.ok, false, "独立检测时仍如实报告未配置");
+
+  // 5.6 反证门：已配置的模型真实失败时，整体必须判 false（防线不可丢）
+  const mockFailFetch = async () => ({ ok: false, status: 500, text: async () => "boom" });
+  const failCheck = await testModelConnectivity("all", {
+    extract_model: "group/gemini-3.5-flash-lite",
+    classify_model: "group/gemini-3.5-flash-lite",
+    _fetch: mockFailFetch,
+  });
+  assert.strictEqual(failCheck.ok, false, "反证门：已配置模型真实失败时整体必须为 false");
+  assert.strictEqual(failCheck.extract.ok, false, "反证门：提炼模型失败必须如实反映");
 
   console.log("  ✓ 模型连通性与可用性真实检测能力全部通过\n");
 }

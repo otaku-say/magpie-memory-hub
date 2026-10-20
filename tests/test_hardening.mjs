@@ -64,7 +64,9 @@ console.log("=================================================================")
   assert.strictEqual(data.memories_count, 1, "记忆数量应为 1");
   assert.strictEqual(data.compress, undefined, "压缩探针已废弃应为 undefined");
   assert.strictEqual(data.protocol, "chat", "协议识别为 chat");
-  assert.strictEqual(data.turn_no, 3, "turn_no 正确递增");
+  // v6.31.0 起 turn_no 改为「按本次请求 messages 中 role=user 的条数统计真实轮次」，
+  // 本用例 body 仅含 1 条 user 消息，故期望值为 1（旧断言 3 建立在「每请求 +1」的错误行为上）
+  assert.strictEqual(data.turn_no, 1, "turn_no 应按请求内 user 消息数统计真实轮次");
   assert.ok(typeof data.timestamp === "number" && data.timestamp > 0, "带有效时间戳");
   console.log("✓ Chat 协议 418 探针触发成功，回传健康状态 JSON 字段完整");
 }

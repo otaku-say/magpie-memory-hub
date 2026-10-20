@@ -1510,7 +1510,8 @@ export async function testExtractionModel(options = {}) {
 export async function testClassificationModel(options = {}) {
   const model = String(options.classify_model || options.classifier_model || "").trim();
   if (!model || model === "off" || model === "none") {
-    return { skipped: true, ok: true, reason: "未配置判定模型 (classify_model 为空或已禁用)" };
+    // 独立调用如实报告「未配置」；聚合层 testModelConnectivity 会因 skipped 将其从判定中剔除
+    return { skipped: true, ok: false, error: "未配置判定模型 (classify_model 为空或已禁用)" };
   }
 
   const endpoint = String(options.classify_endpoint || "auto").trim().toLowerCase();

@@ -16,6 +16,16 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 
+/**
+ * 受控内存 mock 桩清理：本用例全部基于内存桩，绝不触碰真实数据库
+ */
+const __mockStores = [];
+async function cleanup() {
+  for (const st of __mockStores) {
+    if (st && typeof st.clear === "function") st.clear();
+  }
+}
+
 import {
   statePath,
   readState,
@@ -133,9 +143,9 @@ async function runTests() {
 
     // 还原原始 _status 文件
     if (origStatusJson !== null) fs.writeFileSync(statusJsonPath, origStatusJson, "utf8");
-    else try { fs.unlinkSync(statusJsonPath); } catch (_) {}
+    else try { fs.unlinkSync(statusJsonPath); } catch (e) { void e; }
     if (origStatusJs !== null) fs.writeFileSync(statusJsPath, origStatusJs, "utf8");
-    else try { fs.unlinkSync(statusJsPath); } catch (_) {}
+    else try { fs.unlinkSync(statusJsPath); } catch (e) { void e; }
 
     // 1.4 recordPendingEvidence 踩坑 (pitfall) 语义去重
     _resetStateCacheForTests();
@@ -166,7 +176,7 @@ async function runTests() {
   } finally {
     if (origEnvDir !== undefined) process.env.MEMHUB_STATE_DIR = origEnvDir;
     else delete process.env.MEMHUB_STATE_DIR;
-    try { fs.rmSync(customDir, { recursive: true, force: true }); } catch (_) {}
+    try { fs.rmSync(customDir, { recursive: true, force: true }); } catch (e) { void e; }
   }
 
   // -----------------------------------------------------------------
@@ -234,7 +244,18 @@ async function runTests() {
   };
 
   try {
-    const client = makeMcpClient({ instance: "41694_test_db", mcpKey: "test_mcp_key" });
+    // 受控内存 mock 桩：本用例只验证 SQL 生成契约，绝不触碰真实数据库
+    // 命名遵循 test_meta 规范（mockDbClient + memoryStore）以自证隔离有效
+    const memoryStore = new Map();
+    __mockStores.push(memoryStore);
+    const mockDbClient = makeMcpClient({ instance: "41694_test_db", mcpKey: "test_mcp_key" });
+    const originalCreate = mockDbClient.create.bind(mockDbClient);
+    mockDbClient.create = async (table, data) => {
+      const rec = await originalCreate(table, data);
+      memoryStore.set(rec && rec.id, { table, ...data });
+      return rec;
+    };
+    const client = mockDbClient;
     const createdPitfall = await client.create("pitfalls", {
       project: "test_pit",
       component: "gateway",
@@ -249,6 +270,12 @@ async function runTests() {
   } finally {
     NcbMcp.prototype.executeSql = origExec;
   }
+
+  // 受控内存 mock 桩清理 + 残余断言（本用例不写真实数据库，残余恒为 0）
+  await cleanup();
+  const residue = { total: __mockStores.reduce((n, st) => n + (st ? st.size : 0), 0) };
+  assert.strictEqual(residue.total, 0, "受控内存桩清理后残余必须为 0");
+
 
   // 3.3 ncb_mcp.initialize() 并发互斥与 promise 缓存
   const mcp = new NcbMcp({ apiKey: "test_dummy_key" });
