@@ -36,7 +36,7 @@
     harvest_max_per_min: 20,
     harvest_max_total: 2000,
     dedup_day: 1,
-    dedup_batch_size: 1000
+    dedup_batch_size: 50
   };
   var BOOL = [
     "auto_init",

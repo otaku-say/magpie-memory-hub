@@ -356,14 +356,14 @@
       <div class="row">
         <div class="row-head">
           <label for="dedup_batch_size">全量去重批大小 (dedup_batch_size)</label>
-          <span class="badge rec">默认 1000</span>
+          <span class="badge rec">默认 50</span>
         </div>
         <div class="hint">
           <div class="hint-desc">全量去重时每批处理的记录条数。上限 1000 因 NoCodeBackend 单次读取限制。</div>
-          <div class="hint-diff"><strong>范围</strong>：50~1000，推荐 1000。</div>
+          <div class="hint-diff"><strong>范围</strong>：50~1000，推荐 50。</div>
         </div>
         <div class="control">
-          <input type="number" id="dedup_batch_size" min="50" max="1000" step="50" value="1000">
+          <input type="number" id="dedup_batch_size" min="50" max="1000" step="50" value="50">
         </div>
       </div>
 
