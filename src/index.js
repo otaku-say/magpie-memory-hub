@@ -561,3 +561,5 @@ MagpieMemoryHub.stopAuditScheduler = stopAuditScheduler;
 MagpieMemoryHub.readOptions = readOptions;
 MagpieMemoryHub.checkScheduledDedup = checkScheduledDedup;
 MagpieMemoryHub.normalizeToolArgs = normalizeToolArgs;
+// 注册 harvest-pipeline Hub 工厂注入（打破循环依赖）
+

@@ -10,7 +10,7 @@ import { rowsOf, mergeCommaSeparated } from "../../integration/ncb.js";
 import { jsonOut } from "../../domain/scoring.js";
 import { memoryAuditUndo } from "./undo.js";
 import { hasTagsIntersection } from "../../domain/validity.js";
-import { writeCardStatus } from "../../../page_actions.js";
+import { writeCardStatus } from "../../core/status-writer.js";
 import {
   lookupAuditState,
   rememberAuditState,

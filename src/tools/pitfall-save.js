@@ -6,7 +6,7 @@
 
 import { normalizeToolArgs } from "./args.js";
 import { SEVERITIES, FETCH_LIMIT, nowSql } from "../core/config.js";
-import { isTestMode } from "../../gateway_harvest.js";
+import { isTestMode } from "../core/env.js";
 import { markRecent, justWritten } from "../core/state-recent.js";
 import { fingerprint } from "../domain/fingerprint.js";
 import { jsonOut } from "../domain/scoring.js";

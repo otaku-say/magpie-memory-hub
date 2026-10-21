@@ -5,7 +5,7 @@
  */
 
 import { nowSql, readOptions } from "../../core/config.js";
-import { isTestMode } from "../../../gateway_harvest.js";
+import { isTestMode } from "../../core/env.js";
 import { isDedupDue, getDedupTimeWindow } from "../../core/time.js";
 import { makeClient, isCfgShape } from "../../integration/ncb.js";
 import { lookupAuditState, clearAuditCursor } from "../../../local_state.js";

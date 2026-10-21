@@ -14,7 +14,7 @@ import {
   recordPendingEvidence,
   DEFAULT_MIN_EVIDENCE,
 } from "../../../local_state.js";
-import { writeCardStatus } from "../../../page_actions.js";
+import { writeCardStatus } from "../../core/status-writer.js";
 import { harvestWithOnlineModel } from "./extract.js";
 import { classifyDialogueWithOnlineModel } from "./classify.js";
 import { semanticFingerprint } from "../../../semantic_dedup.js";
@@ -676,36 +676,10 @@ function turnFingerprint(turn) {
  * @param {object} args 参数（支持 dir, force_rescan）
  * @param {object} context 宿主上下文（包含 client, cfg, saveMemory, pitfallSave, signal 等）
  */
-export function isTestMode() {
-  if (
-    process.env.NODE_ENV === "test" ||
-    process.env.MAGPIE_TEST === "1" ||
-    process.env.MEMHUB_TEST === "1"
-  ) {
-    return true;
-  }
-  if (typeof process !== "undefined" && Array.isArray(process.argv)) {
-    return process.argv.some((arg) => {
-      if (typeof arg !== "string") return false;
-      const base = path.basename(arg);
-      // 1) 匹配测试脚本文件名规则：以 test_ 开头或 .test.mjs / .test.js 结尾
-      if (/^test_.*\.mjs$/i.test(base) || /\.test\.(?:mjs|js)$/i.test(base)) {
-        return true;
-      }
-      // 2) 仅当以 .mjs 结尾且父目录名精确等于 "tests"
-      if (arg.endsWith(".mjs")) {
-        try {
-          const resolved = path.resolve(arg);
-          if (path.basename(path.dirname(resolved)) === "tests") {
-            return true;
-          }
-        } catch (_) {}
-      }
-      return false;
-    });
-  }
-  return false;
-}
+// isTestMode 已下沉到 src/core/env.js（解循环依赖）
+import { isTestMode } from "../../core/env.js";
+export { isTestMode };
+
 
 export async function harvestGateway(args, context) {
   const options = args || {};

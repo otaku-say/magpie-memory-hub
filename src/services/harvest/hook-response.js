@@ -11,6 +11,7 @@ import { processDialogueAndHarvest } from "./harvest-pipeline.js";
 import { isTestMode } from "./offline-scan.js";
 import { _hookProbe } from "./hook-request.js";
 import { isInternalHarvestRequest } from "../../../model_budget.js";
+import { makeClient } from "../../integration/ncb.js";
 
 export function computeHookBudgetMs(opts = {}) {
   if (opts.bounded_await_timeout_ms != null && !isNaN(Number(opts.bounded_await_timeout_ms)) && Number(opts.bounded_await_timeout_ms) > 0) {
@@ -84,7 +85,7 @@ export async function onResponse(reply, ctx) {
     let client = (opts && (opts._client || opts.client)) || null;
     if (!client) {
       try {
-        const { makeClient } = await import("../../../tools.js");
+        // makeClient 已在顶部静态 import
         client = makeClient(opts);
       } catch (_) {
         client = null;

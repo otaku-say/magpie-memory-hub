@@ -4,8 +4,8 @@
  * 被依赖: src/services/harvest/index.js, src/services/harvest/hook-response.js, gateway_harvest.hooks.js, tools.js, tests
  */
 
+import { ensureAuditScheduler } from "../audit/scheduler.js";
 import crypto from "node:crypto";
-import { MagpieMemoryHub } from "../../../tools.js";
 import { scrubSecrets } from "../../../scrub.js";
 import { _diag } from "./scaffolding.js";
 import { isExplicitUserMemory } from "./dialog-extract.js";
@@ -21,6 +21,8 @@ import {
   updateHarvestItemRetries,
 } from "../../../local_state.js";
 import { semanticFingerprint } from "../../../semantic_dedup.js";
+import { saveMemory } from "../save/memory-saver.js";
+import { pitfallSave } from "../../tools/pitfall-save.js";
 
 function safeEnqueueHarvestItems(items) {
   if (!Array.isArray(items)) return;
@@ -356,49 +358,20 @@ export async function triggerBackgroundDrain(client, options = {}) {
   };
 
   async function getHub() {
+    // 直接导入 saveMemory/pitfallSave，不再经过 Hub 工厂（解除循环依赖）
     if (!hubInstance) {
-      if (options && options.hub) {
-        hubInstance = options.hub;
-      } else {
-        // 调度器防护（BUG-37-2）：显式透传当前真实 cfg 的 dedup_schedule
-        let activeSchedule = (options && (options.dedup_schedule || options.audit_interval))
-          || (options && options.cfg && (options.cfg.dedup_schedule || options.cfg.audit_interval || options.cfg.auditInterval));
-        let activeCfg = (options && options.cfg) || {};
-
-        if (!activeSchedule && typeof MagpieMemoryHub.ensureAuditScheduler === "function") {
-          try {
-            const check = MagpieMemoryHub.ensureAuditScheduler();
-            if (check && check.started && typeof check.getFreshCfg === "function") {
-              const fresh = check.getFreshCfg();
-              if (fresh) {
-                const s = fresh.dedup_schedule || fresh.audit_interval || fresh.auditInterval;
-                if (s && s !== "off" && s !== "none") {
-                  activeSchedule = s;
-                  activeCfg = { ...fresh, ...activeCfg };
-                }
-              }
-            }
-          } catch (_) {}
-        }
-
-        const hubOpts = {
-          ...activeCfg,
-          ...(options && typeof options === "object" ? options : {}),
-          _client: safeClient,
-          _cfg: activeCfg,
-          _no_scheduler: true,
-        };
-        const hubInput = {
-          ...activeCfg,
-          _no_scheduler: true,
-        };
-        if (activeSchedule) {
-          hubInput.dedup_schedule = activeSchedule;
-          hubOpts.dedup_schedule = activeSchedule;
-        }
-
-        hubInstance = await MagpieMemoryHub(hubInput, hubOpts);
-      }
+      hubInstance = {
+        tool: {
+          memory_save: { execute: async (data, ctx) => {
+            const res = await saveMemory(safeClient, (options && options.cfg) || {}, data, ctx);
+            return typeof res === "string" ? res : JSON.stringify(res);
+          }},
+          pitfall_save: { execute: async (data, ctx) => {
+            const res = await pitfallSave(safeClient, (options && options.cfg) || {}, data, ctx);
+            return typeof res === "string" ? res : JSON.stringify(res);
+          }},
+        },
+      };
     }
     return hubInstance;
   }
