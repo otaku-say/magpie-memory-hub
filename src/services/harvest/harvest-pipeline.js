@@ -62,9 +62,13 @@ function isRecent(fp) {
   return true;
 }
 
-export function fingerprint(text) {
+/** 轮次指纹（turnKey 专用）：SHA-256 仅 trim，与写库语义指纹（src/domain/fingerprint.js，FNV-1a+normalize）不同。 */
+export function turnFingerprint(text) {
   return crypto.createHash("sha256").update(String(text || "").trim()).digest("hex");
 }
+
+// deprecated 别名：仅为向后兼容保留，切勿用于写库指纹；写库请用 src/domain/fingerprint.js 的 fingerprint。
+export const fingerprint = turnFingerprint;
 
 export async function processDialogueAndHarvest(dialogueText, meta = {}, client = null, options = {}) {
   if (!dialogueText || dialogueText.length < 20) {
@@ -210,7 +214,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       const pendingRes = recordPendingEvidence(memKey, { ...item, project, agent }, {
         kind: "memory",
         minEvidence: minEvidenceMemory,
-        turnKey: fingerprint(dialogueText.slice(0, 300)),
+        turnKey: turnFingerprint(dialogueText.slice(0, 300)),
       });
       if (!pendingRes.shouldGraduate) {
         pendingSaved++;
@@ -255,7 +259,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
   }
 
   // 2. 入库 pitfalls（踩坑与失败规避）
-  const turnKey = fingerprint(dialogueText.slice(0, 300));
+  const turnKey = turnFingerprint(dialogueText.slice(0, 300));
   for (const item of failures) {
     const component = String(item.component || (item.tags && item.tags.split(",")[0]) || "general").trim();
     const symptom = String(item.symptom || item.title || "").trim();
