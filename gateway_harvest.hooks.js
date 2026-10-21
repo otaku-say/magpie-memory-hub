@@ -957,7 +957,8 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       tags: item.tags || "auto-harvest",
       related_entities: item.related_entities ? String(item.related_entities).trim() : "",
       content_fingerprint: fp,
-      confidence_score: Math.round((item.confidence || 0.8) * 100),
+      confidence: typeof item.confidence === "number" ? (item.confidence > 1 ? item.confidence / 100 : item.confidence) : 0.8,
+      confidence_score: Math.round(((typeof item.confidence === "number" ? (item.confidence > 1 ? item.confidence / 100 : item.confidence) : 0.8)) * 100),
       lifecycle_status: "active",
       superseded_by_id: null,
       revision: 1,
@@ -1042,7 +1043,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
   let pitfallsEvolved = 0;
   if (client && !client._isNoCredentials) {
     try {
-      const drainRes = await triggerBackgroundDrain(client);
+      const drainRes = await triggerBackgroundDrain(client, options);
       _diag("drain", JSON.stringify(drainRes).slice(0, 200));
       if (drainRes && !drainRes.inProgress) {
         if (typeof drainRes.memoriesSaved === "number") {
@@ -1222,7 +1223,46 @@ export async function triggerBackgroundDrain(client, options = {}) {
 
   async function getHub() {
     if (!hubInstance) {
-      hubInstance = (options && options.hub) || await MagpieMemoryHub({}, { _client: safeClient, _cfg: (options && options.cfg) || {} });
+      if (options && options.hub) {
+        hubInstance = options.hub;
+      } else {
+        // 调度器防护（BUG-37-2）：显式透传当前真实 cfg 的 dedup_schedule
+        let activeSchedule = (options && (options.dedup_schedule || options.audit_interval))
+          || (options && options.cfg && (options.cfg.dedup_schedule || options.cfg.audit_interval || options.cfg.auditInterval));
+        let activeCfg = (options && options.cfg) || {};
+
+        if (!activeSchedule && typeof MagpieMemoryHub.ensureAuditScheduler === "function") {
+          try {
+            const check = MagpieMemoryHub.ensureAuditScheduler();
+            if (check && check.started && typeof check.getFreshCfg === "function") {
+              const fresh = check.getFreshCfg();
+              if (fresh) {
+                const s = fresh.dedup_schedule || fresh.audit_interval || fresh.auditInterval;
+                if (s && s !== "off" && s !== "none") {
+                  activeSchedule = s;
+                  activeCfg = { ...fresh, ...activeCfg };
+                }
+              }
+            }
+          } catch (_) {}
+        }
+
+        const hubOpts = {
+          ...activeCfg,
+          ...(options && typeof options === "object" ? options : {}),
+          _client: safeClient,
+          _cfg: activeCfg,
+        };
+        const hubInput = {
+          ...activeCfg,
+        };
+        if (activeSchedule) {
+          hubInput.dedup_schedule = activeSchedule;
+          hubOpts.dedup_schedule = activeSchedule;
+        }
+
+        hubInstance = await MagpieMemoryHub(hubInput, hubOpts);
+      }
     }
     return hubInstance;
   }
@@ -1263,9 +1303,14 @@ export async function triggerBackgroundDrain(client, options = {}) {
         try {
           if (item.table === "memories") {
             const project = item.project || item.data?.project || "global";
+            const rawData = item.data || {};
+            const rawConf = rawData.confidence !== undefined
+              ? rawData.confidence
+              : (rawData.confidence_score !== undefined ? (Number(rawData.confidence_score) > 1 ? Number(rawData.confidence_score) / 100 : Number(rawData.confidence_score)) : 0.8);
             const memPayload = {
-              ...item.data,
+              ...rawData,
               project,
+              confidence: typeof rawConf === "number" && !isNaN(rawConf) ? (rawConf > 1 ? rawConf / 100 : rawConf) : 0.8,
             };
             const ctx = {
               agent: memPayload.client,
