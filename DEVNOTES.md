@@ -3387,3 +3387,76 @@ const hubInput = {
 5. 运行加固回归：`node tests/test_hardening.mjs` → **100% PASS**。
 6. 运行导出面与静态工具名门禁：`node tests/test_exports.mjs` & `node tests/test_tool_names_static.mjs` → **100% PASS**。
 7. 测试规范元检查自证：`scanTestFile` **0 违规**。
+
+# NOTES_v642_a: 实现 ARCH-3 深度接入 GatewayContext 与双向反证
+
+## 1. 任务背景与核心契约
+
+- **任务定位**：在分支 `feat/v642-a-ctx` 中实现 **ARCH-3**：`gateway_harvest.hooks.js` 深度接入 `GatewayContext`（`ctx.report` / `ctx.cwd` / `ctx.query` / `ctx.origin`，含 remote 隐私守卫）。
+- **宿主底层契约对标**：
+  - 宿主 `magpie-main/internal/gateway/middleware.go:87-117` 与 `internal/plugin/host.js:1291-1383` 向请求与响应钩子透传了丰富的请求上下文：
+    1. `ctx.report(code, count)`：宿主状态面板可观测性上报。之前由于 `onRequest` 从未调用，宿主面板 `gatewayStates` 恒显示 `skipped`。接入后在准备提炼时上报 `"ready", 0`，未启用/豁免/隐私拦截时上报 `"skipped", 0`；
+    2. `ctx.origin`：请求来源（`local` / `gateway-key` / `remote`）。遵循宿主隐私边界规范，未授权的 `remote` 流量默认严禁执行提炼与落库（需显式设置 `allow_remote_harvest: true`）；
+    3. `ctx.cwd`：工作目录。**核心约束**：严格遵循用户规范——project 自动推导【仅在显式 `project === "auto"`】时启用，默认 `global` 100% 保持既有行为，绝不自动按 cwd 分项目，防止多仓库并存时意外切分导致既有历史记忆碎片化；
+    4. `ctx.query`：剥离脚手架后的纯净用户提问。在请求体无 user turn（非标请求体或流式透传）时，作为 `buildDialogueText` 的纯净提问兜底。
+
+---
+
+## 2. 详细实现细节
+
+### 2.1 gateway_harvest.hooks.js 修改点
+
+1. **`buildDialogueText(body, reply, queryFallback = "")` 纯净提问兜底**：
+   - 当从 `body`（messages / contents / input）无法解析到有效用户输入时，使用 `queryFallback`（支持字符串或上下文对象 `ctx.query` / `ctx.state.query`）进行纯净兜底：`userText = "[user]: " + fallbackText`；
+   - 保持只取最后一轮增量的既有逻辑，若 body 自身存在用户轮次则绝不误用兜底。
+2. **`deriveProjectFromCwd(cwd, configuredProject)` 与 `deriveProject` 导出函数**：
+   - 严格守卫：`explicit !== "auto"` 时，100% 返回 `explicit || "global"`，绝不触发 cwd 推导；
+   - 仅当 `explicit === "auto"` 时，规范化 cwd 路径、提取末级目录名，过滤通用无区分度根目录（`root`, `home`, `users`, `tmp`, `var`, `workspace`, `work`, `src`, `app`, `desktop`, `documents`, `downloads` 等）与非法格式，回退兜底为 `global`；
+   - 支持反转传参容错（`deriveProjectFromCwd("auto", "/path")`）与 Windows 路径反斜杠兼容。
+3. **`onRequest(body, ctx)` 诊断上报与隐私守卫**：
+   - 内部模型调用豁免：`ctx.report("skipped", 0)`；
+   - 未开启 `auto_harvest`：`ctx.report("skipped", 0)`；
+   - `origin === "remote"` 且未配 `allow_remote_harvest: true`：隐私拦截并 `ctx.report("skipped", 0)`；
+   - 提炼就绪：将 `origin`、`cwd`、`query` 存入 `ctx.state`，并调用 `ctx.report("ready", 0)`；
+   - fail-open 保护：所有调用均包裹安全容错，捕获异常上报 `invalid` 并返回 `undefined`。
+4. **`onResponse(reply, ctx)` 隐私守卫与自动项目推导**：
+   - 增加对 `origin === "remote"` 且未配 `allow_remote_harvest: true` 的拦截断路；
+   - 传入 `queryFallback` 调用 `buildDialogueText(requestBody, reply, queryFallback)`；
+   - 调用 `deriveProjectFromCwd(cwd, opts.project)` 计算 `effectiveProject` 并赋给 `meta.project`。
+
+---
+
+## 3. 双向反证测试矩阵 (`tests/test_v642_a_ctx.mjs`)
+
+| 门禁分类 | 测试用例 | 验证与反证设计 |
+| :--- | :--- | :--- |
+| **诊断正向 1.a** | auto_harvest 开启时上报 ready | 开启 auto_harvest 时调用一次 `ctx.report("ready", 0)`，激活宿主可观测性 |
+| **诊断反证 1.b** | auto_harvest 未开启时上报 skipped | 未开启 auto_harvest 时调用 `ctx.report("skipped", 0)`，不激活 harvestRequested |
+| **诊断反证 1.c** | 内部模型调用豁免时上报 skipped | 内部提炼调用上报 `skipped`，切断指数自激环 |
+| **诊断反证 1.d** | ctx.report 缺失/抛错 fail-open | 缺失或内部抛错时不阻断流程，稳健返回 `undefined` |
+| **隐私反证 2.a** | remote 默认未授权拦截 | `origin: "remote"` 默认在 `onRequest` 报 skipped，`onResponse` 坚决不落库零入队 |
+| **隐私正向 2.b** | 显式 allow_remote_harvest 放行 | 配置 `allow_remote_harvest: true` 时正常放行并上报 `ready` |
+| **隐私正向 2.c** | local / gateway-key / 未传 origin 默认放行 | 符合宿主安全规范，本地与网关流量无需额外配置 |
+| **契约反证 3.a** | 默认未配置 project 绝不按 cwd 分项目 | 未配 project 传入 cwd 必须返回 `"global"`，杜绝误切分 |
+| **契约反证 3.b** | 显式 "global" 传入 cwd 绝不按 cwd 分项目 | 配置 `"global"` 传入 cwd 必须返回 `"global"`，100% 维持既有行为 |
+| **契约正向 3.c** | 显式 project: "auto" 时按 cwd 推导项目 | 传入 cwd 正确推导末级目录名（如 `order-service`） |
+| **契约正向 3.d** | 显式自定义项目名保持原样 | 用户指定项目名优先级绝对高于 cwd |
+| **边界反证 3.e** | 通用根目录与非法字符在 auto 回退 global | `/workspace`, `/root`, `/tmp` 等以及非法路径安全回退 `"global"` |
+| **跨平台正向 3.f** | Windows 路径与反转传参容错 | Windows 反斜杠归一化与 `deriveProject` 别名调用验证 |
+| **查询正向 4.a** | 标准请求体优先提取原始用户提问 | 存在真实 userTurn 时绝不污染 query 兜底 |
+| **查询反证 4.b** | 缺少 user 消息时使用 ctx.query 兜底 | 空 body、无 user 消息时成功使用 queryFallback 兜底 |
+| **查询正向 4.c** | ctx 与 state 对象形态 query 兜底支持 | 支持直接传入上下文对象提取 query |
+| **查询反证 4.d** | 双空时不伪造虚假提问 | body 与 query 均为空时拒绝无中生有 |
+| **落库正向 5.a** | auto 模式端到端落库隔离 | 真实落库写入 cwd 推导出的项目命名空间 |
+| **落库反证 5.b** | 非 auto 模式端到端落库绝不泄漏到 cwd | 真实落库写入指定默认项目，cwd 项目 0 记录 |
+| **元规范 6 & 7** | 命名空间清理与 test_meta 全量扫描 | 资源彻底清理 `totalResidue === 0`，全仓 82 套件元检查 100% PASS |
+
+---
+
+## 4. 验证与回归记录
+1. 运行 ARCH-3 专项双向反证：`node tests/test_v642_a_ctx.mjs` → **100% PASS**。
+2. 运行 ARCH-1 响应钩子受限等待回归：`node tests/test_v641_b_hooks.mjs` → **100% PASS**。
+3. 运行网关钩子核心回归：`node tests/test_gateway_harvest_hooks.mjs` → **100% PASS**。
+4. 运行导出面与静态工具名门禁：`node tests/test_exports.mjs` & `node tests/test_tool_names_static.mjs` → **100% PASS**。
+5. 运行去噪与证据门禁回归：`node tests/test_denoise_p0.mjs` → **100% PASS**。
+6. 运行全量测试元检查门禁：`node tests/test_meta.mjs` → **82 个测试套件 100% 合规通过**。

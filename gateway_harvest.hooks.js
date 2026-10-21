@@ -272,7 +272,7 @@ export function extractTextFromReply(reply) {
   return "";
 }
 
-export function buildDialogueText(body, reply) {
+export function buildDialogueText(body, reply, queryFallback = "") {
   const parts = [];
   // 请求侧：仅取本轮增量（最后一轮用户输入），绝不反复扫描全部历史对话
   let userText = "";
@@ -327,6 +327,23 @@ export function buildDialogueText(body, reply) {
       }
     }
   }
+  // ARCH-3: 当从请求体中无法提取有效用户输入时，使用 GatewayContext 注入的纯净 ctx.query 进行兜底
+  if (!userText && queryFallback) {
+    let fallbackText = "";
+    if (typeof queryFallback === "string") {
+      fallbackText = queryFallback.trim();
+    } else if (queryFallback && typeof queryFallback === "object") {
+      fallbackText = String(
+        queryFallback.query ||
+        (queryFallback.state && queryFallback.state.query) ||
+        ""
+      ).trim();
+    }
+    if (fallbackText) {
+      userText = `[user]: ${fallbackText}`;
+    }
+  }
+
   if (userText) {
     const stripped = stripScaffolding(userText);
     if (stripped && stripped.trim()) parts.push(stripped.trim());
@@ -1090,6 +1107,52 @@ function _hookProbe(which, opts) {
   } catch (_) { /* 连打印都不许抛 */ }
 }
 
+/**
+ * ARCH-3 从客户端工作目录（cwd）与配置项推导目标 project。
+ *
+ * 核心契约守卫（极关键！）：
+ * 严格遵循规范：project 自动推导【仅在显式 configuredProject === "auto"】时启用！
+ * 默认未配置、为 null/undefined、空字符串或显式 "global" 时，100% 保持既有 "global" 行为，
+ * 绝不自动按 cwd 分项目，防止多仓库并存时意外切分导致既有历史项目记忆碎片化。
+ *
+ * 自动推导规则（仅当 configuredProject === "auto" 时生效）：
+ * 1. 若 cwd 为空、非字符串或清洗后无有效目录名，安全兜底回退为 "global"；
+ * 2. 规范化路径分隔符（Windows 反斜杠统一转正斜杠，去除末尾斜杠）；
+ * 3. 提取末级基名（basename）；
+ * 4. 排除系统与开发环境通用无区分度根目录（如 root, home, users, tmp, var, workspace, work, src, app, desktop, documents, downloads）；
+ * 5. 校验名称长度（>= 2）与合法标识符字符（/^[a-zA-Z0-9._-]+$/）；
+ * 6. 截断至最长 64 字符（契合 VARCHAR 64 限制）。
+ */
+export function deriveProjectFromCwd(cwd, configuredProject) {
+  // 容错兼容：若调用方反转传参 (例如 deriveProjectFromCwd("auto", "/path/to/project"))
+  if (cwd === "auto" && typeof configuredProject === "string" && (configuredProject.includes("/") || configuredProject.includes("\\"))) {
+    const tmp = cwd;
+    cwd = configuredProject;
+    configuredProject = tmp;
+  }
+  const explicit = String(configuredProject || "").trim();
+  if (explicit !== "auto") {
+    return explicit || "global";
+  }
+  if (!cwd || typeof cwd !== "string") {
+    return "global";
+  }
+  const norm = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  const base = norm.split("/").filter(Boolean).pop() || "";
+  const GENERIC_DIRS = new Set([
+    "root", "home", "users", "tmp", "var", "workspace", "work",
+    "src", "app", "desktop", "documents", "downloads"
+  ]);
+  if (!base || base.length < 2 || GENERIC_DIRS.has(base.toLowerCase()) || !/^[a-zA-Z0-9._-]+$/.test(base)) {
+    return "global";
+  }
+  return base.slice(0, 64);
+}
+
+export function deriveProject(configuredProject, cwd) {
+  return deriveProjectFromCwd(cwd, configuredProject);
+}
+
 export async function onRequest(body, ctx) {
   try {
     const opts = (ctx && ctx.options) || {};
@@ -1102,11 +1165,27 @@ export async function onRequest(body, ctx) {
           if (!ctx.state || typeof ctx.state !== "object") ctx.state = {};
           ctx.state.memhubInternal = true;
         }
+        if (ctx && typeof ctx.report === "function") {
+          try { ctx.report("skipped", 0); } catch (_) {}
+        }
         return undefined;
       }
     } catch (_) {}
     // 默认关闭：未显式开启时立即退出，0 额外开销
     if (opts.auto_harvest !== true) {
+      if (ctx && typeof ctx.report === "function") {
+        try { ctx.report("skipped", 0); } catch (_) {}
+      }
+      return undefined;
+    }
+
+    // ARCH-3 遵循 docs/subsystems/gateway-request-hooks.md:53 隐私边界：
+    // remote 流量需显式开启 allow_remote_harvest，否则跳过
+    const origin = (ctx && ctx.origin) || "";
+    if (origin === "remote" && opts.allow_remote_harvest !== true) {
+      if (ctx && typeof ctx.report === "function") {
+        try { ctx.report("skipped", 0); } catch (_) {}
+      }
       return undefined;
     }
 
@@ -1114,15 +1193,27 @@ export async function onRequest(body, ctx) {
     ctx.state.harvestRequested = true;
     ctx.state.session = ctx.session || "";
     ctx.state.agent = ctx.agent || "";
-    ctx.state.origin = ctx.origin || "";
+    ctx.state.origin = origin;
+    ctx.state.cwd = (ctx && ctx.cwd) || "";
+    ctx.state.query = (ctx && ctx.query) || "";
     ctx.state.model = ctx.model || "";
     ctx.state.startTime = Date.now();
     ctx.state.requestBody = body;
+
+    // ARCH-3 宿主状态诊断上报：网关提炼准备就绪
+    if (ctx && typeof ctx.report === "function") {
+      try { ctx.report("ready", 0); } catch (_) {}
+    }
 
     // 绝不修改原始请求体
     return undefined;
   } catch (e) {
     // 极致 fail-open：捕获一切异常，返回 undefined 保留原样 body
+    try {
+      if (ctx && typeof ctx.report === "function") {
+        ctx.report("invalid", 0);
+      }
+    } catch (_) {}
     return undefined;
   }
 }
@@ -1168,6 +1259,12 @@ export async function onResponse(reply, ctx) {
       return;
     }
 
+    // ARCH-3 隐私边界守卫：remote 来源流量必须显式开启 allow_remote_harvest
+    const origin = (ctx && ctx.origin) || (ctx && ctx.state && ctx.state.origin) || "";
+    if (origin === "remote" && opts.allow_remote_harvest !== true) {
+      return;
+    }
+
     // 严禁在测试环境意外触发真实数据库写入（除非显式传入 mock/隔离 client 或 _force_test 标记）
     if (isTestMode() && !opts._force_test && !opts._client && !opts.client) {
       return;
@@ -1179,13 +1276,20 @@ export async function onResponse(reply, ctx) {
     }
 
     const requestBody = ctx && (ctx.request || (ctx.state && ctx.state.requestBody));
-    const dialogueText = buildDialogueText(requestBody, reply);
+    const queryFallback = (ctx && ctx.query) || (ctx && ctx.state && ctx.state.query) || "";
+    const dialogueText = buildDialogueText(requestBody, reply, queryFallback);
     if (!dialogueText || dialogueText.length < 20) {
       return;
     }
 
+    // ARCH-3 项目推导契约守卫：
+    // 严格遵循规范：project 自动推导仅在显式 project==="auto" 时启用，默认 global 保持原行为，绝不自动按 cwd 分项目。
+    const cwd = (ctx && ctx.cwd) || (ctx && ctx.state && ctx.state.cwd) || "";
+    const configuredProject = opts.project != null ? opts.project : (opts._project != null ? opts._project : "");
+    const effectiveProject = deriveProjectFromCwd(cwd, configuredProject);
+
     const meta = {
-      project: opts.project || "global",
+      project: effectiveProject,
       agent: (ctx && ctx.agent) || (ctx && ctx.state && ctx.state.agent) || "gateway",
       session: (ctx && ctx.session) || (ctx && ctx.state && ctx.state.session) || "",
       turn: countTurnsFromMessages(requestBody),
