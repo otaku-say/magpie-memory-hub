@@ -235,7 +235,8 @@ console.log("▶ [门禁 2] 校验 DEVNOTES.md 中所有复选框状态与正文
 // =============================================================================
 console.log("▶ [门禁 3] 校验 README.md 声明 MCP 工具数与 tools.js 实际注册数一致性...");
 {
-  const toolsContent = fs.readFileSync(path.join(ROOT, "tools.js"), "utf8");
+  const toolsPath = fs.existsSync(path.join(ROOT, "src/index.js")) ? path.join(ROOT, "src/index.js") : path.join(ROOT, "tools.js");
+  const toolsContent = fs.readFileSync(toolsPath, "utf8");
   const registeredTools = extractToolsRegistered(toolsContent);
   assert.ok(registeredTools.length > 0, "tools.js 中必须注册至少 1 个 MCP 工具");
 

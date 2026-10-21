@@ -16,6 +16,7 @@ import { CATEGORIES, SCOPES, SEVERITIES, readOptions } from "./core/config.js";
 import { makeClient } from "./integration/ncb.js";
 import { normalizeToolArgs } from "./tools/args.js";
 import { memorySave } from "./tools/memory-save.js";
+import { saveMemory } from "./services/save/memory-saver.js";
 import { memorySearch } from "./tools/memory-search.js";
 import { memoryList } from "./tools/memory-list.js";
 import { memoryContext } from "./tools/memory-context.js";

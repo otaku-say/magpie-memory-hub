@@ -7,6 +7,7 @@
 import { CATEGORIES, SCOPES, FETCH_LIMIT, nowSql, expiresAtFor } from "../../core/config.js";
 import { markRecent, justWritten } from "../../core/state-recent.js";
 import { rowsOf } from "../../integration/ncb.js";
+import { freshness } from "../../domain/scoring.js";
 import { scrubSecrets } from "../../../scrub.js";
 import {
   normalizeSemanticText,

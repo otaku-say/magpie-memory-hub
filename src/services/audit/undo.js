@@ -8,6 +8,7 @@ import { nowSql } from "../../core/config.js";
 import { rowsOf } from "../../integration/ncb.js";
 import { jsonOut } from "../../domain/scoring.js";
 import { lookupAuditState, rememberAuditState } from "../../../local_state.js";
+import { writeCardStatus } from "../../../page_actions.js";
 
 export async function memoryAuditUndo(client, cfg, args) {
   args = args || {};

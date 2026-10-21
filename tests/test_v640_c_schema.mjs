@@ -229,7 +229,8 @@ check(
 console.log("\n▶ [反证门 3: _no_scheduler 入口前置副作用隔离反证]");
 
 // 静态前置断言：验证 tools.js 源码中 noScheduler 解析先于三处副作用，且由 !noScheduler 包裹
-const toolsSource = fs.readFileSync(new URL("../tools.js", import.meta.url), "utf8");
+const toolsUrl = fs.existsSync(new URL("../src/index.js", import.meta.url)) ? new URL("../src/index.js", import.meta.url) : new URL("../tools.js", import.meta.url);
+const toolsSource = fs.readFileSync(toolsUrl, "utf8");
 const hubFuncMatch = toolsSource.match(/export const MagpieMemoryHub = async[\s\S]*?\{([\s\S]*?)\n\};/);
 assert.ok(hubFuncMatch, "必须能解析出 MagpieMemoryHub 函数体");
 const hubBody = hubFuncMatch[1];

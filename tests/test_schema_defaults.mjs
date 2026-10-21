@@ -31,7 +31,16 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (f) => readFileSync(join(ROOT, f), "utf8");
 
 const FILES = ["tools.js", "gateway_harvest.js", "schema.js", "db_tools.js", "gateway_harvest.hooks.js"];
-const SRC = Object.fromEntries(FILES.map((f) => [f, read(f)]));
+const SRC = Object.fromEntries(FILES.map((f) => {
+  let text = read(f);
+  if (f === "tools.js") {
+    try {
+      text += "\n" + read("src/services/save/memory-saver.js");
+      text += "\n" + read("src/tools/pitfall-save.js");
+    } catch (_) {}
+  }
+  return [f, text];
+}));
 
 let failed = 0;
 const ok = (m) => console.log("  ✓ " + m);

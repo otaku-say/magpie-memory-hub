@@ -5,9 +5,10 @@
  */
 
 import { nowSql, readOptions } from "../../core/config.js";
-import { isDedupDue } from "../../core/time.js";
-import { makeClient } from "../../integration/ncb.js";
-import { lookupAuditState } from "../../../local_state.js";
+import { isTestMode } from "../../../gateway_harvest.js";
+import { isDedupDue, getDedupTimeWindow } from "../../core/time.js";
+import { makeClient, isCfgShape } from "../../integration/ncb.js";
+import { lookupAuditState, clearAuditCursor } from "../../../local_state.js";
 import { memoryAudit, resetIsAuditing } from "./auditor.js";
 
 export function trackMemoryRetrievals(client, rows) {

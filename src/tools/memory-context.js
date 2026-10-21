@@ -6,7 +6,7 @@
 
 import { normalizeToolArgs } from "./args.js";
 import { fetchAll } from "../integration/ncb.js";
-import { scoreMemory, scorePitfall, rankMemory, cut, jsonOut, termsOf } from "../domain/scoring.js";
+import { scoreMemory, scorePitfall, freshness, rankMemory, cut, jsonOut, termsOf } from "../domain/scoring.js";
 import { isMemoryValid } from "../domain/validity.js";
 import { trackMemoryRetrievals } from "../services/audit/scheduler.js";
 import { rewriteSearchQuery } from "../../online_models.js";

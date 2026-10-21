@@ -9,6 +9,8 @@ import { getDedupTimeWindow } from "../../core/time.js";
 import { rowsOf, mergeCommaSeparated } from "../../integration/ncb.js";
 import { jsonOut } from "../../domain/scoring.js";
 import { memoryAuditUndo } from "./undo.js";
+import { hasTagsIntersection } from "../../domain/validity.js";
+import { writeCardStatus } from "../../../page_actions.js";
 import {
   lookupAuditState,
   rememberAuditState,

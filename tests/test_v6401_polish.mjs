@@ -184,7 +184,8 @@ async function run() {
     // =============================================================
     console.log("\n▶ [Test 3] 微调1 readAction 信标受 !noScheduler 保护");
 
-    const src = fs.readFileSync(new URL("../tools.js", import.meta.url), "utf8");
+    const srcUrl = fs.existsSync(new URL("../src/index.js", import.meta.url)) ? new URL("../src/index.js", import.meta.url) : new URL("../tools.js", import.meta.url);
+    const src = fs.readFileSync(srcUrl, "utf8");
     assert.ok(
       /if\s*\(\s*!noScheduler\s*&&\s*readAction\(options\)\s*\)/.test(src),
       "【反证 3.a 静态】readAction(options) 必须由 !noScheduler 前置守卫"
