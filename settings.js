@@ -1273,6 +1273,60 @@
   }
 
   /* ---------------- 启动与事件绑定 ---------------- */
+  // 通过宿主桥接 API (magpie.read) 获取用户常用模型列表并注入 <datalist> 候选
+  function loadModelSuggestions() {
+    if (!window.magpie || typeof window.magpie.read !== "function") {
+      return Promise.resolve(null);
+    }
+    try {
+      return Promise.resolve(window.magpie.read("usage:summary", { period: "30d" }))
+        .then(function (summary) {
+          if (!summary || !Array.isArray(summary.models) || !summary.models.length) {
+            return null;
+          }
+          var dl = $("magpie_known_models");
+          if (!dl && typeof document !== "undefined" && document.createElement && document.body && typeof document.body.appendChild === "function") {
+            dl = document.createElement("datalist");
+            dl.id = "magpie_known_models";
+            document.body.appendChild(dl);
+          }
+          if (!dl) return null;
+          dl.innerHTML = "";
+          var seen = {};
+          var count = 0;
+          var added = [];
+          for (var i = 0; i < summary.models.length && count < 20; i++) {
+            var item = summary.models[i];
+            var mName = (item && typeof item === "object" ? item.model : item) || "";
+            mName = String(mName).trim();
+            if (!mName || seen[mName]) continue;
+            seen[mName] = 1;
+            count++;
+            added.push(mName);
+            if (typeof document !== "undefined" && typeof document.createElement === "function" && typeof dl.appendChild === "function") {
+              var opt = document.createElement("option");
+              opt.value = mName;
+              dl.appendChild(opt);
+            }
+          }
+          var ids = ["extract_model", "classify_model", "audit_model"];
+          for (var j = 0; j < ids.length; j++) {
+            var input = $(ids[j]);
+            if (input && typeof input.setAttribute === "function") {
+              input.setAttribute("list", "magpie_known_models");
+            }
+          }
+          return added;
+        })
+        .catch(function () {
+          // 未授权、网络波动或旧版宿主静默降级，绝不向用户报错
+          return null;
+        });
+    } catch (e) {
+      return Promise.resolve(null);
+    }
+  }
+
   function boot() {
     var mcpUrlEl = $("mcp_url");
     if (mcpUrlEl) mcpUrlEl.value = mcpUrl();
@@ -1524,12 +1578,15 @@
     window.fill = fill;
     window.collect = collect;
     window.updateDedupUI = updateDedupUI;
+    window.loadModelSuggestions = loadModelSuggestions;
 
     // 数据库名称输入联动前缀展示
     var ncbInput = $("ncb_instance");
     if (ncbInput) {
       ncbInput.addEventListener("input", function () { renderDbPrefix(); });
     }
+
+    loadModelSuggestions();
 
     if (!window.magpie || !window.magpie.options) {
       say("桥接脚本未加载", "bad");
@@ -1538,7 +1595,10 @@
     }
 
     Promise.resolve(window.magpie.ready)
-      .then(function () { return window.magpie.options.get(); })
+      .then(function () {
+        loadModelSuggestions();
+        return window.magpie.options.get();
+      })
       .then(function (o) {
         current = o || {};
         fill(current);
