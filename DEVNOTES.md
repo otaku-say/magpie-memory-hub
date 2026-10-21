@@ -2596,3 +2596,285 @@ Agent 对已有简短记忆（例如「使用 Redis 缓存会话数据」）补�
 4. **测试元规范（test_meta）合规**：
    - 完整遵守命名空间隔离、cleanup、residue 断言、反证标记与非 0 退出。
 
+
+
+---
+
+# 四十三~四十五、v6.39.0 整改检查点归档
+
+> 本段由集成阶段自动归档，原文见 git 历史。
+
+
+## 归档：NOTES_v639_a.md
+
+# v6.39-a 开发笔记：修复铁律置信度量纲、占位正则、软失效正文数字守卫与 EVO-16 增强
+
+- **执行分支**：feat/v639-a-write
+- **基线版本**：fd649e8
+- **责任区域**：tools.js（① isPlaceholderRootCause、② 软失效 memories 回调、③ checkAndApplyIronlaw 及 pitfallSave NOOP 分支 tags 合并）
+- **新增测试**：tests/test_v639_a_write.mjs
+
+---
+
+## 1. 缺陷分析与需求背景
+
+### 1.1 BUG-38-1 置信度量纲错配（高危）
+- **代码位置**：tools.js:1851 `confidence_score: 1.0,`
+- **根本原因**：NCB memories 表的 confidence_score 字段为 0~100 整数。rankMemory(410-414) 计算公式为：
+  `conf = (!isNaN(rawScore) ? rawScore : 100) / 100;`
+  创建铁律时错误写入 `confidence_score: 1.0`，导致 `conf = 0.01`。这使得铁律排序得分仅为普通 principle（100 满分）的 1/100，排在最后，甚至无法进入 memory_context 的置顶槽位（max_principles 默认 2 条）。
+- **二次更新遗漏**：既有铁律在 existingPrinciple 分支二次更新时，当解法更详尽或内容发生演进时，漏更新了 `content_fingerprint`，导致指纹陈旧。
+- **修复方案**：
+  1. 将写入载荷中的 `confidence_score: 1.0` 修正为 `confidence_score: 100`（满分 100）。
+  2. 在 existingPrinciple 分支重算 `semanticFingerprint(project, "principle", ironTitle, ironContent, mergedIronTags)` 并写入 `content_fingerprint`。
+
+### 1.2 BUG-38-4a 占位正则漏历史套话（中危）
+- **代码位置**：tools.js:1777-1783 `isPlaceholderRootCause` 及 `isMeaningfulIronlaw`
+- **根本原因**：正则 `/未知|待查|临时|unknown|todo|tbd/i` 漏掉了历史代码/日志中的模板套话：`"执行过程中出现 <symptom>，已处置解决"`。这类记录缺乏真实根因，若复发达到 5 次会被误升维为假铁律。
+- **修复方案**：
+  在占位正则中追加 `|已处置解决|执行过程中出现`，确保历史套话被判定为占位根因，绝不触发升维。
+
+### 1.3 BUG-38-4b 软失效 memories 漏检正文数字冲突（中危）
+- **代码位置**：tools.js:1730-1743 `supersededMems` 匹配回调
+- **根本原因**：软失效冗余 memories 时仅比对了 `hasConflictingNumbers(m.title, symptom)`，未校验正文与 solution/root_cause 的数字冲突。导致正文含不同端口/版本（如 3306 vs 3307）的记忆被误标记软失效。
+- **修复方案**：
+  在 `supersededMems` 过滤回调中增加：
+  `if (hasConflictingNumbers(m.content || m.full_text || "", solution || rootCause || "")) return false;`
+
+### 1.4 EVO-16 pitfallSave NOOP 分支 tags 合并 + 铁律实体透传
+- **代码位置**：tools.js:1965-1979（pitfallSave NOOP 分支）及 checkAndApplyIronlaw
+- **根本原因**：
+  1. 重复踩坑且无信息增益（NOOP 分支）时，丢弃了本次传入的新 tags，没有与库中既有 tags 取并集回写。
+  2. checkAndApplyIronlaw 创建铁律时，`related_entities` 仅简单取 `comp`（组件名），丢失了调用方传入的 `args.related_entities`。
+- **修复方案**：
+  1. 在 pitfallSave 的 NOOP 路径（包含语义相似去重命中、数字冲突覆盖保护、唯一索引拦下重复等）中计算 `mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ")` 并写回数据库。
+  2. 在 checkAndApplyIronlaw 中，解析 `args.related_entities` 并与 `comp` 取并集生成 `ironEntities`，落盘并更新至铁律记录。
+
+---
+
+## 2. 双向反证验收设计（tests/test_v639_a_write.mjs）
+
+1. **BUG-38-1 双向反证**：
+   - a) 铁律写入后查回 `confidence_score === 100`（反证：非 1、非 1.0）。
+   - b) 召回能力验证：构造 2 条普通 principle(confidence_score=100) + 1 条铁律，调用 memory_context(query 命中全部)，断言铁律成功出现在返回的 block 中。
+   - c) 指纹演进反证：二次更新铁律时（新解法扩充），读回记录的 `content_fingerprint` 发生变化，与旧指纹不相等。
+
+2. **BUG-38-4a 占位正则双向反证**：
+   - a) 占位根因反证：`root_cause = "执行过程中出现 XXX，已处置解决"`，断言 `isPlaceholderRootCause` 返回 true，且 recurrence=5 时不升维铁律。
+   - b) 真实根因反证：`root_cause = "TCP KeepAlive 未开启导致连接被静默回收"`，断言返回 false 且 recurrence=5 时正常升维铁律。
+
+3. **BUG-38-4b 软失效正文数字冲突双向反证**：
+   - a) 正文数字冲突反证：已有 memory 正文含 "3306"，新 pitfall solution 含 "3307"，调用 pitfallSave 后断言该 memory 仍为 active，不得被软失效。
+   - b) 正文无冲突语义相似反证：正文无冲突且语义重叠，调用 pitfallSave 后该 memory 正常被标记为 superseded。
+
+4. **EVO-16 tags 合并与实体透传双向反证**：
+   - a) NOOP tags 合并反证：重复触发相同踩坑（NOOP），传入新 tags，断言库中记录 tags 包含原有与新增 tag 的并集。
+   - b) 铁律实体透传反证：传入 `component="redis"` 与 `related_entities="cache, sentinel"` 升维铁律，断言铁律的 `related_entities` 包含 `redis`、`cache`、`sentinel` 的并集。
+
+5. **门禁合规自检与零残留断言**：
+   - scanTestFile(thisFile) 自检通过。
+   - createTestEnv 隔离运行，结束后 residue === 0。
+
+---
+
+## 3. 验证与回归记录
+
+1. **专项双向反证验收**：
+   - 运行 `node tests/test_v639_a_write.mjs`：全部 4 大任务与全量正反向反证门 100% 通过，隔离命名空间测试数据彻底清理，`residue.total === 0` 零残留断言通过。
+2. **核心回归套件**：
+   - 运行 `node tests/test_v638_a_write.mjs`：100% 通过（BUG-37-1 知识黑洞、BUG-37-3 跨类数字冲突、EVO-11 升维铁律全部保持绿灯）。
+   - 运行 `node tests/test_schema_defaults.mjs`：100% 通过（所有 30 个数据库写入载荷显式包含时间戳，无外键哨兵值 0）。
+   - 运行 `node tests/test_v636_a_evo.mjs`：100% 通过（EVO-1 与 EVO-4 升维套件全部保持绿灯）。
+3. **遵循文件所有权与“禁改计数”原则**（对齐 DEVNOTES.md:2040 与 DEVNOTES.md:2226）：
+   - `test_meta.mjs` 严格保持只读，未做任何修改；
+   - 新增测试由 `tests/test_v639_a_write.mjs` 引入 `scanTestFile` 执行等价规范自检（0 违规），待合并阶段统一锁定计数。
+
+
+## 归档：NOTES_v639_b.md
+
+# Agent B 检查点报告：修复显式 supersede 被吞没与检索期自省 (v6.39-b)
+
+## 1. 任务背景与文件所有权约定
+- **沙箱 ID**: `45773dfb239840c0ba02fc9da0f9b5ef`
+- **工作目录**: `/workspace/m`
+- **目标分支**: `feat/v639-b-save` (基线 commit: `fd649e8`)
+- **文件所有权范围（严格限定）**:
+  - `tools.js`：
+    * `saveMemory`：前置解析 `supersede_id`，跳过 dup 与 crossDup 的 NOOP 短路（BUG-38-2）。
+    * `memoryContext`：返回体透出 `evolution_opportunities`（`near_ironlaw` 与 `chronic_without_root_cause`）并动态追加 `_agent_hint`（EVO-14）。
+    * `pitfallSearch`：返回踩坑结果附加 `is_chronic` 与 `root_cause_is_placeholder` 诊断标记（EVO-15）。
+  - `tests/test_v639_b_save.mjs`：新增专项双向反证测试套件。
+  - `NOTES_v639_b.md`：本技术设计与验收报告。
+- **严禁修改（红线边界）**:
+  - `pitfallSave` / `checkAndApplyIronlaw` / `isPlaceholderRootCause`（由 Agent A 维护修改）
+  - `memoryGet` / `memoryList` / `memoryForget` / `MagpieMemoryHub` 入口
+  - `gateway_harvest*.js` / `test_meta.mjs` / `semantic_dedup.js`
+
+---
+
+## 2. 缺陷根因分析与技术实现方案
+
+### 2.1 【BUG-38-2】显式 supersede_id 被 dup / crossDup 吞没
+- **现状与根因**:
+  - 在 `saveMemory` 中，`targetSupersedeId` 的解析位于 759-761 行，落后于同分类语义查重（`dup`，约 560-675 行）与跨类别查重（`crossDup`，约 684-740 行）。
+  - 当 Agent 显式传递 `supersede_id` 旨在取代同标题旧记忆时（例如同标题事实“包管理器选型”从“使用 npm”切换为“切换为 pnpm”），由于标题完全一致且无数字冲突，流程在 `dup` 或 `crossDup` 处直接命中并返回 `action: "NOOP"`。
+  - 结果：新决策记录被直接丢弃，旧记录未被打上 `superseded` 软失效标记，严重违背调用方显式取代意图。
+- **技术实现**:
+  1. 将 `targetSupersedeId` 与 `targetSupersedeRow` 的解析提前至候选集拉取之后、`dup` 查重之前：
+     ```javascript
+     const targetSupersedeId = (m.supersede_id != null && m.supersede_id !== "" && !isNaN(Number(m.supersede_id)))
+       ? Number(m.supersede_id)
+       : null;
+     let targetSupersedeRow = targetSupersedeId ? allActiveRows.find((r) => r.id === targetSupersedeId) : null;
+     if (targetSupersedeId && !targetSupersedeRow) {
+       try {
+         const fetched = rowsOf(await client.list("memories", { id: targetSupersedeId, limit: 1 }));
+         if (fetched.length > 0) targetSupersedeRow = fetched[0];
+       } catch (_) {}
+     }
+     const hasValidSupersede = Boolean(targetSupersedeId && targetSupersedeRow);
+     ```
+  2. 当 `hasValidSupersede` 为 true 时，显式取代是最高优先级意图，**跳过 `dup` 与 `crossDup` 的 NOOP 短路**，直接进入记录创建与旧记录软失效流程。
+  3. 支持跨类别升级（如从 fact 升级为 decision），新记录写入新分类并递增版本，旧记录置为 `lifecycle_status="superseded"`、`superseded_by_id=newId`、`invalid_reason="superseded-by:" + newId`。
+  4. 当无 `supersede_id` 时，原有同标题查重与防重逻辑完全保持不变，确保 NOOP 防重机制不被破坏。
+
+### 2.2 【EVO-14】memory_context 透出 evolution_opportunities 演进契机
+- **需求与设计**:
+  - 在 `memoryContext` 返回体中组装并输出 `evolution_opportunities`（若无契机则省略或为空）：
+    1. `near_ironlaw`: 当前召回的踩坑中 `recurrence >= (crystallization_threshold - 1)` 且 `root_cause` / `solution` 真实非占位，输出 `{ id, component, symptom (前60字), recurrence, missing: 1 }`。
+    2. `chronic_without_root_cause`: `recurrence >= 3` 且 `root_cause` 为空或占位，输出 `{ id, component, symptom (前60字), recurrence }`。
+  - 在 `_agent_hint` 中动态追加对应提示：
+    * 存在 `near_ironlaw` 时提示：“再记录 N 次该故障即可自动生成铁律”
+    * 存在 `chronic_without_root_cause` 时提示：“该顽疾缺真实根因，排查后请用 pitfall_save 补 root_cause”
+    * 无任何契机时保持原生 hint，不含演进提示。
+  - 严格保持现有 `[Persistent Memory Context]` 块结构与 `max_items` 上限不受任何影响。
+
+### 2.3 【EVO-15】pitfall_search 透出诊断标记
+- **需求与设计**:
+  - `pitfallSearch` 召回的每条踩坑记录增加两项布尔诊断属性：
+    * `is_chronic`: `recurrence >= 3`
+    * `root_cause_is_placeholder`: 根因为空 / 等于 symptom / 匹配 `/未知|待查|临时|unknown|todo|tbd|已处置解决|执行过程中出现/i`
+  - 遵循文件所有权约定，不修改外部 `isPlaceholderRootCause` 函数，在 `pitfallSearch` 内联相同判断逻辑并加注释说明。
+
+---
+
+## 3. 双向反证测试矩阵 (tests/test_v639_b_save.mjs)
+
+| 任务 | 正向反证门 (Positive) | 反向/边界反证门 (Counter-Evidence) |
+| :--- | :--- | :--- |
+| **BUG-38-2 supersede 取代** | 同标题旧 fact "使用 npm" 存在，新传 decision "切换为 pnpm" + supersede_id=<旧id> → 成功落库新记录，返回 UPDATE，旧记录 lifecycle_status=superseded 且 invalid_reason 含新 id | 不传 supersede_id 时，同标题重复提交必须命中 dup/crossDup 严格返回 NOOP |
+| **BUG-38-2 跨类 supersede** | 旧记录为 fact，新记录为 decision + supersede_id，分类成功转换，版本号正确递增 | supersede_id 为非法/不存在 ID 时，回退至正常查重流程 |
+| **EVO-14 near_ironlaw** | recurrence=4 且根因/解法真实的踩坑召回时，必进 near_ironlaw 且 missing=1，_agent_hint 动态提示 | recurrence=4 但根因为“具体待查”的踩坑绝不进入 near_ironlaw |
+| **EVO-14 chronic 顽疾画像** | recurrence=5 且根因占位的踩坑召回时，必进 chronic_without_root_cause，_agent_hint 提示补根因 | recurrence=2 或根因真实的踩坑绝不进入 chronic_without_root_cause |
+| **EVO-14 纯净反证** | 无任何符合条件的踩坑时，evolution_opportunities 为空/缺省，_agent_hint 绝不含演进提示 | memoryContext block 格式与 max_items 截断不受 evolution_opportunities 影响 |
+| **EVO-15 诊断标记** | recurrence=4 → is_chronic=true；root_cause="具体待查" → root_cause_is_placeholder=true | recurrence=2 → is_chronic=false；root_cause="TCP KeepAlive 未开启" → root_cause_is_placeholder=false |
+| **测试元检查与清理** | scanTestFile 静态扫描本测试 0 违规，强断言隔离 | env.cleanup() 执行后断言 residue.total === 0 零残留 |
+
+---
+
+## 4. 验证与回归记录
+1. 遵循文件所有权与“禁改计数”原则（对齐 DEVNOTES.md:2040 与 DEVNOTES.md:2226）：
+   - `test_meta.mjs` 严格保持只读，未做任何修改；
+   - 新增测试由 `tests/test_v639_b_save.mjs` 引入 `scanTestFile` 执行规范自证（0 违规）。
+2. 执行基准与新增测试套件：
+   - `node tests/test_v639_b_save.mjs`
+   - `node tests/test_v638_b_read.mjs`
+   - `node tests/test_v637_b_read.mjs`
+   - `node tests/test_proactive_memory_ux.mjs`
+
+
+## 归档：NOTES_v639_c.md
+
+# v6.39-c 修复记录：_no_scheduler 隔离标记根治后台 drain 覆写宿主调度器配置
+
+## 1. 任务背景与文件所有权原则
+- **BUG-38-3（中危）**：后台队列非空时，`gateway_harvest.hooks.js` 中的 `getHub()` 会调用 `MagpieMemoryHub` 构造临时实例。由于 `tools.js:4115` 在 `MagpieMemoryHub` 内部无条件执行 `_auditOptionsGetter = optionsGetter;`，导致宿主全局 `_auditOptionsGetter` 被后台消费时的临时配置快照覆写。后续宿主在修改 `dedup_time`、`project` 等配置时，读取到的依然是后台消费时的临时配置快照。
+- **历史方案局限**：上一轮方案通过"探测并继承活跃排期再传"仅防止了误调用 `stopAuditScheduler()`，但无法阻断全局 getter 闭包被新临时实例覆写。
+- **文件所有权遵守**：
+  - 修改文件：
+    - `tools.js`：MagpieMemoryHub 入口区（约 4100-4130 行）+ 调度器管理区（约 3570-3650 行）
+    - `gateway_harvest.hooks.js`：getHub（约 1224-1270 行）
+  - 新增文件：
+    - `NOTES_v639_c.md`
+    - `tests/test_v639_c_nosched.mjs`
+  - **严禁修改**：saveMemory / pitfallSave / checkAndApplyIronlaw / isPlaceholderRootCause / memoryGet / memoryList / memoryContext / memorySearch / pitfallSearch / semantic_dedup.js / test_meta.mjs。
+
+---
+
+## 2. 根因深度剖析
+
+### BUG-38-3：后台 drain 构造临时 hub 覆写宿主全局 `_auditOptionsGetter`
+1. **覆写路径**：
+   - 当异步队列中有待消费项时，`triggerBackgroundDrain` 中的 `callSaveMemory` / `callPitfallSave` 调用 `getHub()`。
+   - `getHub()` 未复用已有 hub 时，执行 `await MagpieMemoryHub(hubInput, hubOpts)` 构造临时实例。
+   - `MagpieMemoryHub` 内部无条件执行：
+     ```js
+     const optionsGetter = () => readOptions(Object.assign({}, input, options));
+     _auditOptionsGetter = optionsGetter;
+     if (cfg) _auditBaseCfg = cfg;
+     if (client) _auditBaseClient = client;
+     ```
+   - 该操作直接将模块级全局变量 `_auditOptionsGetter` 覆盖为捕获了本次临时调用参数的闭包。
+2. **不良后果**：
+   - 宿主随后若动态更新自身配置（例如修改 `dedup_schedule`、`dedup_time` 或切换 `project`），调用 `ensureAuditScheduler().getFreshCfg()` 将无法感知最新配置，始终读取被后台消费冻结的旧快照。
+
+---
+
+## 3. 根治方案设计
+
+### 3.1 引入 `_no_scheduler: true` 隔离标记
+在 `tools.js` 的 `MagpieMemoryHub` 入口解析隔离标记：
+```js
+const noScheduler = (options && options._no_scheduler === true) || (input && input._no_scheduler === true);
+```
+当 `noScheduler === true` 时：
+- **跳过整个调度器生命周期管理**：
+  - 不调用 `ensureAuditScheduler`
+  - 不调用 `stopAuditScheduler`
+  - **绝不赋值 `_auditOptionsGetter`**
+  - 不修改 `_auditBaseCfg` 与 `_auditBaseClient`
+- **保留完整工具能力**：
+  - 构造并返回完整 `tool` 映射（包含 `memory_save`、`pitfall_save` 等），供后台 drain 安全调用。
+
+### 3.2 `ensureAuditScheduler` 调度器管理区防御与单参兼容
+在 `tools.js` 的 `ensureAuditScheduler(client, cfg, optionsGetter)` 中：
+1. 兼容单参数调用 `ensureAuditScheduler({ dedup_schedule: "daily" })`（当第一个参数非客户端实例时自动作为 cfg 处理）；
+2. 增加对 `_no_scheduler` 的防御短路：若传入配置包含 `_no_scheduler === true`，直接返回当前状态快照，不修改任何内部引用与全局 getter。
+
+### 3.3 `gateway_harvest.hooks.js` 临时 Hub 构造透传隔离标记
+在 `gateway_harvest.hooks.js` 的 `getHub()` 中构造临时实例时：
+```js
+const hubOpts = {
+  ...activeCfg,
+  ...(options && typeof options === "object" ? options : {}),
+  _client: safeClient,
+  _cfg: activeCfg,
+  _no_scheduler: true,
+};
+const hubInput = {
+  ...activeCfg,
+  _no_scheduler: true,
+};
+```
+彻底阻断后台消费创建临时 Hub 对宿主调度器配置造成的任何副作用。
+
+---
+
+## 4. 双向反证测试矩阵 (`tests/test_v639_c_nosched.mjs`)
+1. **反证门 a（宿主配置防覆写与防误停）**：
+   - 先通过 `ensureAuditScheduler({ dedup_schedule: "daily" })` 启动宿主调度器，记录 `getFreshCfg().dedup_schedule === "daily"`；
+   - 构造 `_no_scheduler: true` 的 hub（模拟 drain 临时实例）；
+   - 反证断言：`getFreshCfg().dedup_schedule` 依然为 `"daily"`（未被覆写为 off 或其他值），`started` 依然为 `true`。
+2. **反证门 b（临时 Hub 工具功能完整可用）**：
+   - 验证 `_no_scheduler: true` 构造的实例拥有完整的 `tool["memory_save"]` 与 `tool["pitfall_save"]`，且能正常执行写库/入库操作。
+3. **反证门 c（主路径无回归）**：
+   - 不传 `_no_scheduler` 时，正常的调度器生命周期管理与配置覆盖行为 100% 保持原有行为不变。
+4. **反证门 d（真实 Drain 链路宿主 Getter 防覆写）**：
+   - 宿主提供动态更新的 `liveGetter`；
+   - 填充队列项并触发真实 `triggerBackgroundDrain`；
+   - 消费完成后动态变更宿主配置（如 `dedup_time: "04:30"`, `project: "updated_p"`）；
+   - 反证断言：`getFreshCfg()` 能即时感知变更，宿主 getter 绝未被后台临时实例覆写。
+5. **规范合规**：
+   - 执行 `scanTestFile` 元检查自检；
+   - 遵守命名空间隔离与清理逻辑，测试后残余记录数恒为 0 (`residue === 0`)。
+
