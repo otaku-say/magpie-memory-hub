@@ -2878,3 +2878,362 @@ const hubInput = {
    - 执行 `scanTestFile` 元检查自检；
    - 遵守命名空间隔离与清理逻辑，测试后残余记录数恒为 0 (`residue === 0`)。
 
+
+
+---
+
+# 四十六~四十八、v6.40.0 整改检查点归档
+
+> 本段由集成阶段自动归档，原文见 git 历史。
+
+
+## 归档：NOTES_v640_a.md
+
+# NOTES_v640_a: 修复铁律死循环与更新残留，实现 EVO-18 双表演进感知
+
+## 1. 任务背景与核心问题
+
+在 v6.39 版本的演进契机感知与铁律升维体系中，排查发现以下三项高危/中危缺陷与一项演进能力缺失：
+
+1. **BUG-39-1: near_ironlaw 缺上界致死循环提示（高危）**
+   - **位置**: tools.js:1707
+   - **根因**: if (rec >= (crystallizationThreshold - 1) && !rcIsPlaceholder && !solIsPlaceholder) 只有下界缺少上界。当踩坑记录复发次数达到或超过结晶阈值（如 rec=5, threshold=5）时，条件依然成立，Math.max(1, crystallizationThreshold - rec) 恒等于 1。
+   - **影响**: 即使铁律已自动生成，memory_context 依然反复提示「再记录 1 次该故障即可自动生成铁律」，形成恶性死循环诱导 Agent 无限重复调用 pitfall_save。
+   - **方案**: 增加严格上界 rec < crystallizationThreshold，将触发窗口锁定在 [crystallizationThreshold - 1, crystallizationThreshold)。
+
+2. **BUG-39-4b: 更新既有铁律漏写 confidence_score（高危残留）**
+   - **位置**: tools.js:1914 附近（existingPrinciple 演进更新分支）与 tools.js:1971 附近（duplicate-entry 兜底分支）
+   - **根因**: 在 v6.39-a 中新建铁律显式写入了 confidence_score: 100，但在二次演进更新既有铁律时，两处 client.update 载荷均漏写了 confidence_score: 100。
+   - **影响**: 若铁律此前存在历史遗留异常分数（例如置信度为 1），演进更新路径无法自愈恢复为满分 100。
+   - **方案**: 在两处 client.update 载荷中同语句显式补齐 confidence_score: 100 与 updated_at: nowSql()。
+
+3. **BUG-39-4c: 唯一索引冲突兜底漏合并 tags（中危残留）**
+   - **位置**: tools.js:2119 附近（pitfallSave 的 duplicate-entry catch 里 hasSolConflict 保护分支）
+   - **根因**: 当新旧解法存在数字冲突时，只更新了 { recurrence, last_occurred_at, updated_at }，未写入 tags: mergedTags || dup.tags，同时传给 checkAndApplyIronlaw 的也是 dup.tags 而非合并后的标签。
+   - **影响**: 走唯一索引冲突分支时，新传入的业务标签被静默丢弃。
+   - **方案**: 提前计算 mergedTags，在 client.update 和后续调用中显式传入 tags: mergedTags || dup.tags。
+
+4. **EVO-18: memory_context 双表全向演进契机（能力演进）**
+   - **位置**: tools.js:1710 附近 memoryContext 契机分析段
+   - **需求**: 对称于踩坑侧的 near_ironlaw，构建记忆侧的 near_crystallization 契机。
+   - **规则**: 从本次召回的 matchedMemories 中筛选：
+     - category 为 preference 或 decision
+     - recurrence 恰好等于 crystallizationThreshold - 1
+     - confidence_score >= 80
+   - **输出**: { id, category, title: cut(title, 60), recurrence, missing: 1 } 挂载到 evolution_opportunities.near_crystallization。
+   - **动态提示**: _agent_hint 追加「另有 N 条偏好/决策再印证 1 次即可结晶为准则。」
+   - **边界约束**: 无候选时 near_crystallization 不得输出（省略/undefined）。
+
+---
+
+## 2. 详细实现细节
+
+### 2.1 tools.js 修改点
+
+1. **tools.js:1707 (BUG-39-1)**
+   ```js
+   // 修改前
+   if (rec >= (crystallizationThreshold - 1) && !rcIsPlaceholder && !solIsPlaceholder) {
+   // 修改后
+   if (rec >= (crystallizationThreshold - 1) && rec < crystallizationThreshold && !rcIsPlaceholder && !solIsPlaceholder) {
+   ```
+
+2. **tools.js:1710+ (EVO-18)**
+   遍历 matchedMemories：
+   ```js
+   const nearCrystallization = [];
+   for (const m of matchedMemories) {
+     const cat = String(m.category || "").toLowerCase();
+     if (cat === "preference" || cat === "decision") {
+       const mRec = Number(m.recurrence) || 1;
+       const mConf = Number(m.confidence_score) || 0;
+       if (mRec === (crystallizationThreshold - 1) && mConf >= 80) {
+         nearCrystallization.push({
+           id: m.id,
+           category: m.category,
+           title: String(m.title || "").slice(0, 60),
+           recurrence: mRec,
+           missing: 1,
+         });
+       }
+     }
+   }
+   ```
+   组装 dynamicAgentHint 与 evolution_opportunities：
+   ```js
+   if (nearCrystallization.length > 0) {
+     dynamicAgentHint += ` 另有 ${nearCrystallization.length} 条偏好/决策再印证 1 次即可结晶为准则。`;
+   }
+   const hasEvolutionOpportunities =
+     nearIronlaw.length > 0 || chronicWithoutRootCause.length > 0 || nearCrystallization.length > 0;
+   ...
+   if (hasEvolutionOpportunities) {
+     const evo = {
+       near_ironlaw: nearIronlaw,
+       chronic_without_root_cause: chronicWithoutRootCause,
+     };
+     if (nearCrystallization.length > 0) {
+       evo.near_crystallization = nearCrystallization;
+     }
+     contextResult.evolution_opportunities = evo;
+   }
+   ```
+
+3. **tools.js:1914 & tools.js:1971 (BUG-39-4b)**
+   在两个更新铁律的 client.update("memories", ...) 载荷中添加：
+   ```js
+   confidence_score: 100,
+   updated_at: nowSql(),
+   ```
+
+4. **tools.js:2119 (BUG-39-4c)**
+   在 pitfallSave 的 duplicate entry 处理中提前计算 mergedTags：
+   ```js
+   const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+   const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+   const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
+   ```
+   在 hasSolConflict 分支更新：
+   ```js
+   await client.update("pitfalls", dup.id, {
+     recurrence: next,
+     tags: mergedTags || dup.tags,
+     last_occurred_at: now,
+     updated_at: now,
+   });
+   ```
+
+---
+
+## 3. 双向反证测试矩阵 (tests/test_v640_a_iron.mjs)
+
+1. **BUG-39-1 反证门**:
+   - rec=4, threshold=5: 必须进入 near_ironlaw，且 missing=1；
+   - rec=5, threshold=5: near_ironlaw 必须为空数组，_agent_hint 严禁出现「再记录」提示；
+   - rec=6, threshold=5: near_ironlaw 必须为空数组。
+
+2. **BUG-39-4b 反证门**:
+   - 插入一条历史损坏铁律（confidence_score: 1）；
+   - 触发一次二次演进更新；
+   - 查库断言 confidence_score === 100（置信度自愈）；
+   - 断言 content, tags, related_entities, recurrence 均正确更新。
+
+3. **BUG-39-4c 反证门**:
+   - 预埋一条踩坑记录（solution: "设置 write 线程池 queue_size=1000 并限制单次 bulk 请求文档批次为 500 条", tags: "es, bulk, initial-tag"）；
+   - 模拟唯一索引冲突并发竞态（client.create 抛出 Duplicate entry 异常，进入 catch 块）；
+   - 新解法存在数字冲突（1000 vs 2000, 500 vs 800），触发 hasSolConflict 保护分支；
+   - 断言命中 hasSolConflict 分支，库中记录 tags 成功合并为包含 initial-tag, conflict-patch, v640；
+   - 断言 recurrence 正确累加，旧解法未被破坏覆盖。
+
+4. **EVO-18 双向反证门**:
+   - 正向 反证 a: preference, recurrence=4, confidence_score=90 -> 必须进入 near_crystallization，missing=1；
+   - 反向 反证 b: preference, recurrence=4, confidence_score=70 -> 置信度未达标，严禁进入；
+   - 反向 反证 c: decision, recurrence=3, confidence_score=90 -> 计数未达标，严禁进入；
+   - 反向 反证 d: 纯净场景无候选时 -> near_crystallization 字段缺省/省略，_agent_hint 无该提示。
+
+5. **元规范自检与零残留**:
+   - scanTestFile 静态扫描 0 违规；
+   - createTestEnv 动态隔离命名空间；
+   - 测试结束后 countAllTestResidue 断言 residue.total === 0。
+
+---
+
+## 4. 验证与回归记录
+
+1. **专项双向反证验收**：
+   - 运行 `node tests/test_v640_a_iron.mjs`：全部 4 大任务与全量正反向反证门 100% 通过，隔离命名空间测试数据彻底清理，`residue.total === 0` 零残留断言通过。
+2. **核心回归套件**：
+   - 运行 `node tests/test_v639_a_write.mjs`：100% 通过（BUG-38-1 铁律量纲、BUG-38-4a 占位正则、BUG-38-4b 软失效正文数字守卫、EVO-16 NOOP tags 合并全部保持绿灯）。
+   - 运行 `node tests/test_v639_b_save.mjs`：100% 通过（BUG-38-2 supersede_id 取代防重、EVO-14 演进契机自省、EVO-15 诊断标记全部保持绿灯）。
+   - 运行 `node tests/test_schema_defaults.mjs`：100% 通过（所有数据库写入载荷显式包含时间戳，无外键哨兵值 0）。
+3. **遵循文件所有权与“禁改计数”原则**（对齐 DEVNOTES.md:2040 与 DEVNOTES.md:2226）：
+   - `test_meta.mjs` 严格保持只读，未做任何修改；
+   - 新增测试由 `tests/test_v640_a_iron.mjs` 引入 `scanTestFile` 执行等价规范自检（0 违规），待合并阶段统一锁定计数。
+
+
+## 归档：NOTES_v640_b.md
+
+# Agent B 检查点报告：修复 supersede_id 跨项目越权、已失效误激活与前置拦截 (v6.40-b)
+
+## 1. 任务背景与文件所有权约定
+- **沙箱 ID**: `95d33cab8d94479393a0199ab47e8a82`
+- **工作目录**: `/workspace/m`
+- **目标分支**: `feat/v640-b-supersede` (基线 commit: `4c1fc7b`)
+- **文件所有权范围（严格限定）**:
+  - `tools.js`：仅修改 `saveMemory` 函数内部逻辑（行号约 500-1000）：
+    * 将 `supersede_id` 的解析与多重安全校验前置到「0.5) 踩坑优先」之前；
+    * 增加跨项目所有权校验 (`cand.project === project`)，防止跨项目越权篡改；
+    * 增加有效性与生命周期校验 (`!cand.invalid_at && (!cand.lifecycle_status || cand.lifecycle_status === 'active')`)，防止已失效记录被误"激活"；
+    * 校验未通过时返回明确 NOOP (`supersede_id 指向不存在/跨项目/已失效的记录，已忽略取代意图`)，杜绝静默降级；
+    * 「0.5) 踩坑优先」拦截增加 `&& !hasValidSupersede`，防止显式取代被同名踩坑拦截。
+  - `tests/test_v640_b_supersede.mjs`：新增专项双向反证测试套件。
+  - `NOTES_v640_b.md`：本技术设计与验收报告。
+- **严禁修改（红线边界）**:
+  - `pitfallSave` / `checkAndApplyIronlaw` / `memoryContext` / `memoryGet` / `memoryList` / `TOOLS Schema`
+  - `MagpieMemoryHub` 入口 / `gateway_harvest*.js` / `test_meta.mjs` / `semantic_dedup.js`
+
+---
+
+## 2. 缺陷根因分析与技术实现方案 (BUG-39-2)
+
+### 2.1 三处高危漏洞根因
+1. **跨项目越权 (a)**：
+   - 现状：在 `targetSupersedeId` 未在本地候选集命中时，通过 `client.list("memories", { id: targetSupersedeId, limit: 1 })` 回查，但未校验 `fetched[0].project === project`。
+   - 危害：在 project_A 传入 project_B 的记录 ID，会把 project_B 的活跃记忆篡改为 `lifecycle_status="superseded"`，造成严重跨项目未授权篡改。
+2. **已失效记录被误“激活”(b)**：
+   - 现状：回查与命中时未校验 `!fetched[0].invalid_at` 及 `lifecycle_status`。
+   - 危害：传入已软失效或已废弃的 ID 会把它当作有效取代目标，破坏版本链与软失效审计痕迹。
+3. **前置踩坑拦截 (c)**：
+   - 现状：「0.5) 踩坑优先」检查位于 `supersede_id` 解析之前。
+   - 危害：若 pitfalls 表中存在同名/语义相近的踩坑记录，显式传入 `supersede_id` 仍会在 0.5 处直接返回 `action: "NOOP", table: "pitfalls"`，导致记忆取代失败。
+
+### 2.2 修复与防御设计
+1. **解析与校验前置**：
+   - 将 `allActiveRows` 查询与 `supersede_id` 解析校验提升至「0.5) 踩坑优先」之前。
+   - 严格进行双重校验：
+     ```javascript
+     const hasSupersedeParam = m.supersede_id !== undefined && m.supersede_id !== null && m.supersede_id !== "";
+     const targetSupersedeId = (hasSupersedeParam && !isNaN(Number(m.supersede_id)) && Number(m.supersede_id) > 0)
+       ? Number(m.supersede_id)
+       : null;
+     let targetSupersedeRow = targetSupersedeId
+       ? allActiveRows.find((r) =>
+           r.id === targetSupersedeId &&
+           r.project === project &&
+           !r.invalid_at &&
+           (!r.lifecycle_status || r.lifecycle_status === "active")
+         )
+       : null;
+     if (targetSupersedeId && !targetSupersedeRow) {
+       try {
+         const fetched = rowsOf(await client.list("memories", { id: targetSupersedeId, limit: 1 }));
+         if (fetched.length > 0) {
+           const cand = fetched[0];
+           if (cand && cand.project === project && !cand.invalid_at
+               && (!cand.lifecycle_status || cand.lifecycle_status === "active")) {
+             targetSupersedeRow = cand;
+           }
+         }
+       } catch (_) {}
+     }
+     if (hasSupersedeParam && (!targetSupersedeId || !targetSupersedeRow)) {
+       return {
+         action: "NOOP",
+         id: null,
+         note: "supersede_id 指向不存在/跨项目/已失效的记录，已忽略取代意图",
+       };
+     }
+     const hasValidSupersede = Boolean(targetSupersedeId && targetSupersedeRow);
+     ```
+2. **踩坑优先前置豁免**：
+   - 「0.5) 踩坑优先」判断条件增加 `&& !hasValidSupersede`：
+     ```javascript
+     if (category !== "principle" && !hasValidSupersede) {
+     ```
+   - 显式取代作为最高优先级用户意图，跳过踩坑优先拦截，同时在无 `supersede_id` 时维持原有踩坑优先行为不变。
+3. **写库时间戳一致性**：
+   - 遵循同语句内含 `updated_at: nowSql()` 规范，确保更新 payload 具备新鲜度追踪能力。
+
+---
+
+## 3. 双向反证测试矩阵 (tests/test_v640_b_supersede.mjs)
+
+| 序号 | 反证门分类 | 测试场景与断言 |
+| :--- | :--- | :--- |
+| **a** | 跨项目越权反证 | project_A 存 fact，project_B 用其 id 作为 supersede_id 保存 → 必须返回 NOOP，且 project_A 记录 lifecycle_status 仍为 active、invalid_at 为 null，project_B 0 写入 |
+| **b** | 已失效记录反证 | 已 soft-delete (invalid_at 非空) 的记录 id 作为 supersede_id 保存 → 必须返回 NOOP，不得作为有效取代目标 |
+| **c** | 正常同项目取代 | 同项目同标题显式传 supersede_id → 必须成功返回 UPDATE，旧记录置为 superseded 并指向新 ID，新记录 revision 递增 |
+| **d** | 同名踩坑穿透 | 库中存在同名踩坑时，显式传 supersede_id 必须穿透踩坑优先拦截成功 UPDATE，不得被拦截为 table="pitfalls" 的 NOOP |
+| **e** | 缺省行为保全 | 不传 supersede_id 时，原有的语义查重 NOOP 与踩坑优先拦截机制 100% 保持不变 |
+| **meta** | 元规范与零残留 | scanTestFile 静态扫描 0 违规，createTestEnv 隔离运行，结束后 residue.total === 0 |
+
+---
+
+## 4. 验证与回归记录
+1. 测试套件全量执行验证：
+   - `node tests/test_meta.mjs`
+   - `node tests/test_v640_b_supersede.mjs`
+   - `node tests/test_v639_b_save.mjs`
+   - `node tests/test_v638_a_write.mjs`
+   - `node tests/test_dedup_and_audit.mjs`
+2. 零残留验证：
+   - `env.cleanup()` + `residue.total === 0` 强断言。
+
+
+## 归档：NOTES_v640_c.md
+
+# v6.40-c 修复记录：MCP Schema 补全自演进参数声明与 _no_scheduler 入口前置隔离
+
+## 1. 任务背景与文件所有权原则
+- **BUG-39-3（中危）**：MCP 工具 Schema 遗漏声明自演进关键参数。
+  - `memory_save` 漏声明 `supersede_id`、`supersede`、`related_entities`；
+  - `pitfall_save` 漏声明 `related_entities`、`recurrence`；
+  - `memory_context` 漏声明 `max_principles`。
+  - 这些参数底层逻辑均已完整实现，且 conflict_candidates note 明确引导 Agent 使用 `supersede_id`，但 Schema 缺失导致客户端大模型无法感知或被严格 Schema 校验器剥离。
+- **BUG-39-4a（中危）**：`_no_scheduler` 隔离标记解析过晚，未包裹入口前置副作用。
+  - `writeCardStatus("db", dbInfo)`（约 4215 行）、`autoInit` 自愈（约 4243 行）与 `autoHarvest` 自动增量提炼（约 4253 行）在 `noScheduler` 解析（约 4271 行）之前执行。
+  - 导致后台 drain 构造的临时 hub 仍会覆写宿主 `_status.js` 卡片、触发 DDL 探测和重复增量扫描。
+- **文件所有权遵守**：
+  - 允许修改：`tools.js` 的 TOOLS Schema 区（约 3870-3960）与 MagpieMemoryHub 入口区（约 4210-4280）。
+  - 新增文件：`NOTES_v640_c.md`、`tests/test_v640_c_schema.mjs`。
+  - **严禁修改**：saveMemory / pitfallSave / checkAndApplyIronlaw / memoryContext / memoryGet / memoryList / memorySearch / gateway_harvest*.js / test_meta.mjs / semantic_dedup.js。
+  - **禁改计数原则**：严格遵从 DEVNOTES.md 规范，不修改 `test_meta.mjs` 中的文件计数断言，由新测试通过 `scanTestFile` 执行规范自证（0 违规），待合并阶段统一锁定计数。
+
+---
+
+## 2. 根因深度剖析与修复设计
+
+### 2.1 BUG-39-3：Schema 自演进参数声明补齐 (EVO-17)
+在 `tools.js` 的 `TOOLS` 对象中对应工具的 `args.properties` 补齐字段声明：
+1. **`memory_save`**:
+   - `supersede_id`: `{ type: "number", description: "要取代的旧记录 ID（显式取代走 UPDATE）" }`
+   - `supersede`: `{ type: "boolean", description: "强制以新内容扩充/覆盖同标题记录" }`
+   - `related_entities`: `{ type: "string", description: "关联实体，逗号分隔" }`
+2. **`pitfall_save`**:
+   - `related_entities`: `{ type: "string", description: "关联实体，逗号分隔" }`
+   - `recurrence`: `{ type: "number", description: "本次复发次数，默认 1" }`
+   - 确认既有 `root_cause` 属性保留，不予改动。
+3. **`memory_context`**:
+   - `max_principles`: `{ type: "number", description: "置顶准则条数上限，默认 2" }`
+4. **必填防线**：
+   - 严格保留各工具原有的 `required` 数组（`memory_save` 为 `["title", "content"]`，`pitfall_save` 为 `["symptom", "solution"]`，`memory_context` 无 required），绝不误将新增参数加入必填，防止未传参数的大模型报错。
+5. **名称合规防线**：
+   - description 中避免出现触发 `test_tool_names_static.mjs` 正则误报的词汇。
+
+### 2.2 BUG-39-4a：`_no_scheduler` 隔离标记前置至副作用之前
+在 `tools.js` 的 `MagpieMemoryHub` 入口中：
+1. 将 `noScheduler` 解析提前至最前部（`client` 构造之后、`writeCardStatus` 之前）：
+   ```javascript
+   const noScheduler = (options && options._no_scheduler === true) || (input && input._no_scheduler === true);
+   ```
+2. 使用 `!noScheduler` 包裹前置副作用：
+   - `writeCardStatus("db", dbInfo)` 包装在 `if (!noScheduler) { ... }` 中；
+   - `autoInit` 改为 `if (!noScheduler && cfg.autoInit && cfg.mcpKey && !isTestMode())`；
+   - `autoHarvest` 改为 `if (!noScheduler && cfg.autoHarvest && !isTestMode())`。
+3. 保持后续调度器管理中已有的 `if (!noScheduler)` 分支；
+4. 保证 `_no_scheduler: true` 构造的临时 hub 依然完整返回所有工具映射（`tool` 对象可用）。
+
+---
+
+## 3. 双向反证测试矩阵 (tests/test_v640_c_schema.mjs)
+
+| 门禁分类 | 测试用例 | 验证与反证设计 |
+| :--- | :--- | :--- |
+| **Schema 反证 a** | `memory_save` 属性声明 | 断言 `TOOLS.memory_save.args.properties` 包含 `supersede_id`, `supersede`, `related_entities` |
+| **Schema 反证 b** | `pitfall_save` 属性声明 | 断言 `TOOLS.pitfall_save.args.properties` 包含 `related_entities`, `recurrence`，且既有 `root_cause` 未被破坏 |
+| **Schema 反证 c** | `memory_context` 属性声明 | 断言 `TOOLS.memory_context.args.properties` 包含 `max_principles` |
+| **Schema 反证 d** | `required` 约束守卫 | 断言 `memory_save.required` 仅为 `["title", "content"]`，`pitfall_save.required` 仅为 `["symptom", "solution"]`，未误加任何新增可选参数 |
+| **端到端反证 e** | `supersede_id` 真实取代调用 | 构造旧记录并记录其 ID，通过 `tool["memory_save"].execute` 传入该 `supersede_id` 写入新记录，断言旧记录被标记为 `superseded`，新记录为 active 且关联正确 |
+| **隔离反证 f** | `_no_scheduler: true` 前置副作用阻断 | 传入 `_no_scheduler: true`，断言 `writeCardStatus` 未被调用、`dbInit` 未被调用、`harvestGateway` 未被调用，且 `hub.tool` 仍完整具备 21 个工具 |
+| **对照反证 g** | 默认主路径无回归 | 未传入 `_no_scheduler` 时，`writeCardStatus` 正常执行，主路径原有加载逻辑 100% 保持不变 |
+| **合规与零残留 h** | 元检查自检与清理 | `scanTestFile` 静态扫描本测试 0 违规；命名空间隔离运行，测试完成后 `residue.total === 0` |
+
+---
+
+## 4. 验证与回归记录
+1. 遵循文件所有权与“禁改计数”原则，严禁修改 `test_meta.mjs`。
+2. 静态工具名检查：`node tests/test_tool_names_static.mjs` 100% PASS（0 误报，21 工具全集校验）。
+3. 调度器隔离历史回归：`node tests/test_v639_c_nosched.mjs` 100% PASS。
+4. 导出面合规复核：`node tests/test_exports.mjs` 100% PASS。
+5. 专项双向反证：`node tests/test_v640_c_schema.mjs` 100% PASS。
+
