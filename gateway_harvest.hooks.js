@@ -1128,7 +1128,24 @@ export async function onRequest(body, ctx) {
 }
 
 /**
- * 响应后置钩子：在响应完全交付给客户端后后台异步调用 (fire-and-forget)。
+ * ARCH-1 计算 Bounded Await 受限等待超时预算 (ms)
+ * 留出安全余量，防止触发宿主超时判定
+ */
+export function computeHookBudgetMs(opts = {}) {
+  if (opts.bounded_await_timeout_ms != null && !isNaN(Number(opts.bounded_await_timeout_ms)) && Number(opts.bounded_await_timeout_ms) > 0) {
+    return Number(opts.bounded_await_timeout_ms);
+  }
+  if (opts.bounded_await_ms != null && !isNaN(Number(opts.bounded_await_ms)) && Number(opts.bounded_await_ms) > 0) {
+    return Number(opts.bounded_await_ms);
+  }
+  const rawTimeout = Number(opts.gatewayTimeoutMs) || 8000;
+  const margin = rawTimeout > 1000 ? 800 : Math.min(200, Math.floor(rawTimeout * 0.2));
+  return Math.max(100, Math.min(rawTimeout, 10000) - margin);
+}
+
+/**
+ * 响应后置钩子：在响应完全交付给客户端后后台异步调用。
+ * ARCH-1: 采用 Bounded Await 受限等待，对齐宿主 Restart() 生命周期防腰斩，
  * 绝不在模型请求的关键路径上。
  */
 export async function onResponse(reply, ctx) {
@@ -1185,15 +1202,87 @@ export async function onResponse(reply, ctx) {
       }
     }
 
-    // 治本策略：
-    // 网关钩子采用非阻塞后台异步任务（detached background promise）。
-    // 提炼与本地排队在毫秒内完成，钩子极速 resolve，绝不阻塞网关交付；
-    // 无论 gatewayTimeoutMs 是否存在（默认 1000ms 还是未配置），宿主超时定时器绝不会触发 abort！
+    // ARCH-1 架构演进：
+    // 网关钩子采用受限等待（Bounded Await，Promise.race + 超时保护）。
+    // 对齐 magpie-main/internal/plugin/host.js:1366 与 gateway.go:213 的生命周期：
+    // onResponse 本身已在 Go 后台 goroutine 中执行（完全不阻塞客户端响应交付），
+    // 通过在 gatewayTimeoutMs 安全余量内受限等待 taskPromise，保持宿主 pending > 0，
+    // 防止宿主在 Restart() 时因 pending===0 提前 process.exit(0) 腰斩正在进行的提炼与入库任务。
+    // 同时支持可配置关闭（opts.bounded_await === false 等），超时/中止平滑脱钩，且任何失败绝不影响网关主流程。
     const taskPromise = processDialogueAndHarvest(dialogueText, meta, client, opts);
+
     if (opts.wait_for_flush === true) {
-      await taskPromise;
+      try {
+        await taskPromise;
+        if (ctx && ctx.state && typeof ctx.state === "object") {
+          ctx.state._bounded_await_outcome = "flushed";
+        }
+      } catch (err) {
+        _diag("onResponse taskPromise flush 异常 (非致命，已隔离)", (err && err.message) || err);
+        if (ctx && ctx.state && typeof ctx.state === "object") {
+          ctx.state._bounded_await_outcome = "flush_error";
+        }
+      }
+    } else if (
+      opts.bounded_await === false ||
+      opts.wait_bounded === false ||
+      opts.bounded_await_enabled === false ||
+      opts.bounded_await === "off" ||
+      opts.bounded_await === "disabled"
+    ) {
+      // 可配置关闭受限等待：回退到纯脱钩异步模式
+      taskPromise.catch((err) => {
+        _diag("onResponse taskPromise 后台异常 (非致命，已隔离)", (err && err.message) || err);
+      });
+      if (ctx && ctx.state && typeof ctx.state === "object") {
+        ctx.state._bounded_await_outcome = "disabled";
+      }
     } else {
-      taskPromise.catch(() => {});
+      // 默认开启 Bounded Await：Promise.race + 超时 / abort 保护
+      const hookBudgetMs = computeHookBudgetMs(opts);
+      let timer = null;
+      let abortHandler = null;
+
+      const timeoutPromise = new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ outcome: "timeout" }), hookBudgetMs);
+        if (timer && typeof timer.unref === "function") timer.unref();
+
+        if (ctx && ctx.signal) {
+          if (ctx.signal.aborted) {
+            resolve({ outcome: "aborted" });
+          } else if (typeof ctx.signal.addEventListener === "function") {
+            abortHandler = () => resolve({ outcome: "aborted" });
+            try {
+              ctx.signal.addEventListener("abort", abortHandler, { once: true });
+            } catch (_) {}
+          }
+        }
+      });
+
+      const safeTaskPromise = Promise.resolve(taskPromise)
+        .then((res) => ({ outcome: "completed", result: res }))
+        .catch((err) => {
+          // 失败不影响主流程 (fail-open)
+          _diag("onResponse taskPromise 异常 (非致命，已隔离)", (err && err.message) || err);
+          return { outcome: "error", error: err };
+        });
+
+      try {
+        const raceResult = await Promise.race([safeTaskPromise, timeoutPromise]);
+        if (ctx && ctx.state && typeof ctx.state === "object") {
+          ctx.state._bounded_await_outcome = raceResult && raceResult.outcome;
+        }
+      } catch (raceErr) {
+        // 双重兜底：Promise.race 自身若发生意外异常，绝不外抛，隔离保护网关主流程
+        _diag("onResponse bounded await race 异常 (非致命)", (raceErr && raceErr.message) || raceErr);
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (abortHandler && ctx && ctx.signal && typeof ctx.signal.removeEventListener === "function") {
+          try {
+            ctx.signal.removeEventListener("abort", abortHandler);
+          } catch (_) {}
+        }
+      }
     }
   } catch (e) {
     // fail-open 仍是原则：绝不向上抛。但**不再静默** —— 打一行诊断，否则永远查不到
