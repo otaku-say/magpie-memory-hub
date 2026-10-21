@@ -486,15 +486,62 @@ export function validateGatewayDir(customDir) {
   return resolved;
 }
 
-export function resolveGatewayDir(customDir) {
-  if (customDir && typeof customDir === "string" && customDir.trim()) {
-    return validateGatewayDir(customDir);
+export function resolveGatewayDir(customDir, hostDir) {
+  let explicitDir = "";
+  let effectiveHostDir = "";
+
+  if (customDir && typeof customDir === "object") {
+    explicitDir = (typeof customDir.dir === "string" ? customDir.dir : "") || "";
+    effectiveHostDir = (typeof customDir.hostDir === "string" ? customDir.hostDir : "")
+      || (typeof customDir.hostDirectory === "string" ? customDir.hostDirectory : "")
+      || (typeof customDir.directory === "string" ? customDir.directory : "")
+      || "";
+  } else if (typeof customDir === "string") {
+    explicitDir = customDir;
   }
+
+  if (hostDir) {
+    if (typeof hostDir === "object") {
+      effectiveHostDir = (typeof hostDir.directory === "string" ? hostDir.directory : "")
+        || (typeof hostDir.hostDir === "string" ? hostDir.hostDir : "")
+        || (typeof hostDir.hostDirectory === "string" ? hostDir.hostDirectory : "")
+        || effectiveHostDir;
+    } else if (typeof hostDir === "string") {
+      effectiveHostDir = hostDir;
+    }
+  }
+
+  // 1. 显式指定的自定义目录优先（须经严格安全校验）
+  if (explicitDir && explicitDir.trim()) {
+    return validateGatewayDir(explicitDir.trim());
+  }
+
+  // 2. 环境变量配置的目录（须经严格安全校验）
   if (process.env.MEMHUB_GATEWAY_CONV_DIR && process.env.MEMHUB_GATEWAY_CONV_DIR.trim()) {
     return validateGatewayDir(process.env.MEMHUB_GATEWAY_CONV_DIR.trim());
   }
 
+  // 3. 宿主权威传入的 hostDir（兼容 Magpie 便携模式 <exe>/data/gateway-conversations）
+  // 严禁放宽既有路径白名单：宿主传入的目录必须强制接受 validateGatewayDir / checkPathForbidden 校验
+  let hostConvCandidate = null;
+  if (effectiveHostDir && effectiveHostDir.trim()) {
+    const rawTrim = effectiveHostDir.trim();
+    const base = path.basename(rawTrim).toLowerCase();
+    if (base === GATEWAY_CONV_DIRNAME.toLowerCase()) {
+      hostConvCandidate = path.resolve(rawTrim);
+    } else {
+      hostConvCandidate = path.resolve(rawTrim, GATEWAY_CONV_DIRNAME);
+    }
+    // 强制先进行路径白名单与敏感黑名单校验；非法敏感目录立即抛出 [SECURITY_BLOCKED]，绝不放宽！
+    validateGatewayDir(hostConvCandidate);
+  }
+
   const candidates = [];
+
+  // 宿主权威传入的便携模式候选路径置于首位
+  if (hostConvCandidate) {
+    candidates.push(hostConvCandidate);
+  }
 
   // Bun 宿主启动时的 cwd 就是 settings.Dir()
   try {
@@ -523,7 +570,12 @@ export function resolveGatewayDir(customDir) {
     } catch (_) {}
   }
 
-  // 若均不存在，选择最合理的默认路径返回
+  // 若均不存在，优先使用已通过校验的宿主权威候选路径
+  if (hostConvCandidate) {
+    return hostConvCandidate;
+  }
+
+  // 若宿主未传入，选择最合理的默认路径返回
   if (fs.existsSync("/config/magpie")) {
     return path.resolve("/config/magpie", GATEWAY_CONV_DIRNAME);
   }
@@ -764,7 +816,16 @@ export async function harvestGateway(args, context) {
   const pitfallSave = ctx.pitfallSave;
   const signal = ctx.signal;
 
-  const convDir = resolveGatewayDir(options.dir || cfg.gatewayConvDir);
+  // ARCH-4: 从 host context / input / options / cfg 中全链路提取宿主权威 directory
+  const hostDir = (ctx._ctx && typeof ctx._ctx.directory === "string" && ctx._ctx.directory)
+    || (ctx.directory && typeof ctx.directory === "string" && ctx.directory)
+    || (ctx._input && typeof ctx._input.directory === "string" && ctx._input.directory)
+    || (ctx.input && typeof ctx.input.directory === "string" && ctx.input.directory)
+    || (cfg && (typeof cfg.hostDirectory === "string" ? cfg.hostDirectory : (typeof cfg.directory === "string" ? cfg.directory : "")))
+    || (options && (typeof options.hostDirectory === "string" ? options.hostDirectory : (typeof options.hostDir === "string" ? options.hostDir : "")))
+    || "";
+
+  const convDir = resolveGatewayDir(options.dir || cfg.gatewayConvDir, hostDir);
 
   const targetProject = String(options.project || (cfg && cfg.project) || "global").trim();
   if (targetProject === "global" && isTestMode()) {
