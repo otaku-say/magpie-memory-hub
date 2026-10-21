@@ -1703,8 +1703,8 @@ async function memoryContext(client, cfg, rawArgs) {
     const rcIsPlaceholder = checkRootCausePlaceholder(pit.root_cause, pit.symptom);
     const solIsPlaceholder = checkSolutionPlaceholder(pit.solution);
 
-    // 1) near_ironlaw: recurrence >= (crystallization_threshold - 1) 且 root_cause/solution 真实非占位
-    if (rec >= (crystallizationThreshold - 1) && !rcIsPlaceholder && !solIsPlaceholder) {
+    // 1) near_ironlaw: recurrence >= (crystallization_threshold - 1) 且 recurrence < crystallization_threshold 且 root_cause/solution 真实非占位
+    if (rec >= (crystallizationThreshold - 1) && rec < crystallizationThreshold && !rcIsPlaceholder && !solIsPlaceholder) {
       const missingCount = Math.max(1, crystallizationThreshold - rec);
       nearIronlaw.push({
         id: pit.id,
@@ -1726,7 +1726,27 @@ async function memoryContext(client, cfg, rawArgs) {
     }
   }
 
-  const hasEvolutionOpportunities = nearIronlaw.length > 0 || chronicWithoutRootCause.length > 0;
+  // EVO-18: 记忆表侧 near_crystallization 演进契机
+  const nearCrystallization = [];
+  for (const m of matchedMemories) {
+    const cat = String(m.category || "").toLowerCase();
+    if (cat === "preference" || cat === "decision") {
+      const mRec = Number(m.recurrence) || 1;
+      const mConf = Number(m.confidence_score) || 0;
+      if (mRec === (crystallizationThreshold - 1) && mConf >= 80) {
+        nearCrystallization.push({
+          id: m.id,
+          category: m.category,
+          title: String(m.title || "").slice(0, 60),
+          recurrence: mRec,
+          missing: 1,
+        });
+      }
+    }
+  }
+
+  const hasEvolutionOpportunities =
+    nearIronlaw.length > 0 || chronicWithoutRootCause.length > 0 || nearCrystallization.length > 0;
   let dynamicAgentHint = "若本次任务产出了新结论、配置变更或排障解法，请在结束前调用 memory_save 或 pitfall_save 沉淀。";
   if (nearIronlaw.length > 0) {
     const missingN = nearIronlaw[0].missing;
@@ -1734,6 +1754,9 @@ async function memoryContext(client, cfg, rawArgs) {
   }
   if (chronicWithoutRootCause.length > 0) {
     dynamicAgentHint += " 该顽疾缺真实根因，排查后请用 pitfall_save 补 root_cause。";
+  }
+  if (nearCrystallization.length > 0) {
+    dynamicAgentHint += ` 另有 ${nearCrystallization.length} 条偏好/决策再印证 1 次即可结晶为准则。`;
   }
 
   const contextResult = {
@@ -1743,10 +1766,14 @@ async function memoryContext(client, cfg, rawArgs) {
     _agent_hint: dynamicAgentHint,
   };
   if (hasEvolutionOpportunities) {
-    contextResult.evolution_opportunities = {
+    const evoOpportunities = {
       near_ironlaw: nearIronlaw,
       chronic_without_root_cause: chronicWithoutRootCause,
     };
+    if (nearCrystallization.length > 0) {
+      evoOpportunities.near_crystallization = nearCrystallization;
+    }
+    contextResult.evolution_opportunities = evoOpportunities;
   }
 
   return jsonOut(contextResult);
@@ -1913,6 +1940,7 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
         const updatedIronFp = semanticFingerprint(project, "principle", ironTitle, ironContent, mergedIronTags);
         await client.update("memories", existingPrinciple.id, {
           recurrence: ironNext,
+          confidence_score: 100,
           content: ironContent,
           full_text: ironContent,
           tags: mergedIronTags,
@@ -1970,6 +1998,7 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
               const updatedIronFp = semanticFingerprint(project, "principle", ironTitle, ironContent, mergedIronTags);
               await client.update("memories", dupP.id, {
                 recurrence: ironNext,
+                confidence_score: 100,
                 content: ironContent,
                 full_text: ironContent,
                 tags: mergedIronTags,
@@ -2114,10 +2143,26 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
         const oldRc = String(dup.root_cause || "").trim();
         const oldSym = String(dup.symptom || "").trim();
 
+        const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+        const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+        const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
+
         const hasSolConflict = hasConflictingNumbers(oldSol, newSol);
         if (hasSolConflict) {
-          try { await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now }); } catch (_) {}
-          const out = await checkAndApplyIronlaw({ action: "NOOP", id: dup.id, recurrence: next, note: "方案存在数字冲突，禁止演进覆盖，累加复发计数" }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, dup.tags);
+          try {
+            await client.update("pitfalls", dup.id, {
+              recurrence: next,
+              tags: mergedTags || dup.tags,
+              last_occurred_at: now,
+              updated_at: now,
+            });
+          } catch (_) {}
+          const out = await checkAndApplyIronlaw({
+            action: "NOOP",
+            id: dup.id,
+            recurrence: next,
+            note: "方案存在数字冲突，禁止演进覆盖，累加复发计数",
+          }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, mergedTags || dup.tags);
           return jsonOut(out);
         }
 
@@ -2138,10 +2183,6 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
           else if (isRootCauseExplicitUpdated) reasons.push(`根因更新（原根因: "${oldRc || '(空)'}" -> 新根因: "${explicitRc}"）`);
           const reason = reasons.join("；");
 
-          const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-          const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-          const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
-
           try {
             await client.update("pitfalls", dup.id, {
               solution: (isSolutionMoreDetailed && newSol) ? newSol : oldSol,
@@ -2155,10 +2196,6 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
           const out = await checkAndApplyIronlaw({ action: "EVOLVED", id: dup.id, recurrence: next, reason, note: reason }, next, dup.component || component, dup.symptom || symptom, (hasExplicitRootCause && explicitRc) ? explicitRc : oldRc, (isSolutionMoreDetailed && newSol) ? newSol : oldSol, mergedTags || dup.tags);
           return jsonOut(out);
         }
-
-        const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-        const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-        const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
 
         try {
           await client.update("pitfalls", dup.id, {
