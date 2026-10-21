@@ -28,9 +28,15 @@ export function trackMemoryRetrievals(client, rows) {
 
 let _auditTimer = null;
 let _auditSchedulerStarted = false;
-let _auditOptionsGetter = null;
-let _auditBaseClient = null;
-let _auditBaseCfg = null;
+export let _auditOptionsGetter = null;
+export let _auditBaseClient = null;
+export let _auditBaseCfg = null;
+
+export function setAuditSchedulerContext(og, baseCfg, baseClient) {
+  _auditOptionsGetter = og;
+  if (baseCfg) _auditBaseCfg = baseCfg;
+  if (baseClient) _auditBaseClient = baseClient;
+}
 
 export function stopAuditScheduler() {
   if (_auditTimer) {
