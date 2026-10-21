@@ -33,6 +33,7 @@ export {
   testModelConnectivity} from "./extract.js";
 
 export {
+  turnFingerprint,
   fingerprint,
   processDialogueAndHarvest,
   triggerBackgroundDrain} from "./harvest-pipeline.js";

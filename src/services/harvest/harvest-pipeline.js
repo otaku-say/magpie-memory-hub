@@ -42,7 +42,7 @@ function safeEnqueueHarvestItems(items) {
 const RECENT_CAP = 1000;
 const recentFingerprints = new Map();
 
-function markRecent(fp) {
+function markRecentTurn(fp) {
   if (!fp) return;
   if (recentFingerprints.size >= RECENT_CAP) {
     const oldestKey = recentFingerprints.keys().next().value;
@@ -51,7 +51,7 @@ function markRecent(fp) {
   recentFingerprints.set(fp, Date.now());
 }
 
-function isRecent(fp) {
+function isRecentTurn(fp) {
   if (!fp) return false;
   const at = recentFingerprints.get(fp);
   if (!at) return false;
@@ -62,9 +62,11 @@ function isRecent(fp) {
   return true;
 }
 
-export function fingerprint(text) {
+export function turnFingerprint(text) {
   return crypto.createHash("sha256").update(String(text || "").trim()).digest("hex");
 }
+// 向后兼容别名：仅供旧调用方过渡，语义为对话轮次键，不可用于写库指纹（写库指纹用 domain/fingerprint.js）
+export const fingerprint = turnFingerprint;
 
 export async function processDialogueAndHarvest(dialogueText, meta = {}, client = null, options = {}) {
   if (!dialogueText || dialogueText.length < 20) {
@@ -203,14 +205,14 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
 
     const fp = semanticFingerprint(project, item.category || "fact", title, content, item.tags);
     const memKey = `m:${project}:${fp}`;
-    if (isRecent(memKey)) continue;
+    if (isRecentTurn(memKey)) continue;
 
     // 门禁按类型区分：非显式表达且显式指定了 minEvidenceMemory > 1 时进入 pending 门禁
     if (!isExplicit && minEvidenceMemory > 1) {
       const pendingRes = recordPendingEvidence(memKey, { ...item, project, agent }, {
         kind: "memory",
         minEvidence: minEvidenceMemory,
-        turnKey: fingerprint(dialogueText.slice(0, 300)),
+        turnKey: turnFingerprint(dialogueText.slice(0, 300)),
       });
       if (!pendingRes.shouldGraduate) {
         pendingSaved++;
@@ -250,12 +252,12 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       source_turn: sourceTurn,
     };
     safeEnqueueHarvestItems([{ id: queueId, table: "memories", data: memoryPayload, project, fp }]);
-    markRecent(memKey);
+    markRecentTurn(memKey);
     memoriesSaved++;
   }
 
   // 2. 入库 pitfalls（踩坑与失败规避）
-  const turnKey = fingerprint(dialogueText.slice(0, 300));
+  const turnKey = turnFingerprint(dialogueText.slice(0, 300));
   for (const item of failures) {
     const component = String(item.component || (item.tags && item.tags.split(",")[0]) || "general").trim();
     const symptom = String(item.symptom || item.title || "").trim();
@@ -263,7 +265,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
 
     const fp = item.content_fingerprint || semanticFingerprint(project, "pitfall", component, symptom);
     const pitKey = `p:${project}:${fp}`;
-    if (isRecent(pitKey)) continue;
+    if (isRecentTurn(pitKey)) continue;
 
     let recurrence = 1;
     // P0 证据门禁：非显式表达必须在 pending 累计达到 minEvidencePitfall（同一轮次 turnKey 去重）
@@ -306,7 +308,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       source_turn: sourceTurn,
     };
     safeEnqueueHarvestItems([{ id: queueId, table: "pitfalls", data: pitfallPayload, project, fp }]);
-    markRecent(pitKey);
+    markRecentTurn(pitKey);
     pitfallsSaved++;
   }
 
@@ -444,7 +446,7 @@ export async function triggerBackgroundDrain(client, options = {}) {
               _diag("drain_crystallized", `item ${item.id} memory crystallized into principle id=${res.id}`);
             }
             const fp = item.fp || item.data?.content_fingerprint || "";
-            if (fp) markRecent(`m:${project}:${fp}`);
+            if (fp) markRecentTurn(`m:${project}:${fp}`);
             successIds.push(item.id);
             batchSuccess++;
           } else if (item.table === "pitfalls") {
@@ -473,7 +475,7 @@ export async function triggerBackgroundDrain(client, options = {}) {
               actions.NOOP = (actions.NOOP || 0) + 1;
             }
             const fp = item.fp || item.data?.content_fingerprint || "";
-            if (fp) markRecent(`p:${project}:${fp}`);
+            if (fp) markRecentTurn(`p:${project}:${fp}`);
             successIds.push(item.id);
             batchSuccess++;
           }
@@ -482,7 +484,7 @@ export async function triggerBackgroundDrain(client, options = {}) {
           if (/duplicate|ER_DUP_ENTRY|already exists|1062/i.test(msg)) {
             const fp = item.fp || item.data?.content_fingerprint || "";
             const project = item.project || item.data?.project || "global";
-            if (fp) markRecent((item.table === "pitfalls" ? "p:" : "m:") + project + ":" + fp);
+            if (fp) markRecentTurn((item.table === "pitfalls" ? "p:" : "m:") + project + ":" + fp);
             successIds.push(item.id);
             batchSuccess++;
             actions.NOOP = (actions.NOOP || 0) + 1;
