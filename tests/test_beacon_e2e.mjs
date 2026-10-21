@@ -57,7 +57,10 @@ try {
 
   console.log("\n=== 3. 每个 op 都要有执行分支与卡片归属 ===");
   {
-    const src = readFileSync(path.join(ROOT, "page_actions.js"), "utf8");
+    const pageActionsPath = existsSync(path.join(ROOT, "src/page/actions.js"))
+      ? path.join(ROOT, "src/page/actions.js")
+      : path.join(ROOT, "page_actions.js");
+    const src = readFileSync(pageActionsPath, "utf8");
     // status 走的是 execute() 末尾的 else 兜底分支（dbStatus），不必显式列 op
     const viaElse = new Set(["status"]);
     const missingExec = [...sentOps].filter((op) =>

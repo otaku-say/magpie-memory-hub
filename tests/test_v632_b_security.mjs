@@ -209,7 +209,10 @@ console.log("▶ [Test 2] validateGatewayDir 合法目录放行与敏感路径�
 console.log("▶ [Test 3] harvest_gateway 生产副作用消除与 memory_audit 状态落盘竞态消除验证...");
 {
   // 3.1 静态检查 page_actions.js 中 harvest_gateway safeOpts 显式禁用生产副作用
-  const pageActionsCode = fs.readFileSync(path.resolve("page_actions.js"), "utf8");
+  const pageActionsPath = fs.existsSync(path.resolve("src/page/actions.js"))
+    ? path.resolve("src/page/actions.js")
+    : path.resolve("page_actions.js");
+  const pageActionsCode = fs.readFileSync(pageActionsPath, "utf8");
   assert.ok(
     pageActionsCode.includes("auto_init: false") && pageActionsCode.includes("auto_harvest: false") && pageActionsCode.includes("dedup_schedule: \"off\""),
     "harvest_gateway safeOpts 必须显式禁用 auto_init、auto_harvest 与 dedup_schedule"
