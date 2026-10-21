@@ -260,6 +260,7 @@
       <span class="sub">知识提炼 · 意图判定 · 错误智能诊断 · 搜索自然语言改写</span>
     </summary>
     <div class="body">
+      <datalist id="magpie_known_models"></datalist>
       <div class="row">
         <div class="row-head">
           <label for="extract_model">提炼与诊断模型 (extract_model)</label>
@@ -270,7 +271,7 @@
           <div class="hint-diff"><strong>留空</strong>：安全跳过模型提炼与智能诊断，零网络请求与额外开销；<strong>填写示例</strong>：<code>group/gemini-3.5-flash-lite</code>。</div>
         </div>
         <div class="control">
-          <input type="text" id="extract_model" placeholder="例如：group/gemini-3.5-flash-lite" spellcheck="false">
+          <input type="text" id="extract_model" list="magpie_known_models" placeholder="例如：group/gemini-3.5-flash-lite" spellcheck="false">
         </div>
       </div>
 
@@ -284,7 +285,7 @@
           <div class="hint-diff"><strong>留空</strong>：跳过前置过滤直接提炼；<strong>填写示例</strong>：<code>group/clef</code>。</div>
         </div>
         <div class="control">
-          <input type="text" id="classify_model" placeholder="例如：group/clef" spellcheck="false">
+          <input type="text" id="classify_model" list="magpie_known_models" placeholder="例如：group/clef" spellcheck="false">
         </div>
       </div>
 
@@ -298,7 +299,7 @@
           <div class="hint-diff"><strong>留空</strong>：自动回退至提炼模型 (extract_model)；<strong>填写示例</strong>：<code>group/claude-3-7-sonnet</code>。</div>
         </div>
         <div class="control">
-          <input type="text" id="audit_model" placeholder="例如：group/claude-3-7-sonnet（留空则回退至提炼模型）" spellcheck="false">
+          <input type="text" id="audit_model" list="magpie_known_models" placeholder="例如：group/claude-3-7-sonnet（留空则回退至提炼模型）" spellcheck="false">
         </div>
       </div>
 
