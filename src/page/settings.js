@@ -1,3 +1,8 @@
+/**
+ * 模块职责：Memory Hub 设置页前端交互逻辑（浏览器脚本）
+ * 依赖：settings.html（DOM 结构）、宿主 Magpie 桥接 API
+ * 被依赖：settings.html 通过 <script src> 加载
+ */
 /* settings.js — 记忆中枢设置页
  *
  * 页面跑在 Magpie 窗口的沙箱 iframe 里（allow-scripts，connect-src 'none'），
