@@ -3887,9 +3887,11 @@ const TOOLS = {
         content: { type: "string", description: "记忆正文/摘要，要具体、可复用" },
         full_text: { type: "string", description: "完整原文（可选，未提供时默认等于 content）" },
         tags: { type: "string", description: "逗号分隔的检索关键词" },
-        related_entities: { type: "string", description: "相关实体/技术栈" },
+        related_entities: { type: "string", description: "关联实体，逗号分隔" },
         confidence: { type: "number", description: "置信度 0~1，默认 1" },
         recurrence: { type: "integer", description: "观察与复发次数，默认 1" },
+        supersede_id: { type: "number", description: "要取代的旧记录 ID（显式取代走 UPDATE）" },
+        supersede: { type: "boolean", description: "强制以新内容扩充/覆盖同标题记录" },
       },
       required: ["title", "content"],
     },
@@ -3938,6 +3940,7 @@ const TOOLS = {
         project: { type: "string", description: "限定项目" },
         max_items: { type: "integer", description: "最多条数，默认取插件配置" },
         max_chars: { type: "integer", description: "字符预算，默认取插件配置" },
+        max_principles: { type: "number", description: "置顶准则条数上限，默认 2" },
       },
     },
     run: (args, ctx) => memoryContext(ctx._client, ctx._cfg, args),
@@ -4006,6 +4009,8 @@ const TOOLS = {
         severity: { type: "string", enum: SEVERITIES },
         error_type: { type: "string", description: "错误类型标签，便于聚类" },
         tags: { type: "string", description: "检索关键词" },
+        related_entities: { type: "string", description: "关联实体，逗号分隔" },
+        recurrence: { type: "number", description: "本次复发次数，默认 1" },
         source_session: { type: "string", description: "来源会话标识（如客户端会话 ID，可选）" },
         source_turn: { type: "integer", description: "来源会话轮次序号（从 1 起始，可选）" },
       },
@@ -4207,15 +4212,22 @@ export const MagpieMemoryHub = async (input, options) => {
   const cfg = readOptions(mergedOpts);
   const client = (mergedOpts && (mergedOpts._client || mergedOpts.client)) || makeClient(cfg);
 
+  /* 【BUG-39-4a 治本修复】提前解析 _no_scheduler 隔离标记：
+   * 当 noScheduler 为 true 时（如后台 drain 消费构造的临时实例），
+   * 必须阻断入口副作用：不写 _status.js 的 db 卡片、不触发 autoInit、不触发 autoHarvest。 */
+  const noScheduler = (options && options._no_scheduler === true) || (input && input._no_scheduler === true);
+
   // 同步将当前库的前缀解析状态写入 _status.js，供设置页即时只读展示真实库名
-  try {
-    const rawDb = (options && (options.ncb_instance || options.instance)) || cfg.instance || "";
-    if (rawDb) {
-      const dbInfo = parseDbInfo(rawDb);
-      writeCardStatus("db", dbInfo);
+  if (!noScheduler) {
+    try {
+      const rawDb = (options && (options.ncb_instance || options.instance)) || cfg.instance || "";
+      if (rawDb) {
+        const dbInfo = parseDbInfo(rawDb);
+        writeCardStatus("db", dbInfo);
+      }
+    } catch (e) {
+      console.error("[memory-hub] db prefix sync error:", (e && e.message) || e);
     }
-  } catch (e) {
-    console.error("[memory-hub] db prefix sync error:", (e && e.message) || e);
   }
 
   /* ---- 设置页按钮提交的待办任务 ----
@@ -4240,7 +4252,7 @@ export const MagpieMemoryHub = async (input, options) => {
   /* ---- auto_init 自愈 ----
    * 不 await：初始化可能要一次网络往返，而工具枚举不该为此等待。
    * 宿主进程长驻，这个 promise 会自行跑完。 */
-  if (cfg.autoInit && cfg.mcpKey && !isTestMode()) {
+  if (!noScheduler && cfg.autoInit && cfg.mcpKey && !isTestMode()) {
     dbInit(cfg, {}).catch((e) => {
       console.error("[memory-hub] auto_init 失败：" + String(e && e.message || e));
     });
@@ -4250,7 +4262,7 @@ export const MagpieMemoryHub = async (input, options) => {
    * 不 await：增量扫描在后台异步执行，不给常规工具枚举引入网络/磁盘延迟。
    * 仅在 options.auto_harvest 为 true 时开启，默认 false 以防隐私越界。
    * 严禁在测试环境中启动真实增量扫描。 */
-  if (cfg.autoHarvest && !isTestMode()) {
+  if (!noScheduler && cfg.autoHarvest && !isTestMode()) {
     harvestGateway({}, {
       _client: client,
       _cfg: cfg,
@@ -4268,7 +4280,6 @@ export const MagpieMemoryHub = async (input, options) => {
    * 当 noScheduler 为 true 时（如后台 drain 消费构造的临时实例），
    * 跳过整个调度器生命周期管理——不调用 ensureAuditScheduler、不调用 stopAuditScheduler、
    * 不赋值 _auditOptionsGetter、不改 _auditBaseCfg/_auditBaseClient。 */
-  const noScheduler = (options && options._no_scheduler === true) || (input && input._no_scheduler === true);
   const optionsGetter = () => readOptions(Object.assign({}, input && typeof input === "object" ? input : {}, options && typeof options === "object" ? options : {}));
 
   if (!noScheduler) {
