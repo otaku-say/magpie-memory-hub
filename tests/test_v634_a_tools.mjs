@@ -24,6 +24,10 @@ const checkScheduledDedup = MagpieMemoryHub.checkScheduledDedup;
 import { scanTestFile } from "./test_meta.mjs";
 import { createTestEnv } from "./lib/testenv.mjs";
 
+// 测试数据必须用「当前时间」构造：定时去重按 schedule 计算 updated_after 窗口，
+// 硬编码过去时间会随日期推移滑出窗口，导致扫描 0 条（时间炸弹）。
+const NOW_STR = new Date().toISOString().slice(0, 19).replace("T", " ");
+
 function parseOut(res) {
   if (typeof res === "string") {
     try {
@@ -97,8 +101,8 @@ async function run() {
         lifecycle_status: "active",
         recurrence: 1,
         tags: "scheduled, relay",
-        created_at: "2026-10-20 12:00:00",
-        updated_at: "2026-10-20 12:00:00",
+        created_at: NOW_STR,
+        updated_at: NOW_STR,
       });
     }
 
@@ -187,8 +191,8 @@ async function run() {
         lifecycle_status: "active",
         recurrence: 1,
         tags: `chunk, test${i}`,
-        created_at: "2026-10-20 12:00:00",
-        updated_at: "2026-10-20 12:00:00",
+        created_at: NOW_STR,
+        updated_at: NOW_STR,
       });
     }
 
