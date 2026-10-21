@@ -990,6 +990,11 @@ function normalizeToolArgs(rawArgs, cfg) {
     if (args.text != null && args.text !== "") args.content = args.text;
     else if (args.body != null && args.body !== "") args.content = args.body;
   }
+  // cause / reason → root_cause (BUG-37-4b)
+  if (args.root_cause == null || args.root_cause === "") {
+    if (args.cause != null && args.cause !== "") args.root_cause = args.cause;
+    else if (args.reason != null && args.reason !== "") args.root_cause = args.reason;
+  }
 
   // 2. tags / related_entities 容错：若为数组则 join(",")；若为字符串保持
   if (Array.isArray(args.tags)) {
@@ -1307,7 +1312,8 @@ async function memoryList(client, cfg, rawArgs) {
 
     if (cat === "preference" || cat === "decision") {
       const rec = Number(r.recurrence) || 1;
-      if (rec >= threshold - 1) {
+      const conf = r.confidence_score != null ? Number(r.confidence_score) : 100;
+      if (rec >= threshold - 1 && conf >= 80) {
         nearCandidates.push({
           id: r.id,
           title: r.title,
@@ -1321,11 +1327,54 @@ async function memoryList(client, cfg, rawArgs) {
   nearCandidates.sort((a, b) => b.recurrence - a.recurrence);
   const nearCrystallization = nearCandidates.slice(0, 5);
 
+  // EVO-12: chronic_pitfalls 顽疾画像（当前 project 含 global 穿透，invalid_at 为空且 recurrence >= 3，按 recurrence 降序最多 5 条）
+  let chronicPitfalls = [];
+  try {
+    const pitfallColumns = ["id", "project", "component", "symptom", "recurrence", "invalid_at"];
+    let rawPitfalls = [];
+    if (projectArg && projectArg !== "global") {
+      const [projPits, globalPits] = await Promise.all([
+        fetchAll(client, "pitfalls", { project: projectArg, columns: pitfallColumns }),
+        fetchAll(client, "pitfalls", { project: "global", columns: pitfallColumns }),
+      ]);
+      const seen = new Set();
+      for (const r of projPits) {
+        if (r && r.id != null && !seen.has(r.id)) {
+          seen.add(r.id);
+          rawPitfalls.push(r);
+        }
+      }
+      for (const r of globalPits) {
+        if (r && r.id != null && !seen.has(r.id)) {
+          seen.add(r.id);
+          rawPitfalls.push(r);
+        }
+      }
+    } else {
+      const pitParams = { columns: pitfallColumns };
+      if (projectArg) pitParams.project = projectArg;
+      rawPitfalls = await fetchAll(client, "pitfalls", pitParams);
+    }
+    chronicPitfalls = rawPitfalls
+      .filter((r) => r && !r.invalid_at && (Number(r.recurrence) || 0) >= 3)
+      .sort((a, b) => (Number(b.recurrence) || 0) - (Number(a.recurrence) || 0))
+      .slice(0, 5)
+      .map((r) => ({
+        id: r.id,
+        component: r.component || "general",
+        symptom: String(r.symptom || "").slice(0, 60),
+        recurrence: Number(r.recurrence) || 1,
+      }));
+  } catch (_) {
+    chronicPitfalls = [];
+  }
+
   const knowledgeProfile = {
     principle_count: principleCount,
     preference_count: preferenceCount,
     decision_count: decisionCount,
     near_crystallization: nearCrystallization,
+    chronic_pitfalls: chronicPitfalls,
     total_active: all.length,
   };
 
@@ -2233,10 +2282,27 @@ async function memoryGet(client, cfg, rawArgs) {
     }
   }
 
+  function getLifecycleWarning(hit) {
+    const isInvalid = Boolean((hit.invalid_at && String(hit.invalid_at).trim() !== "") || (hit.lifecycle_status && hit.lifecycle_status !== "active"));
+    if (!isInvalid) return null;
+    const superId = (hit.superseded_by_id != null && String(hit.superseded_by_id).trim() !== "")
+      ? Number(hit.superseded_by_id)
+      : null;
+    if (superId) {
+      return `该记录已被 #${superId} 取代，可调 memory_get(id=${superId}) 查看最新版本`;
+    }
+    const reason = (hit.invalid_reason != null && String(hit.invalid_reason).trim() !== "")
+      ? String(hit.invalid_reason).trim()
+      : "未注明";
+    return `该记录已失效（原因: ${reason}）`;
+  }
+
   function formatMemoryRecord(hit, count, lastUsed, historyInfo) {
     const full = (hit.full_text != null && String(hit.full_text).trim() !== "")
       ? hit.full_text
       : hit.content;
+    const isInvalid = Boolean((hit.invalid_at && String(hit.invalid_at).trim() !== "") || (hit.lifecycle_status && hit.lifecycle_status !== "active"));
+    const warning = getLifecycleWarning(hit);
     const rec = {
       id: hit.id,
       project: hit.project,
@@ -2253,6 +2319,11 @@ async function memoryGet(client, cfg, rawArgs) {
       retrieval_count: count,
       last_used_at: lastUsed,
       revision: Number(hit.revision) || 1,
+      lifecycle_status: hit.lifecycle_status || (isInvalid ? "invalid" : "active"),
+      invalid_at: (hit.invalid_at && String(hit.invalid_at).trim() !== "") ? hit.invalid_at : null,
+      invalid_reason: hit.invalid_reason || "",
+      superseded_by_id: (hit.superseded_by_id != null && String(hit.superseded_by_id).trim() !== "") ? Number(hit.superseded_by_id) : null,
+      _lifecycle_warning: warning || null,
       _note: "已返回完整原文（见 full_text 与 content），summary 为注入卡片所用摘要",
     };
     if (Number(hit.revision) > 1) {
@@ -2265,6 +2336,8 @@ async function memoryGet(client, cfg, rawArgs) {
   }
 
   function formatPitfallRecord(hit, autoFallback = false) {
+    const isInvalid = Boolean((hit.invalid_at && String(hit.invalid_at).trim() !== "") || (hit.lifecycle_status && hit.lifecycle_status !== "active"));
+    const warning = getLifecycleWarning(hit);
     const rec = {
       id: hit.id,
       project: hit.project,
@@ -2281,8 +2354,11 @@ async function memoryGet(client, cfg, rawArgs) {
       content: `【症状】${hit.symptom}\n【根因】${hit.root_cause}\n【解法】${hit.solution}`,
       full_text: `【症状】${hit.symptom}\n【根因】${hit.root_cause}\n【解法】${hit.solution}`,
       summary: `${hit.symptom} → ${hit.solution}`,
-      invalid_at: hit.invalid_at || null,
+      lifecycle_status: hit.lifecycle_status || (isInvalid ? "invalid" : "active"),
+      invalid_at: (hit.invalid_at && String(hit.invalid_at).trim() !== "") ? hit.invalid_at : null,
       invalid_reason: hit.invalid_reason || "",
+      superseded_by_id: (hit.superseded_by_id != null && String(hit.superseded_by_id).trim() !== "") ? Number(hit.superseded_by_id) : null,
+      _lifecycle_warning: warning || null,
       last_occurred_at: hit.last_occurred_at || now,
       _note: "已返回踩坑排障完整记录",
     };
