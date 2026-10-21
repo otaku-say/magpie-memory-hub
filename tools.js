@@ -555,8 +555,23 @@ async function saveMemory(client, cfg, m, ctx) {
   const allActiveRows = rowsOf(await client.list("memories", queryParams));
   let categoryRows = allActiveRows.filter((r) => !category || r.category === category);
 
-  // 2) Layer ① 语义指纹查重 + Layer ② 局部滑动窗口语义相似度比对
-  const dup = findSemanticDuplicate(categoryRows, title, content, fp);
+  // BUG-38-2: 支持显式指定 supersede_id（提到 dup 查重之前）
+  const targetSupersedeId = (m.supersede_id != null && m.supersede_id !== "" && !isNaN(Number(m.supersede_id)))
+    ? Number(m.supersede_id)
+    : null;
+  let targetSupersedeRow = targetSupersedeId ? allActiveRows.find((r) => r.id === targetSupersedeId) : null;
+  if (targetSupersedeId && !targetSupersedeRow) {
+    try {
+      const fetched = rowsOf(await client.list("memories", { id: targetSupersedeId, limit: 1 }));
+      if (fetched.length > 0) targetSupersedeRow = fetched[0];
+    } catch (_) {}
+  }
+  const hasValidSupersede = Boolean(targetSupersedeId && targetSupersedeRow);
+
+  // 当 targetSupersedeId 有效时，跳过 dup 与 crossDup 的 NOOP 短路（显式取代是最高优先级意图）
+  if (!hasValidSupersede) {
+    // 2) Layer ① 语义指纹查重 + Layer ② 局部滑动窗口语义相似度比对
+    const dup = findSemanticDuplicate(categoryRows, title, content, fp);
   if (dup) {
     const next = (Number(dup.recurrence) || 1) + initialRecurrence;
     const now = nowSql();
@@ -755,13 +770,9 @@ async function saveMemory(client, cfg, m, ctx) {
       if (!/404|not found/i.test(String(e.message))) throw e;
     }
   }
+  }
 
-  // 3) 支持显式指定 supersede_id 与按标题版本链取代
-  const targetSupersedeId = (m.supersede_id != null && m.supersede_id !== "" && !isNaN(Number(m.supersede_id)))
-    ? Number(m.supersede_id)
-    : null;
-  const targetSupersedeRow = targetSupersedeId ? allActiveRows.find((r) => r.id === targetSupersedeId) : null;
-
+  // 3) 按标题版本链取代与构建修订版本号
   const superseded = categoryRows.filter(
     (r) =>
       r.lifecycle_status === "active" &&
@@ -1666,12 +1677,79 @@ async function memoryContext(client, cfg, rawArgs) {
   // P1-7: 异步非阻塞递增 retrieval_count 并更新 last_used_at
   trackMemoryRetrievals(client, matchedMemories);
 
-  return jsonOut({
+  // EVO-14: evolution_opportunities 演进契机自省计算
+  // 内联根因与解法占位检测（保持与 isPlaceholderRootCause / isMeaningfulIronlaw 语义一致）
+  const checkRootCausePlaceholder = (rc, sym) => {
+    if (!rc || !String(rc).trim()) return true;
+    const s = String(rc).trim();
+    if (sym && s.toLowerCase() === String(sym).trim().toLowerCase()) return true;
+    if (/未知|待查|临时|unknown|todo|tbd|已处置解决|执行过程中出现/i.test(s)) return true;
+    return false;
+  };
+
+  const checkSolutionPlaceholder = (sol) => {
+    if (!sol || !String(sol).trim()) return true;
+    const s = String(sol).trim();
+    if (/未知|待查|临时|unknown|todo|tbd/i.test(s)) return true;
+    return false;
+  };
+
+  const crystallizationThreshold = Number(args.crystallization_threshold ?? cfg?.crystallization_threshold ?? 5) || 5;
+  const nearIronlaw = [];
+  const chronicWithoutRootCause = [];
+
+  for (const pit of topPitfalls) {
+    const rec = Number(pit.recurrence) || 1;
+    const rcIsPlaceholder = checkRootCausePlaceholder(pit.root_cause, pit.symptom);
+    const solIsPlaceholder = checkSolutionPlaceholder(pit.solution);
+
+    // 1) near_ironlaw: recurrence >= (crystallization_threshold - 1) 且 root_cause/solution 真实非占位
+    if (rec >= (crystallizationThreshold - 1) && !rcIsPlaceholder && !solIsPlaceholder) {
+      const missingCount = Math.max(1, crystallizationThreshold - rec);
+      nearIronlaw.push({
+        id: pit.id,
+        component: pit.component || "general",
+        symptom: String(pit.symptom || "").slice(0, 60),
+        recurrence: rec,
+        missing: missingCount,
+      });
+    }
+
+    // 2) chronic_without_root_cause: recurrence >= 3 且 root_cause 为空或占位
+    if (rec >= 3 && rcIsPlaceholder) {
+      chronicWithoutRootCause.push({
+        id: pit.id,
+        component: pit.component || "general",
+        symptom: String(pit.symptom || "").slice(0, 60),
+        recurrence: rec,
+      });
+    }
+  }
+
+  const hasEvolutionOpportunities = nearIronlaw.length > 0 || chronicWithoutRootCause.length > 0;
+  let dynamicAgentHint = "若本次任务产出了新结论、配置变更或排障解法，请在结束前调用 memory_save 或 pitfall_save 沉淀。";
+  if (nearIronlaw.length > 0) {
+    const missingN = nearIronlaw[0].missing;
+    dynamicAgentHint += ` 再记录 ${missingN} 次该故障即可自动生成铁律。`;
+  }
+  if (chronicWithoutRootCause.length > 0) {
+    dynamicAgentHint += " 该顽疾缺真实根因，排查后请用 pitfall_save 补 root_cause。";
+  }
+
+  const contextResult = {
     injected: n,
     chars: block.length,
     block: n ? block.trim() : "",
-    _agent_hint: "若本次任务产出了新结论、配置变更或排障解法，请在结束前调用 memory_save 或 pitfall_save 沉淀。",
-  });
+    _agent_hint: dynamicAgentHint,
+  };
+  if (hasEvolutionOpportunities) {
+    contextResult.evolution_opportunities = {
+      near_ironlaw: nearIronlaw,
+      chronic_without_root_cause: chronicWithoutRootCause,
+    };
+  }
+
+  return jsonOut(contextResult);
 }
 
 async function pitfallSave(client, cfg, rawArgs, ctx) {
@@ -2249,11 +2327,27 @@ async function pitfallSearch(client, cfg, rawArgs) {
     }
   }
 
-  const out = scored.slice(0, limit).map((x) => Object.assign({}, x.row, {
-    _hit: x.hit,
-    _rerank_score: x._rerank_score || null,
-    _rerank_reason: x._rerank_reason || null,
-  }));
+  // EVO-15: 透出诊断标记（内联根因占位判断，与 isPlaceholderRootCause 语义保持一致，后续可提取公共函数）
+  const checkRootCausePlaceholder = (rc, sym) => {
+    if (!rc || !String(rc).trim()) return true;
+    const s = String(rc).trim();
+    if (sym && s.toLowerCase() === String(sym).trim().toLowerCase()) return true;
+    if (/未知|待查|临时|unknown|todo|tbd|已处置解决|执行过程中出现/i.test(s)) return true;
+    return false;
+  };
+
+  const out = scored.slice(0, limit).map((x) => {
+    const rec = Number(x.row.recurrence) || 1;
+    const isChronic = rec >= 3;
+    const rcIsPlaceholder = checkRootCausePlaceholder(x.row.root_cause, x.row.symptom);
+    return Object.assign({}, x.row, {
+      is_chronic: isChronic,
+      root_cause_is_placeholder: rcIsPlaceholder,
+      _hit: x.hit,
+      _rerank_score: x._rerank_score || null,
+      _rerank_reason: x._rerank_reason || null,
+    });
+  });
   return jsonOut({
     total_pitfalls: all.length,
     matched: scored.length,
