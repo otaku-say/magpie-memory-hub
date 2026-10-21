@@ -90,6 +90,8 @@ function readOptions(options) {
   const rawInst = o.ncb_instance || lookupDatabase() || "41694_agent_memory";
   const instance = lookupRealDatabase(rawInst) || rawInst;
   return {
+    // 宿主权威目录（由 input.directory / ctx.directory / settings.Dir() 透传）
+    hostDirectory: o.hostDirectory || o.host_directory || o.directory || "",
     // 库名：优先按用户填的并归一化解析；没填就用上次 provision 真正用到的那个
     instance,
     // Secret Key：用户在设置页填的优先；
@@ -4278,6 +4280,7 @@ const TOOLS = {
       _client: ctx._client,
       _cfg: ctx._cfg,
       _ctx: ctx._ctx,
+      _input: ctx._input,
       saveMemory,
       pitfallSave,
       signal: ctx.signal,
@@ -4290,7 +4293,15 @@ const TOOLS = {
  * ================================================================== */
 
 export const MagpieMemoryHub = async (input, options) => {
-  const mergedOpts = Object.assign({}, input && typeof input === "object" ? input : {}, options && typeof options === "object" ? options : {});
+  const hostDir = (input && typeof input.directory === "string" && input.directory)
+    || (options && typeof options.directory === "string" && options.directory)
+    || "";
+  const mergedOpts = Object.assign(
+    {},
+    input && typeof input === "object" ? input : {},
+    options && typeof options === "object" ? options : {},
+    hostDir ? { hostDirectory: hostDir, directory: hostDir } : {}
+  );
   const cfg = readOptions(mergedOpts);
   const client = (mergedOpts && (mergedOpts._client || mergedOpts.client)) || makeClient(cfg);
 
@@ -4348,6 +4359,7 @@ export const MagpieMemoryHub = async (input, options) => {
     harvestGateway({}, {
       _client: client,
       _cfg: cfg,
+      _input: input,
       saveMemory,
       pitfallSave,
     }).catch((e) => {
