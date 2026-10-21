@@ -124,3 +124,26 @@ node tests/test_proactive_memory_ux.mjs # 主动记忆、一站式召回与脱�
 node tests/settings_page_test.mjs    # 设置页表单与 DOM 交互测试
 node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 ```
+
+---
+
+## 项目结构
+
+```
+├── src/
+│   ├── core/           基础设施（配置、状态、时间）
+│   ├── domain/         领域逻辑（指纹、评分、去重）
+│   ├── integration/    外部集成（NCB、R2、MCP、模型）
+│   ├── middleware/     中间件（注入、流处理）
+│   ├── services/       业务服务
+│   │   ├── save/       记忆存储
+│   │   ├── audit/      审计调度
+│   │   └── harvest/    对话采集
+│   ├── tools/          MCP 工具入口
+│   └── page/           设置页面
+├── tests/              测试套件（88 套）
+├── docs/               架构文档与决策记录
+└── *.js                薄门面（re-export，保持外部引用稳定）
+```
+
+详见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。
