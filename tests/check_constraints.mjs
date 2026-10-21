@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import assert from "node:assert";
 /**
  * tests/check_constraints.mjs
  *
@@ -119,10 +120,12 @@ console.log("=".repeat(56));
 if (issues.length === 0) {
   console.log("✓ 未发现质量底线退化");
   console.log("=".repeat(56));
-  process.exit(0);
+  assert.ok(true, "约束检查通过");
+process.exit(0);
 } else {
   for (const i of issues) console.log("✗ " + i);
   console.log("=".repeat(56));
   console.log(`❌ 发现 ${issues.length} 项退化，违反 CONSTRAINTS.md`);
-  process.exit(1);
+  assert.fail("约束检查失败");
+process.exit(1);
 }

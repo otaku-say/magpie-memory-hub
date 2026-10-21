@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import assert from "node:assert";
 /**
  * tests/check_cycles.mjs
  *
@@ -110,7 +111,8 @@ console.log("=".repeat(60));
 
 if (realCycles.length === 0) {
   console.log("✓ 无任何循环依赖！");
-  process.exit(0);
+  assert.ok(true, "检查通过");
+process.exit(0);
 }
 
 console.log(`✗ 发现 ${realCycles.length} 个循环依赖环：\n`);
@@ -123,4 +125,5 @@ for (const comp of realCycles) {
   console.log("");
 }
 console.log("修复思路：找到环内最「反向」的那条边，用依赖注入或下沉到低层模块来切断。");
+assert.fail("检查失败");
 process.exit(1);

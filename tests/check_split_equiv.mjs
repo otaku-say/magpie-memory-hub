@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import assert from "node:assert";
 /**
  * tests/check_split_equiv.mjs
  *
@@ -59,7 +60,8 @@ try {
   baselineSrc = sh(`git show ${BASELINE_COMMIT}:${BASELINE_FILE}`);
 } catch {
   console.log(`✗ 无法读取基线 ${BASELINE_COMMIT}:${BASELINE_FILE}`);
-  process.exit(1);
+  assert.fail("检查失败");
+process.exit(1);
 }
 
 const baseFns = extractFunctions(baselineSrc);
@@ -102,7 +104,8 @@ for (const [name, baseLen] of baseFns) {
 if (missing.length === 0 && drift.length === 0) {
   console.log(`\n✓ ${baseFns.size} 个函数全部存在，且同名函数行数变化均 ≤ ${MAX_LINE_DELTA} 行`);
   console.log("✅ check_split_equiv 通过");
-  process.exit(0);
+  assert.ok(true, "检查通过");
+process.exit(0);
 }
 
 if (missing.length) {

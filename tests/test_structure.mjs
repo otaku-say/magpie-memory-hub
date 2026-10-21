@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import assert from "node:assert";
 /**
  * tests/test_structure.mjs
  *
@@ -119,9 +120,11 @@ for (const w of warns) console.log(w);
 
 if (issues.length === 0) {
   console.log("\n✅ 目录结构守护断言全部通过！");
-  process.exit(0);
+  assert.ok(true, "检查通过");
+process.exit(0);
 }
 
 console.log(`\n❌ 发现 ${issues.length} 项结构违规：`);
 for (const i of issues) console.log("  ✗ " + i);
+assert.fail("检查失败");
 process.exit(1);

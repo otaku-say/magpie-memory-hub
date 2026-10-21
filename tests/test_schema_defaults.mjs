@@ -37,7 +37,7 @@ const SRC = Object.fromEntries(FILES.map((f) => {
     try {
       text += "\n" + read("src/services/save/memory-saver.js");
       text += "\n" + read("src/tools/pitfall-save.js");
-    } catch (_) {}
+    } catch (_) { /* fail-open：读不到文件就用空文本 */ }
   }
   return [f, text];
 }));
