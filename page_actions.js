@@ -340,11 +340,20 @@ async function execute(action, cfg, fs, sp, state, options) {
     else if (action.op === "sync_snapshot") {
       let memories = [];
       try {
-        if (!client) {
-          const { makeClient } = await import("./tools.js");
-          client = makeClient(cfg);
+        let fetchFn = null;
+        try {
+          const toolsMod = await import("./tools.js");
+          if (!client) client = toolsMod.makeClient(cfg);
+          fetchFn = toolsMod.fetchAll;
+        } catch (_) {
+          if (!client) {
+            const { makeClient } = await import("./tools.js");
+            client = makeClient(cfg);
+          }
         }
+
         const prj = String(action.project || (cfg && cfg.project) || (options && options.project) || "").trim();
+        let activeMemories = [];
         if (prj && prj !== "global") {
           // 在有 project 上下文时支持按 project + global 过滤，杜绝跨项目混淆
           const [projRes, globalRes] = await Promise.all([
@@ -386,7 +395,9 @@ async function execute(action, cfg, fs, sp, state, options) {
             if (aIsProj !== bIsProj) return bIsProj - aIsProj;
             return Date.parse(b.updated_at || b.created_at || 0) - Date.parse(a.updated_at || a.created_at || 0);
           });
-          memories = combined.slice(0, 50);
+          activeMemories = combined
+            .filter((m) => m && !m.invalid_at && (!m.lifecycle_status || m.lifecycle_status === "active"))
+            .slice(0, 50);
         } else {
           const queryParams = {
             lifecycle_status: "active",
@@ -397,8 +408,81 @@ async function execute(action, cfg, fs, sp, state, options) {
             queryParams.project = "global";
           }
           const resList = await client.list("memories", queryParams);
-          memories = Array.isArray(resList?.data) ? resList.data : (Array.isArray(resList) ? resList : []);
+          const rawMem = Array.isArray(resList?.data) ? resList.data : (Array.isArray(resList) ? resList : []);
+          activeMemories = rawMem
+            .filter((m) => m && !m.invalid_at && (!m.lifecycle_status || m.lifecycle_status === "active"))
+            .slice(0, 50);
         }
+
+        // FUNC-2: 同步拉取 pitfalls 表活跃记录并转换为中间件兼容快照条目
+        let pitfalls = [];
+        try {
+          if (typeof fetchFn === "function") {
+            if (prj && prj !== "global") {
+              const [pProj, pGlob] = await Promise.all([
+                fetchFn(client, "pitfalls", { project: prj }),
+                fetchFn(client, "pitfalls", { project: "global" }),
+              ]);
+              const seenP = new Set();
+              for (const r of [...pProj, ...pGlob]) {
+                const uid = r && (r.id != null ? r.id : `${r.project}:${r.symptom || ""}`);
+                if (uid != null && !seenP.has(uid)) {
+                  seenP.add(uid);
+                  pitfalls.push(r);
+                }
+              }
+            } else {
+              const q = prj === "global" ? { project: "global" } : {};
+              pitfalls = await fetchFn(client, "pitfalls", q);
+            }
+          } else if (client && typeof client.list === "function") {
+            if (prj && prj !== "global") {
+              const [projPitRes, globalPitRes] = await Promise.all([
+                client.list("pitfalls", { project: prj, limit: 50 }),
+                client.list("pitfalls", { project: "global", limit: 50 }),
+              ]);
+              const pProj = Array.isArray(projPitRes?.data) ? projPitRes.data : (Array.isArray(projPitRes) ? projPitRes : []);
+              const pGlob = Array.isArray(globalPitRes?.data) ? globalPitRes.data : (Array.isArray(globalPitRes) ? globalPitRes : []);
+              const seenP = new Set();
+              for (const r of [...pProj, ...pGlob]) {
+                const uid = r && (r.id != null ? r.id : `${r.project}:${r.symptom || ""}`);
+                if (uid != null && !seenP.has(uid)) {
+                  seenP.add(uid);
+                  pitfalls.push(r);
+                }
+              }
+            } else {
+              const q = { limit: 50 };
+              if (prj === "global") q.project = "global";
+              const pResList = await client.list("pitfalls", q);
+              pitfalls = Array.isArray(pResList?.data) ? pResList.data : (Array.isArray(pResList) ? pResList : []);
+            }
+          }
+        } catch (_) {}
+
+        const activePitfallSnapshots = (Array.isArray(pitfalls) ? pitfalls : [])
+          .filter((p) => p && !p.invalid_at && (!p.lifecycle_status || p.lifecycle_status === "active"))
+          .sort((a, b) => (Number(b.recurrence) || 1) - (Number(a.recurrence) || 1))
+          .slice(0, 50)
+          .map((p) => ({
+            id: p.id,
+            project: p.project || "global",
+            category: "pitfall",
+            scope_level: "project",
+            title: `${p.component || "general"}: ${String(p.symptom || p.title || "").slice(0, 80)}`,
+            content: `${p.symptom || p.title || ""} → ${p.solution || p.root_cause || p.content || ""}`,
+            symptom: p.symptom,
+            solution: p.solution,
+            root_cause: p.root_cause,
+            tags: p.tags || "",
+            related_entities: p.related_entities || p.component || "",
+            recurrence: Number(p.recurrence) || 1,
+            retrieval_count: Number(p.recurrence) || 1,
+            updated_at: p.updated_at || p.last_occurred_at,
+            lifecycle_status: "active",
+          }));
+
+        memories = activeMemories.concat(activePitfallSnapshots).slice(0, 500);
         result = {
           ok: true,
           at: Date.now(),
