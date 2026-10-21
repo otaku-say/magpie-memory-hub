@@ -1346,7 +1346,7 @@ async function memoryList(client, cfg, rawArgs) {
     if (cat === "preference" || cat === "decision") {
       const rec = Number(r.recurrence) || 1;
       const conf = r.confidence_score != null ? Number(r.confidence_score) : 100;
-      if (rec >= threshold - 1 && conf >= 80) {
+      if (rec >= threshold - 1 && rec < threshold && conf >= 80) {
         nearCandidates.push({
           id: r.id,
           title: r.title,
@@ -2416,7 +2416,11 @@ async function pitfallSearch(client, cfg, rawArgs) {
     rerank_used: rerankUsed,
     rerank_model: rerankModel,
     pitfalls: out,
-    _agent_hint: "若本次任务产出了新结论、配置变更或排障解法，请在结束前调用 memory_save 或 pitfall_save 沉淀。",
+    _agent_hint:
+      "若本次任务产出了新结论、配置变更或排障解法，请在结束前调用 memory_save 或 pitfall_save 沉淀。" +
+      (out.some((p) => p.is_chronic && p.root_cause_is_placeholder)
+        ? " 命中高频顽疾且缺真实根因，排查后请用 pitfall_save 补 root_cause。"
+        : ""),
   });
 }
 
@@ -4293,7 +4297,7 @@ export const MagpieMemoryHub = async (input, options) => {
    * 页面无法直接触发宿主动作（Magpie 没有这个通道），只能把「要做什么」
    * 写进 options 当一次性信标；这里在宿主加载时读取并执行。
    * 只在真有信标时才做网络调用，不给常规加载引入等待。 */
-  if (readAction(options)) {
+  if (!noScheduler && readAction(options)) {
     try {
       const r = await runPendingAction(options, cfg);
       if (r.ran) {
