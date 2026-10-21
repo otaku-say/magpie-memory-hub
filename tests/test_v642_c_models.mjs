@@ -31,7 +31,7 @@ const ROOT = path.resolve(__dirname, "..");
 
 const pkgPath = path.join(ROOT, "package.json");
 const htmlPath = path.join(ROOT, "settings.html");
-const jsPath = path.join(ROOT, "settings.js");
+const jsPath = path.join(ROOT, "src/page/settings.js");
 
 const rawPkg = fs.readFileSync(pkgPath, "utf8");
 const rawHtml = fs.readFileSync(htmlPath, "utf8");

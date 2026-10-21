@@ -395,7 +395,7 @@ async function runTests() {
   assert.strictEqual(requestedModel, "special-rerank-v1", "rerankSearchResultsWithModel 必须优先使用 rerank_model！");
 
   // 5.2 settings.js 静态检查：pollingTimers 与 countdownTimers 改为 Map，无单一全局计时器
-  const settingsJsContent = fs.readFileSync(path.resolve(__dirname, "../settings.js"), "utf8");
+  const settingsJsContent = fs.readFileSync(path.resolve(__dirname, "../src/page/settings.js"), "utf8");
   assert.ok(settingsJsContent.includes("var pollingTimers = new Map();"), "settings.js 必须使用 Map 存储 pollingTimers");
   assert.ok(settingsJsContent.includes("var countdownTimers = new Map();"), "settings.js 必须使用 Map 存储 countdownTimers");
   assert.ok(!settingsJsContent.includes("var pollingTimer = null;"), "settings.js 严禁保留全局单一 pollingTimer");

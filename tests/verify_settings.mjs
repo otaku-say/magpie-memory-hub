@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 
 const HTML = readFileSync(new URL("../settings.html", import.meta.url), "utf8");
-const JS = readFileSync(new URL("../settings.js", import.meta.url), "utf8");
+const JS = readFileSync(new URL("../src/page/settings.js", import.meta.url), "utf8");
 
 let fail = 0;
 const ok = (m) => console.log(`  ✓ ${m}`);
