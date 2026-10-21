@@ -504,8 +504,47 @@ async function saveMemory(client, cfg, m, ctx) {
     return { action: "NOOP", id: null, note: "刚刚写入过（写后读延迟窗口内），已忽略重复" };
   }
 
-  // 0.5) A③ 踩坑优先：检查 pitfalls 表中是否已存在该工程问题（principle 准则豁免，不得被 pitfalls 覆盖）
-  if (category !== "principle") {
+  // 1) 候选集拉取（按 project + lifecycle_status='active' 过滤，按 updated_at DESC 排序）
+  const queryParams = { project, lifecycle_status: "active", order_by: "updated_at DESC", limit: FETCH_LIMIT };
+  const allActiveRows = rowsOf(await client.list("memories", queryParams));
+  let categoryRows = allActiveRows.filter((r) => !category || r.category === category);
+
+  // BUG-38-2 / BUG-39-2: 支持显式指定 supersede_id（严格校验项目归属与有效性，前置到踩坑优先拦截之前）
+  const hasSupersedeParam = m.supersede_id !== undefined && m.supersede_id !== null && m.supersede_id !== "";
+  const targetSupersedeId = (hasSupersedeParam && !isNaN(Number(m.supersede_id)) && Number(m.supersede_id) > 0)
+    ? Number(m.supersede_id)
+    : null;
+  let targetSupersedeRow = targetSupersedeId
+    ? allActiveRows.find((r) =>
+        r.id === targetSupersedeId &&
+        r.project === project &&
+        !r.invalid_at &&
+        (!r.lifecycle_status || r.lifecycle_status === "active")
+      )
+    : null;
+  if (targetSupersedeId && !targetSupersedeRow) {
+    try {
+      const fetched = rowsOf(await client.list("memories", { id: targetSupersedeId, limit: 1 }));
+      if (fetched.length > 0) {
+        const cand = fetched[0];
+        if (cand && cand.project === project && !cand.invalid_at
+            && (!cand.lifecycle_status || cand.lifecycle_status === "active")) {
+          targetSupersedeRow = cand;
+        }
+      }
+    } catch (_) {}
+  }
+  if (hasSupersedeParam && (!targetSupersedeId || !targetSupersedeRow)) {
+    return {
+      action: "NOOP",
+      id: null,
+      note: "supersede_id 指向不存在/跨项目/已失效的记录，已忽略取代意图",
+    };
+  }
+  const hasValidSupersede = Boolean(targetSupersedeId && targetSupersedeRow);
+
+  // 0.5) A③ 踩坑优先：检查 pitfalls 表中是否已存在该工程问题（principle 准则豁免，且显式 supersede 时跳过）
+  if (category !== "principle" && !hasValidSupersede) {
     try {
       const pitfallRows = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT }));
       const normTitle = normalizeSemanticText(title);
@@ -549,24 +588,6 @@ async function saveMemory(client, cfg, m, ctx) {
       // fail-open
     }
   }
-
-  // 1) 候选集拉取（按 project + lifecycle_status='active' 过滤，按 updated_at DESC 排序）
-  const queryParams = { project, lifecycle_status: "active", order_by: "updated_at DESC", limit: FETCH_LIMIT };
-  const allActiveRows = rowsOf(await client.list("memories", queryParams));
-  let categoryRows = allActiveRows.filter((r) => !category || r.category === category);
-
-  // BUG-38-2: 支持显式指定 supersede_id（提到 dup 查重之前）
-  const targetSupersedeId = (m.supersede_id != null && m.supersede_id !== "" && !isNaN(Number(m.supersede_id)))
-    ? Number(m.supersede_id)
-    : null;
-  let targetSupersedeRow = targetSupersedeId ? allActiveRows.find((r) => r.id === targetSupersedeId) : null;
-  if (targetSupersedeId && !targetSupersedeRow) {
-    try {
-      const fetched = rowsOf(await client.list("memories", { id: targetSupersedeId, limit: 1 }));
-      if (fetched.length > 0) targetSupersedeRow = fetched[0];
-    } catch (_) {}
-  }
-  const hasValidSupersede = Boolean(targetSupersedeId && targetSupersedeRow);
 
   // 当 targetSupersedeId 有效时，跳过 dup 与 crossDup 的 NOOP 短路（显式取代是最高优先级意图）
   if (!hasValidSupersede) {
@@ -776,6 +797,7 @@ async function saveMemory(client, cfg, m, ctx) {
   const superseded = categoryRows.filter(
     (r) =>
       r.lifecycle_status === "active" &&
+      !r.invalid_at &&
       String(r.title || "").trim().toLowerCase() === title.toLowerCase()
   );
 
@@ -875,7 +897,7 @@ async function saveMemory(client, cfg, m, ctx) {
 
   // EVO-9a: 处理显式 supersede_id 与旧版 supersede 版本链
   const allSupersedeIds = new Set();
-  if (targetSupersedeId) allSupersedeIds.add(targetSupersedeId);
+  if (hasValidSupersede && targetSupersedeId) allSupersedeIds.add(targetSupersedeId);
   for (const s of superseded) {
     if (s && s.id) allSupersedeIds.add(s.id);
   }
@@ -884,7 +906,7 @@ async function saveMemory(client, cfg, m, ctx) {
     let updatedCount = 0;
     for (const sid of allSupersedeIds) {
       try {
-        const invReason = (sid === targetSupersedeId) ? `superseded-by:${newId}` : "superseded";
+        const invReason = (hasValidSupersede && sid === targetSupersedeId) ? `superseded-by:${newId}` : "superseded";
         await client.update("memories", sid, {
           lifecycle_status: "superseded",
           superseded_by_id: newId,
@@ -897,7 +919,7 @@ async function saveMemory(client, cfg, m, ctx) {
         if (!/404|not found/i.test(String(e.message))) throw e;
       }
     }
-    const returnSupersededId = targetSupersedeId || (superseded[0] && superseded[0].id);
+    const returnSupersededId = (hasValidSupersede && targetSupersedeId) || (superseded[0] && superseded[0].id);
     return {
       action: "UPDATE",
       id: newId,
@@ -905,7 +927,7 @@ async function saveMemory(client, cfg, m, ctx) {
       superseded_id: returnSupersededId,
       superseded_count: updatedCount || allSupersedeIds.size,
       recurrence: initialRecurrence,
-      note: targetSupersedeId ? `已显式取代旧记录 id=${targetSupersedeId}` : undefined,
+      note: (hasValidSupersede && targetSupersedeId) ? `已显式取代旧记录 id=${targetSupersedeId}` : undefined,
     };
   }
 
