@@ -1493,18 +1493,37 @@ async function memoryContext(client, cfg, rawArgs) {
   }
 
   // 2. 自动合并当前 project 与 global 下的 principle 准则，当前项目优先，全局兜底，杜绝全局准则丢失
-  const maxPrinciples = Number(args.max_principles ?? cfg.max_principles ?? 2) || 2;
-  const principles = pool
-    .filter((r) => String(r.category || "").toLowerCase() === "principle")
-    .sort((a, b) => {
-      if (projectArg && projectArg !== "global") {
-        const aProj = String(a.project || "") === projectArg ? 1 : 0;
-        const bProj = String(b.project || "") === projectArg ? 1 : 0;
-        if (aProj !== bProj) return bProj - aProj;
-      }
-      return rankMemory(b) - rankMemory(a);
-    })
-    .slice(0, maxPrinciples);
+  const maxPrinciples = Number(args.max_principles ?? cfg.max_principles ?? 3) || 3;
+  const allPrinciples = pool.filter((r) => String(r.category || "").toLowerCase() === "principle");
+  const principleOrder = (a, b) => {
+    if (projectArg && projectArg !== "global") {
+      const aProj = String(a.project || "") === projectArg ? 1 : 0;
+      const bProj = String(b.project || "") === projectArg ? 1 : 0;
+      if (aProj !== bProj) return bProj - aProj;
+    }
+    return rankMemory(b) - rankMemory(a);
+  };
+  let principles = allPrinciples.slice().sort(principleOrder).slice(0, maxPrinciples);
+  // 【保底席位】rankMemory = conf*(1+0.1*retrieval_count)*(0.5+0.5*freshness)，
+  // 新写入的 principle 的 retrieval_count 恒为 0，得分天然只有老原则的 2/3，
+  // 永远挤不进 Top N → 永远不被注入 → 永远积累不到 retrieval_count（死锁）。
+  // 规则：若「最近更新的一条 principle」不在已选列表中，就用它替换末位，保证新规范至少被看见一次。
+  if (maxPrinciples >= 2 && principles.length > 0) {
+    const tsOf = (r) => {
+      const raw = String(r.updated_at || r.created_at || "").replace(" ", "T");
+      const t = Date.parse(raw);
+      return isNaN(t) ? 0 : t;
+    };
+    const newest = allPrinciples.slice().sort((a, b) => {
+      const tb = tsOf(b);
+      const ta = tsOf(a);
+      if (tb !== ta) return tb - ta;
+      return Number(b.id || 0) - Number(a.id || 0);
+    })[0];
+    if (newest && !principles.some((p) => String(p.id) === String(newest.id))) {
+      principles = principles.slice(0, maxPrinciples - 1).concat([newest]);
+    }
+  }
 
   // 双路词面扩展打分：在线提炼模型改写自然语言查询（fail-open）
   let rewrittenInfo = null;
@@ -4003,7 +4022,7 @@ const TOOLS = {
         project: { type: "string", description: "限定项目" },
         max_items: { type: "integer", description: "最多条数，默认取插件配置" },
         max_chars: { type: "integer", description: "字符预算，默认取插件配置" },
-        max_principles: { type: "number", description: "置顶准则条数上限，默认 2" },
+        max_principles: { type: "number", description: "置顶准则条数上限，默认 3（含最新准则保底席位）" },
       },
     },
     run: (args, ctx) => memoryContext(ctx._client, ctx._cfg, args),
