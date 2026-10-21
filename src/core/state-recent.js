@@ -13,7 +13,7 @@ const RECENT_CAP = 5000;
  * 会让这 2 秒内的重复写入变成两条。宿主进程是长驻的，用一个【有时间窗】的
  * 表兜住这个窗口；窗口之外一律回落到数据库判重，保证计数能正常累加。
  */
-export let recentWrite = new Map();
+let recentWrite = new Map();
 
 export function markRecent(fp) {
   if (recentWrite.size >= RECENT_CAP) recentWrite.clear();

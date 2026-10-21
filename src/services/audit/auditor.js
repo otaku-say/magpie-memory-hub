@@ -25,7 +25,7 @@ import {
   hasConflictingNumbers,
 } from "../../../semantic_dedup.js";
 
-export let _isAuditing = false;
+let _isAuditing = false;
 
 export function resetIsAuditing() {
   _isAuditing = false;
