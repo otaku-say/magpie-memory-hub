@@ -319,7 +319,7 @@ console.log("=================================================================")
   };
 
   // 从真实 settings.js 提取并加载防抖逻辑
-  const settingsSrc = fs.readFileSync(path.join(__dirname, "../settings.js"), "utf8");
+  const settingsSrc = fs.readFileSync(path.join(__dirname, "../src/page/settings.js"), "utf8");
   const vmCtx = {
     window: { magpie: { options: { set: async (o) => { rawSetCalls++; lastPayloadWritten = JSON.parse(JSON.stringify(o)); return o; } } } },
     setTimeout,

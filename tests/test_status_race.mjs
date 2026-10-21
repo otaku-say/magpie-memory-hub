@@ -88,7 +88,7 @@ window.magpie = {
   read: () => Promise.resolve({}),
 };
 
-await import(path.join(process.cwd(), "settings.js"));
+await import(path.join(process.cwd(), "src/page/settings.js"));
 await new Promise((r) => setTimeout(r, 60));   // 等 boot 跑完
 
 console.log("=== 0. 初始状态：应显示旧的 MCP 检测成功结果 ===");

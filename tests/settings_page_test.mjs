@@ -8,8 +8,8 @@ process.chdir(fileURLToPath(new URL("..", import.meta.url)));  // 不依赖调�
 
 const DIR = fs.existsSync("settings.html") ? "." : "..";
 const htmlPath = path.join(DIR, "settings.html");
-const cssPath = path.join(DIR, "settings.css");
-const jsPath = path.join(DIR, "settings.js");
+const cssPath = path.join(DIR, "src/page/settings.css");
+const jsPath = path.join(DIR, "src/page/settings.js");
 
 const html = fs.readFileSync(htmlPath, "utf8");
 const css = fs.readFileSync(cssPath, "utf8");

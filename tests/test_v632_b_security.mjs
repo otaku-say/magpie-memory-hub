@@ -244,7 +244,7 @@ console.log("▶ [Test 3] harvest_gateway 生产副作用消除与 memory_audit 
 console.log("▶ [Test 4] settings.js 旧去重状态不覆盖最新模型检测验证...");
 {
   // 静态与逻辑验证 settings.js 中的时间戳判定
-  const settingsCode = fs.readFileSync(path.resolve("settings.js"), "utf8");
+  const settingsCode = fs.readFileSync(path.resolve("src/page/settings.js"), "utf8");
   assert.ok(
     settingsCode.includes("auditAt > modelAt") || settingsCode.includes("audit.at > model.at"),
     "settings.js 中必须包含 auditAt > modelAt 时间戳比较逻辑"

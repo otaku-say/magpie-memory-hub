@@ -28,7 +28,7 @@ const check = (c, m) => c ? ok(m) : no(m);
 
 try {
   /* ---------- 从页面源码里抓出它到底会发哪些 op ---------- */
-  const js = readFileSync(path.join(ROOT, "settings.js"), "utf8");
+  const js = readFileSync(path.join(ROOT, "src/page/settings.js"), "utf8");
   const allSentOps = new Set();
   for (const m of js.matchAll(/submitAction\(\s*"([a-z_]+)"/g)) allSentOps.add(m[1]);
   for (const m of js.matchAll(/submitAction\(\s*"([a-z_]+)"\s*,\s*\{/g)) allSentOps.add(m[1]);

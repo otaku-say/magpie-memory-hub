@@ -219,7 +219,7 @@ try {
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
     const htmlPath = path.join(ROOT, "settings.html");
     const html = fs.readFileSync(htmlPath, "utf8");
-    const jsPath = path.join(ROOT, "settings.js");
+    const jsPath = path.join(ROOT, "src/page/settings.js");
     const js = fs.readFileSync(jsPath, "utf8");
 
     assert.strictEqual(
