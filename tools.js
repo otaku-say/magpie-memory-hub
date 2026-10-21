@@ -510,6 +510,8 @@ async function saveMemory(client, cfg, m, ctx) {
       const pitfallRows = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT }));
       const normTitle = normalizeSemanticText(title);
       const matchedPitfall = pitfallRows.find((p) => {
+        if (p.invalid_at) return false;
+        if (p.lifecycle_status && p.lifecycle_status !== "active") return false;
         if (hasConflictingNumbers(title, p.symptom)) return false;
         const pSym = normalizeSemanticText(p.symptom);
         if (pSym && (pSym === normTitle || normTitle.includes(pSym) || pSym.includes(normTitle))) {
@@ -682,6 +684,7 @@ async function saveMemory(client, cfg, m, ctx) {
   const otherCategoryRows = allActiveRows.filter((r) => r.category !== category);
   const crossDup = otherCategoryRows.find((r) => {
     if (hasConflictingNumbers(title, r.title)) return false;
+    if (hasConflictingNumbers(content, r.content || r.full_text || "")) return false;
     const rNormTitle = normalizeSemanticText(r.title);
     if (rNormTitle && rNormTitle === normTitle) return true;
     return isSemanticallySimilar(title, content, r.title, r.content || r.full_text);
@@ -1730,6 +1733,120 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
     return false;
   }
 
+  function isMeaningfulIronlaw(rc, sym, sol) {
+    const rcStr = String(rc || "").trim();
+    const symStr = String(sym || "").trim();
+    const solStr = String(sol || "").trim();
+    if (!rcStr || !solStr) return false;
+    if (rcStr.toLowerCase() === symStr.toLowerCase()) return false;
+    const placeholderRe = /未知|待查|临时|unknown|todo|tbd/i;
+    if (placeholderRe.test(rcStr) || placeholderRe.test(solStr)) return false;
+    return true;
+  }
+
+  async function checkAndApplyIronlaw(outObj, targetRecurrence, targetComponent, targetSymptom, targetRootCause, targetSolution, targetTags) {
+    const crystallizationThreshold = Number(args.crystallization_threshold ?? cfg?.crystallization_threshold ?? 5) || 5;
+    const rec = Number(targetRecurrence) || 1;
+    if (rec < crystallizationThreshold) {
+      return outObj;
+    }
+    if (!isMeaningfulIronlaw(targetRootCause, targetSymptom, targetSolution)) {
+      return outObj;
+    }
+
+    try {
+      const comp = String(targetComponent || "general").trim();
+      const symTrimmed = String(targetSymptom || "").trim().slice(0, 60);
+      const ironTitle = `【踩坑铁律】${comp}: ${symTrimmed}`;
+      const ironContent = `【症状】${targetSymptom}\n【根因】${targetRootCause}\n【解法】${targetSolution}`;
+
+      const existingTags = String(targetTags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+      if (!existingTags.includes("pitfall-ironlaw")) {
+        existingTags.push("pitfall-ironlaw");
+      }
+      const ironTags = Array.from(new Set(existingTags)).join(", ");
+
+      const memRows = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT }));
+      const existingPrinciple = memRows.find(
+        (r) => r.category === "principle" && !r.invalid_at && (r.lifecycle_status === "active" || !r.lifecycle_status) && String(r.title || "").trim() === ironTitle
+      );
+
+      let ironId;
+      if (existingPrinciple) {
+        const ironNext = (Number(existingPrinciple.recurrence) || 1) + 1;
+        const existingPTags = String(existingPrinciple.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+        const mergedIronTags = Array.from(new Set([...existingPTags, ...existingTags])).join(", ");
+        await client.update("memories", existingPrinciple.id, {
+          recurrence: ironNext,
+          content: ironContent,
+          full_text: ironContent,
+          tags: mergedIronTags,
+          updated_at: nowSql(),
+        });
+        ironId = existingPrinciple.id;
+      } else {
+        const ironFp = semanticFingerprint(project, "principle", ironTitle, ironContent, ironTags);
+        try {
+          const createdMem = await client.create("memories", {
+            project,
+            category: "principle",
+            scope_level: "project",
+            client: clientVal,
+            origin: "tool",
+            title: ironTitle,
+            content: ironContent,
+            full_text: ironContent,
+            tags: ironTags,
+            related_entities: comp,
+            content_fingerprint: ironFp,
+            confidence_score: 1.0,
+            lifecycle_status: "active",
+            superseded_by_id: null,
+            revision: 1,
+            recurrence: 1,
+            retrieval_count: 0,
+            invalid_at: null,
+            invalid_reason: "",
+            expires_at: null,
+            last_used_at: null,
+            created_at: nowSql(),
+            updated_at: nowSql(),
+            source_session: sourceSession,
+            source_turn: sourceTurn,
+          });
+          ironId = createdMem && (createdMem.id || createdMem.insertId);
+          if (ironId) {
+            markRecent("m:" + ironFp);
+          }
+        } catch (e) {
+          if (/duplicate entry/i.test(String(e.message))) {
+            const memRowsAgain = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT }));
+            const dupP = memRowsAgain.find(
+              (r) => r.category === "principle" && !r.invalid_at && (String(r.title || "").trim() === ironTitle || r.content_fingerprint === ironFp)
+            );
+            if (dupP) {
+              const ironNext = (Number(dupP.recurrence) || 1) + 1;
+              await client.update("memories", dupP.id, {
+                recurrence: ironNext,
+                content: ironContent,
+                full_text: ironContent,
+                tags: ironTags,
+                updated_at: nowSql(),
+              });
+              ironId = dupP.id;
+            }
+          }
+        }
+      }
+
+      if (ironId) {
+        outObj.ironlaw_created = true;
+        outObj.ironlaw_id = ironId;
+      }
+    } catch (_) {}
+    return outObj;
+  }
+
   if (dup) {
     const next = (Number(dup.recurrence) || 1) + initialRecurrence;
     const oldSol = String(dup.solution || "").trim();
@@ -1743,12 +1860,13 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
       try {
         await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now });
         markRecent(recentKey);
-        return jsonOut({
+        const out = await checkAndApplyIronlaw({
           action: "NOOP",
           id: dup.id,
           recurrence: next,
           note: "方案存在数字冲突，禁止演进覆盖，累加复发计数",
-        });
+        }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, dup.tags);
+        return jsonOut(out);
       } catch (e) {
         if (!/404|not found/i.test(String(e.message))) throw e;
       }
@@ -1791,13 +1909,14 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
       try {
         await client.update("pitfalls", dup.id, Object.assign({}, updatePayload, { updated_at: updatePayload.updated_at || nowSql() }));
         markRecent(recentKey);
-        return jsonOut({
+        const out = await checkAndApplyIronlaw({
           action: "EVOLVED",
           id: dup.id,
           recurrence: next,
           reason,
           note: reason,
-        });
+        }, next, dup.component || component, dup.symptom || symptom, updatePayload.root_cause, updatePayload.solution, updatePayload.tags);
+        return jsonOut(out);
       } catch (e) {
         if (!/404|not found/i.test(String(e.message))) throw e;
       }
@@ -1805,12 +1924,13 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
       try {
         await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now });
         markRecent(recentKey);
-        return jsonOut({
+        const out = await checkAndApplyIronlaw({
           action: "NOOP",
           id: dup.id,
           recurrence: next,
           note: dup.content_fingerprint === fp ? undefined : "语义相似踩坑去重命中，累加复发计数",
-        });
+        }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, dup.tags);
+        return jsonOut(out);
       } catch (e) {
         if (!/404|not found/i.test(String(e.message))) throw e;
       }
@@ -1843,7 +1963,8 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
         const hasSolConflict = hasConflictingNumbers(oldSol, newSol);
         if (hasSolConflict) {
           try { await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now }); } catch (_) {}
-          return jsonOut({ action: "NOOP", id: dup.id, recurrence: next, note: "方案存在数字冲突，禁止演进覆盖，累加复发计数" });
+          const out = await checkAndApplyIronlaw({ action: "NOOP", id: dup.id, recurrence: next, note: "方案存在数字冲突，禁止演进覆盖，累加复发计数" }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, dup.tags);
+          return jsonOut(out);
         }
 
         const isSolutionMoreDetailed = !hasSolConflict && (
@@ -1877,18 +1998,21 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
               updated_at: now,
             });
           } catch (_) {}
-          return jsonOut({ action: "EVOLVED", id: dup.id, recurrence: next, reason, note: reason });
+          const out = await checkAndApplyIronlaw({ action: "EVOLVED", id: dup.id, recurrence: next, reason, note: reason }, next, dup.component || component, dup.symptom || symptom, (hasExplicitRootCause && explicitRc) ? explicitRc : oldRc, (isSolutionMoreDetailed && newSol) ? newSol : oldSol, mergedTags || dup.tags);
+          return jsonOut(out);
         }
 
         try { await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now }); } catch (_) {}
-        return jsonOut({ action: "NOOP", id: dup.id, recurrence: next, note: "唯一索引拦下重复" });
+        const out = await checkAndApplyIronlaw({ action: "NOOP", id: dup.id, recurrence: next, note: "唯一索引拦下重复" }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, dup.tags);
+        return jsonOut(out);
       }
       return jsonOut({ action: "NOOP", id: null, note: "唯一索引拦下重复" });
     }
     throw e;
   }
   markRecent(recentKey);
-  return jsonOut({ action: "ADD", id: created && (created.id || created.insertId) });
+  const out = await checkAndApplyIronlaw({ action: "ADD", id: created && (created.id || created.insertId) }, initialRecurrence, component, symptom, rootCause, solution, tags);
+  return jsonOut(out);
 }
 
 async function pitfallSearch(client, cfg, rawArgs) {
