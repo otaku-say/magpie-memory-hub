@@ -571,6 +571,8 @@ Starting server on port 8080... OK done!
   // 关键：【绝对不包含 gatewayTimeoutMs】（模拟旧配置与 undefined 现状）
   const testOptions = {
     auto_harvest: true,
+    // 显式配置关闭 Bounded Await，验证纯非阻塞脱钩异步模式
+    bounded_await: false,
     // gatewayTimeoutMs 显式为 undefined
     gatewayTimeoutMs: undefined,
     project: testProject,
