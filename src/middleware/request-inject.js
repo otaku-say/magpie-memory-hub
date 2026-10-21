@@ -801,4 +801,3 @@ export function onRequest(body, ctx) {
   catch (e) { return _mwFailOpen("onRequest", e, body); }
 }
 
-export { onRequestInner };

@@ -4,8 +4,8 @@
  * 被依赖：src/services/save/memory-saver.js, src/tools/pitfall-save.js
  */
 
-export const RECENT_WINDOW_MS = 6000;
-export const RECENT_CAP = 5000;
+const RECENT_WINDOW_MS = 6000;
+const RECENT_CAP = 5000;
 
 /**
  * 进程内近期写入指纹 → 写入时刻。

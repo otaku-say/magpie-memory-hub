@@ -5,7 +5,7 @@
  */
 
 /** 语义规范化：小写、去标点与多余空白，使同一事实的不同写法落到同一指纹 */
-export function normalize(text) {
+function normalize(text) {
   return String(text == null ? "" : text)
     .toLowerCase()
     .replace(/[\s]+/g, "")

@@ -5,10 +5,8 @@
  */
 
 export {
-  _diag,
   SCAFFOLDING_PATTERNS,
-  stripScaffolding,
-} from "./scaffolding.js";
+  stripScaffolding} from "./scaffolding.js";
 
 export {
   isExplicitUserMemory,
@@ -17,38 +15,31 @@ export {
   extractTextFromReply,
   buildDialogueText,
   countTurnsFromMessages,
-  parseExtractionJson,
-} from "./dialog-extract.js";
+  parseExtractionJson} from "./dialog-extract.js";
 
 export {
   deriveProjectFromCwd,
-  deriveProject,
-} from "./project-resolve.js";
+  deriveProject} from "./project-resolve.js";
 
 export {
   classifyEndpointCache,
   classifyDialogueWithOnlineModel,
-  testClassificationModel,
-} from "./classify.js";
+  testClassificationModel} from "./classify.js";
 
 export {
   HARVEST_SYSTEM_PROMPT,
   harvestWithOnlineModel,
   testExtractionModel,
-  testModelConnectivity,
-} from "./extract.js";
+  testModelConnectivity} from "./extract.js";
 
 export {
   fingerprint,
   processDialogueAndHarvest,
-  triggerBackgroundDrain,
-} from "./harvest-pipeline.js";
+  triggerBackgroundDrain} from "./harvest-pipeline.js";
 
 export {
   GATEWAY_CONV_DIRNAME,
   NO_CONVERSATIONS_MSG,
-  PRIVACY_NOTICE,
-  FORBIDDEN_DIRS,
   HARD_FORBIDDEN_PREFIXES,
   FORBIDDEN_PREFIXES,
   isVarSubdomainAllowed,
@@ -59,15 +50,11 @@ export {
   resolveGatewayDir,
   collectConversationFiles,
   isTestMode,
-  harvestGateway,
-} from "./offline-scan.js";
+  harvestGateway} from "./offline-scan.js";
 
 export {
-  _hookProbe,
-  onRequest,
-} from "./hook-request.js";
+  onRequest} from "./hook-request.js";
 
 export {
   computeHookBudgetMs,
-  onResponse,
-} from "./hook-response.js";
+  onResponse} from "./hook-response.js";

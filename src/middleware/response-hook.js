@@ -60,4 +60,3 @@ export function onResponse(body, ctx) {
   catch (e) { return _mwFailOpen("onResponse", e, body); }
 }
 
-export { onResponseInner };

@@ -25,22 +25,6 @@ export const GATEWAY_CONV_DIRNAME = "gateway-conversations";
 export const NO_CONVERSATIONS_MSG = "未检测到对话录制。请在 Magpie 设置里开启 GatewayConversations（本地录制对话，插件据此提炼记忆）。";
 export const PRIVACY_NOTICE = "数据来自 Magpie 的 GatewayConversations 落盘，可在 Magpie 设置里关闭该录制";
 
-export const FORBIDDEN_DIRS = new Set([
-  "/",
-  "/root",
-  "/bin",
-  "/sbin",
-  "/etc",
-  "/usr",
-  "/lib",
-  "/lib64",
-  "/var",
-  "/proc",
-  "/sys",
-  "/dev",
-  "/boot",
-  "/home",
-]);
 
 export const HARD_FORBIDDEN_PREFIXES = [
   "/etc",

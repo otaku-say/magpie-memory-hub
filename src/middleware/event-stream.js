@@ -81,4 +81,3 @@ export function onEvent(event, ctx) {
   }
 }
 
-export { onEventInner };
