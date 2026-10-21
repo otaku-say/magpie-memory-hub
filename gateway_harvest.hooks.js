@@ -1252,9 +1252,11 @@ export async function triggerBackgroundDrain(client, options = {}) {
           ...(options && typeof options === "object" ? options : {}),
           _client: safeClient,
           _cfg: activeCfg,
+          _no_scheduler: true,
         };
         const hubInput = {
           ...activeCfg,
+          _no_scheduler: true,
         };
         if (activeSchedule) {
           hubInput.dedup_schedule = activeSchedule;

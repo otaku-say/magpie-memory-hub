@@ -3639,6 +3639,23 @@ async function checkScheduledDedup(client, cfg) {
 
 // 【P0-1】ensureAuditScheduler 闭包配置读取与动态刷新
 function ensureAuditScheduler(client, cfg, optionsGetter) {
+  // 兼容单参数传 cfg 场景：ensureAuditScheduler({ dedup_schedule: "daily" })
+  if (client && !cfg && typeof client === "object" && typeof client.list !== "function" && typeof client.query !== "function") {
+    cfg = client;
+    client = null;
+  }
+
+  const isNoSched = (cfg && cfg._no_scheduler === true) || (optionsGetter && optionsGetter._no_scheduler === true);
+  if (isNoSched) {
+    return {
+      getFreshCfg,
+      getFreshClient,
+      started: _auditSchedulerStarted,
+      stop: stopAuditScheduler,
+      runScheduled,
+    };
+  }
+
   if (optionsGetter) {
     _auditOptionsGetter = optionsGetter;
   }
@@ -3675,7 +3692,7 @@ function ensureAuditScheduler(client, cfg, optionsGetter) {
     return null;
   }
 
-  const runScheduled = async () => {
+  async function runScheduled() {
     const freshCfg = getFreshCfg();
     const schedNow = (freshCfg && (freshCfg.dedup_schedule || freshCfg.audit_interval || freshCfg.auditInterval)) || "off";
     if (schedNow === "off" || schedNow === "none") {
@@ -4109,17 +4126,25 @@ export const MagpieMemoryHub = async (input, options) => {
 
   /* ---- dedup_schedule 定时自动去重 ----
    * 宿主长驻进程定期检查上次去重时间是否超期（daily / weekly / monthly）。
-   * 默认 off，关闭时不执行任何后台操作；超期触发后立即分批执行去重，绝不产出冗余卡片。 */
-  const dedupSched = cfg.dedup_schedule || cfg.audit_interval || cfg.auditInterval || (options && (options.dedup_schedule || options.audit_interval)) || "off";
+   * 默认 off，关闭时不执行任何后台操作；超期触发后立即分批执行去重，绝不产出冗余卡片。
+   * 【BUG-38-3 治本修复】增加 _no_scheduler: true 隔离标记支持：
+   * 当 noScheduler 为 true 时（如后台 drain 消费构造的临时实例），
+   * 跳过整个调度器生命周期管理——不调用 ensureAuditScheduler、不调用 stopAuditScheduler、
+   * 不赋值 _auditOptionsGetter、不改 _auditBaseCfg/_auditBaseClient。 */
+  const noScheduler = (options && options._no_scheduler === true) || (input && input._no_scheduler === true);
   const optionsGetter = () => readOptions(Object.assign({}, input && typeof input === "object" ? input : {}, options && typeof options === "object" ? options : {}));
-  _auditOptionsGetter = optionsGetter;
-  if (cfg) _auditBaseCfg = cfg;
-  if (client) _auditBaseClient = client;
 
-  if (dedupSched === "off" || dedupSched === "none") {
-    stopAuditScheduler();
-  } else if (!isTestMode()) {
-    ensureAuditScheduler(client, cfg, optionsGetter);
+  if (!noScheduler) {
+    const dedupSched = cfg.dedup_schedule || cfg.audit_interval || cfg.auditInterval || (options && (options.dedup_schedule || options.audit_interval)) || "off";
+    _auditOptionsGetter = optionsGetter;
+    if (cfg) _auditBaseCfg = cfg;
+    if (client) _auditBaseClient = client;
+
+    if (dedupSched === "off" || dedupSched === "none") {
+      stopAuditScheduler();
+    } else if (!isTestMode()) {
+      ensureAuditScheduler(client, cfg, optionsGetter);
+    }
   }
 
   const tool = {};
