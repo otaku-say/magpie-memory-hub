@@ -2333,3 +2333,266 @@ Agent 对已有简短记忆（例如「使用 Redis 缓存会话数据」）补�
    （词法权重 1.0 远高于热度 0.4，且 _heat 的赋值发生在排序之后，比较时两侧均为 undefined）。
    已改为「词法同分时就地计算热度并降序打破平局」，
    既保留 RRF 既有票权设计，又实现 EVO-8 的意图。
+
+
+---
+
+# 四十~四十二、v6.38.0 整改检查点归档
+
+> 本段由集成阶段自动归档，原文见 git 历史。
+
+
+## 归档：NOTES_v638_a.md
+
+# Agent A 检查点报告：修复知识黑洞、跨类数字冲突与 EVO-11 踩坑升维 (v6.38-a)
+
+## 一、修改范围与文件所有权约定
+- **工作目录**: `/workspace/m`
+- **工作分支**: `feat/v638-a-write`
+- **文件所有权范围**:
+  - 独占修改: `tools.js` 中的 `saveMemory` 与 `pitfallSave` 两个函数区域。
+  - 独占新增: `tests/test_v638_a_write.mjs`、`NOTES_v638_a.md`。
+  - 严格禁改: `memoryList` / `memoryGet` / `memoryContext` / `memorySearch` / `memoryForget` / `normalizeToolArgs`、`semantic_dedup.js`、`gateway_harvest*.js`、`memory.middleware.js`、`test_meta.mjs` 以及历史测试文件。
+
+---
+
+## 二、整改项深入分析与修复实现
+
+### 1. BUG-37-1 知识黑洞修复（高危）
+- **问题定位**: `tools.js:512` 处的 `pitfallRows.find` 回调。
+- **现状危害**: 踩坑记录通过 `memory_forget(table: "pitfalls")` 软失效（写入 `invalid_at`）后，`saveMemory` 内部的「踩坑优先」检查未过滤失效踩坑，依然匹配并返回 `NOOP, table: "pitfalls"`；而检索链路已过滤失效记录，导致该主题的新知识既写不进 memories 又搜不出踩坑，形成永久知识黑洞。
+- **修复方案**: 在 find 回调第一行增加软失效与生命周期过滤：
+  ```javascript
+  if (p.invalid_at) return false;
+  if (p.lifecycle_status && p.lifecycle_status !== "active") return false;
+  ```
+- **双向反证验证**:
+  - [正向反证 1.a] 踩坑软失效后，再向 memories 写入同主题记忆 → 必须成功 ADD 落库 memories，绝不返回 NOOP。
+  - [反向反证 1.b] 踩坑处于活跃未失效状态时，saveMemory 同主题仍必须触发「踩坑优先」返回 NOOP(table: "pitfalls") 并累加 recurrence，杜绝原有防重机制被破坏。
+
+---
+
+### 2. BUG-37-3 跨类去重漏检正文数字冲突修复
+- **问题定位**: `tools.js:684` 跨类去重 `crossDup` 判定。
+- **现状危害**: `crossDup` 仅比对了标题数字冲突（`hasConflictingNumbers(title, r.title)`），未比对正文。当库内存在 fact 记忆「网关端口配置: 监听 80」，新存入 decision「网关端口配置: 监听 8080」时，因标题无冲突被误判为跨类重复并被 NOOP 拦截，导致 8080 新架构决策丢失且无法触发 EVO-9 冲突预警。
+- **修复方案**: 在 `crossDup` 判定中增加正文数字冲突守卫：
+  ```javascript
+  if (hasConflictingNumbers(title, r.title)) return false;
+  if (hasConflictingNumbers(content, r.content || r.full_text || "")) return false;
+  ```
+- **双向反证验证**:
+  - [正向反证 2.a] 跨类且正文含数字冲突（如 80 vs 8080）→ 绝不 NOOP，必须执行 ADD 创建新记录并生成全新 ID。
+  - [反向反证 2.b] 跨类且无数字冲突、语义完全一致时 → 仍正常进入跨类去重返回 NOOP。
+
+---
+
+### 3. EVO-11 高频踩坑跨表升维 principle
+- **问题定位**: `pitfallSave` 成功执行 ADD/EVOLVED/NOOP 累加复发计数处。
+- **需求目标**: 当踩坑复发次数达到结晶门槛（`recurrence >= crystallization_threshold`，默认 5），且根因与解法均为真实非占位时，自动在 memories 表创建或更新一条 category="principle" 的防护铁律。
+- **核心规格**:
+  - **标题规范**: `【踩坑铁律】<component>: <symptom 前60字>`。
+  - **正文规范**: 包含【症状】、【根因】、【解法】三要素。
+  - **标签合并**: 合并原踩坑 tags 并追加 `pitfall-ironlaw`。
+  - **幂等保护**: 若已存在同 project + 同 title 的 principle，则就地更新并递增 recurrence，库中严格仅保留 1 条记录，绝不重复建行。
+  - **返回值增强**: 触发升维时返回体增加 `ironlaw_created: true, ironlaw_id: <id>`（未触发则不含该字段）。
+  - **Schema 门禁合规**: 写库语句同一语句内显式包含 `created_at` 与 `updated_at: nowSql()`，外键列严格为 NULL，100% 通过 `test_schema_defaults.mjs`。
+- **双向反证验证**:
+  - [正向反证 3.a] recurrence >= 5 且根因/解法真实 → 必须生成 principle 铁律，库中精确查到，返回 `ironlaw_created: true`。
+  - [反向反证 3.b] recurrence = 4 未达阈值 → 绝不生成 principle，返回体不含 ironlaw_created。
+  - [反向反证 3.c] 根因为占位符（等于 symptom 或含「待查/未知」）→ 即使 recurrence >= 5 也严禁生成 principle。
+  - [反向反证 3.d] principle 已存在时再次触发 → 就地更新而非重复创建，库中该 title 记录严格只有 1 条，recurrence 累加递增。
+
+---
+
+## 三、双向反证测试矩阵 (tests/test_v638_a_write.mjs)
+
+| 模块 | 正向验证 (Positive) | 反向反证 (Counter-Evidence) |
+| :--- | :--- | :--- |
+| **BUG-37-1 知识黑洞** | 踩坑软失效后，saveMemory 同主题成功落库 memories，action 为 ADD，生成全新 ID | 踩坑未失效时，saveMemory 同主题严格返回 NOOP，table 指向 pitfalls |
+| **BUG-37-3 跨类数字冲突** | 正文存在数字冲突（如 80 vs 8080），saveMemory 跨类别存储成功触发 ADD 落库 | 跨类且无数字冲突、语义重复的记录，正常触发 crossDup 返回 NOOP |
+| **EVO-11 升维铁律** | recurrence >= 5 且根因/解法真实时，生成 principle 铁律，含三要素与 pitfall-ironlaw 标签 | recurrence = 4 未达门槛严禁生成；根因等于 symptom 或含待查严禁生成 |
+| **EVO-11 幂等更新** | 已存在同 title 铁律时再次触发结晶，库中仅保留 1 条记录，recurrence 累加为 2 | 绝不因重复结晶导致 memories 表中产生同 title 冗余行 |
+| **测试元检查规范** | `scanTestFile` 静态扫描本测试 0 违规，符合隔离、清理与零残留规范 | `env.cleanup()` 执行后 `residue.total === 0` 强断言通过 |
+
+---
+
+## 四、验证与回归记录
+1. 运行专项测试 `node tests/test_v638_a_write.mjs`：全量反证门 100% 通过，数据库 0 残留。
+2. 运行回归套件：
+   - `node tests/test_dedup_and_audit.mjs`：100% 通过（去重合并与撤销验证）。
+   - `node tests/test_v636_a_evo.mjs`：100% 通过（EVO-1 与 EVO-4 升维套件）。
+   - `node tests/test_schema_defaults.mjs`：100% 通过（全部 30 个写入载荷显式包含时间戳，无外键哨兵值 0）。
+3. 遵循文件所有权与“禁改计数”原则（对齐 DEVNOTES.md:2040 与 DEVNOTES.md:2226）：
+   - `test_meta.mjs` 严格保持只读，未做任何修改；
+   - 新增测试由 `tests/test_v638_a_write.mjs` 引入 `scanTestFile` 自检自证合规（0 违规），待合并阶段统一锁定计数。
+
+
+## 归档：NOTES_v638_b.md
+
+# Agent B 检查点报告：读取能力深化与别名映射 (v6.38-b)
+
+## 1. 任务背景与文件所有权约定
+- **沙箱 ID**: `6eadc2faea99477d879d3dd6bb0d580b`
+- **代码目录**: `/workspace/m`
+- **工作分支**: `feat/v638-b-read` (基线: `852e56b`，干净)
+- **文件所有权范围（严格限定）**:
+  - `tools.js`：仅限 `normalizeToolArgs` 函数本体，以及 `memoryList` / `memoryGet` 两个函数实现区。
+  - `tests/test_v638_b_read.mjs`：新增专项双向反证测试套件。
+  - `NOTES_v638_b.md`：本设计与验收文档。
+- **严禁修改**: `saveMemory` / `pitfallSave` / `memoryContext` / `memoryForget` / `memorySearch` / `semantic_dedup.js` / `gateway_harvest*.js` / `memory.middleware.js` / `test_meta.mjs` / 其他既有 tests。
+
+---
+
+## 2. 缺陷根因分析与技术实现方案
+
+### 2.1 【BUG-37-4b】normalizeToolArgs 补齐 cause / reason → root_cause 映射
+- **现状与根因**:
+  - `normalizeToolArgs` 虽已支持 `error` / `issue` → `symptom`、`fix` / `resolve` → `solution` 等别名容错，但漏掉了排障踩坑中最常见的 `cause` 与 `reason` 参数。
+  - 当调用方或前端传入 `{ cause: "..." }` 或 `{ reason: "..." }` 时，无法正确映射到 `root_cause`，导致根因被视为空值或回退为占位。
+- **修复方案**:
+  - 在 `normalizeToolArgs` 中增加别名映射：
+    ```javascript
+    // cause / reason → root_cause (BUG-37-4b)
+    if (args.root_cause == null || args.root_cause === "") {
+      if (args.cause != null && args.cause !== "") args.root_cause = args.cause;
+      else if (args.reason != null && args.reason !== "") args.root_cause = args.reason;
+    }
+    ```
+  - **映射守卫规则**:
+    1. 兜底映射：仅当 `root_cause` 缺省（null/undefined）或为空字符串 `""` 时生效；
+    2. 不可覆盖性：若调用方已显式传入合法的 `root_cause`，绝不被 `cause` 或 `reason` 覆盖篡改。
+
+### 2.2 【EVO-12】knowledge_profile 补齐置信度过滤与 chronic_pitfalls 顽疾画像
+- **现状与根因**:
+  - EVO-10 引入的 `knowledge_profile` 中，`near_crystallization` 仅判断了 `recurrence >= threshold - 1`，未过滤置信度 `confidence_score`，导致低置信度（如 70 分）的偶发偏好误入结晶候选区。
+  - 目前的自省画像仅涵盖准则/偏好/决策统计，缺少排障领域的“顽疾画像”（chronic_pitfalls），导致 Agent 无法在列表级自省项目中高频复发的踩坑。
+- **技术实现**:
+  1. **near_crystallization 增加置信度门禁**:
+     - 在判断 `nearCandidates` 时，除类别匹配（`preference` / `decision`）与复发频次达标（`recurrence >= threshold - 1`）外，增加 `confidence_score >= 80` 严格过滤（缺省按 100 处理）。
+     - 保持 `principle_count`、`preference_count`、`decision_count` 与 `total_active` 基础计数统计语义不变。
+  2. **新增 chronic_pitfalls 顽疾画像**:
+     - 检索当前 project 下的踩坑记录（若 `projectArg && projectArg !== "global"` 则并发穿透 `global` 踩坑并按 ID 去重，与既有穿透一致）。
+     - 过滤条件：`!r.invalid_at`（未失效）且 `recurrence >= 3`。
+     - 排序与截断：按 `recurrence` 降序排列，取 Top 5。
+     - 字段投影：精确投影 `{ id, component, symptom (前60字), recurrence }`。
+     - 挂载至 `knowledge_profile.chronic_pitfalls`。
+
+### 2.3 【EVO-13】memory_get 生命周期状态与取代指引
+- **现状与根因**:
+  - `memory_get`（单条与批量）返回的记录对象未暴露 `lifecycle_status`、`invalid_at`、`invalid_reason`、`superseded_by_id` 等生命周期元数据。
+  - 当读取已失效或已被取代的历史记录时，调用方无法感知其有效性状态，极易沿用已被废弃或取代的过时逻辑。
+- **技术实现**:
+  1. 在 `formatMemoryRecord` 与 `formatPitfallRecord` 返回体中补齐生命周期元数据：
+     - `lifecycle_status`: 记录生命周期（若库中缺省，失效记录置为 `"invalid"`，有效置为 `"active"`）
+     - `invalid_at`: 失效时间戳（有效记录为 `null`）
+     - `invalid_reason`: 失效原因（无则为空串 `""`）
+     - `superseded_by_id`: 取代者 ID（无则为 `null`）
+     - `_lifecycle_warning`: 生命周期告警指引文案
+  2. **_lifecycle_warning 规则**:
+     - 有效记录（`invalid_at` 为空且 `lifecycle_status` 为 `"active"`/undefined）→ 值为 `null`（或不出现）；
+     - 已失效且存在 `superseded_by_id` → `"该记录已被 #<superseded_by_id> 取代，可调 memory_get(id=<superseded_by_id>) 查看最新版本"`；
+     - 已失效且无 `superseded_by_id` → `"该记录已失效（原因: <invalid_reason>）"`（若 `invalid_reason` 为空则优雅提示 `"未注明"`）。
+  3. **兼容性保障**:
+     - 保持已失效记录的可读性（返回完整内容便于追溯，但不隐瞒失效状态）；
+     - 严格保持既有 `auto_fallback`（memories 找不到自动回退 pitfalls）、`superseded_history`（历史版本摘要）及 `ids` 批量读取语义不变。
+
+---
+
+## 3. 双向反证测试矩阵设计 (tests/test_v638_b_read.mjs)
+
+| 任务 | 正向反证门 (Positive) | 反向/边界反证门 (Counter-Evidence) |
+| :--- | :--- | :--- |
+| **BUG-37-4b** | 传 `{ cause: "X" }` 成功归一化为 `root_cause === "X"`；传 `{ reason: "Z" }` 成功映射 | 传 `{ root_cause: "Y", cause: "X" }` 时，`root_cause` 严格保持为 `"Y"` 绝不被覆盖 |
+| **EVO-12 顽疾画像** | `recurrence >= 3` 且 `invalid_at` 为空的踩坑记录必进 `chronic_pitfalls`，按复发降序最多 5 条，前 60 字截断对齐 | `recurrence = 2` 的低频踩坑不得出现；已被软失效（`invalid_at` 非空）的踩坑不得出现 |
+| **EVO-12 置信度门禁** | `confidence_score >= 80` 且 `rec >= threshold - 1` 的偏好必进 `near_crystallization` | `confidence_score = 70 (< 80)` 的高频偏好绝不得误入 `near_crystallization`；基础计数保持完整 |
+| **EVO-13 生命周期指引** | 有效 active 记录 `_lifecycle_warning` 为 null；已失效且被 supersede 记录带有新 ID 指引 | 已失效但未被取代记录输出原因告警；table: "pitfalls" 跨表失效记录同样具备告警 |
+| **规范元检查自证** | `scanTestFile` 静态扫描测试文件 0 违规，强断言隔离与清理 | 执行 `env.cleanup()` 后断言 `residue.total === 0`，数据库零残留 |
+
+---
+
+## 4. 验证与回归规划
+1. 遵循文件所有权与“禁改计数”原则，严禁修改 `test_meta.mjs`。
+2. 运行基准与新增测试套件：
+   - `node tests/test_v638_b_read.mjs`（新增专项双向反证）
+   - `node tests/test_v637_b_read.mjs`（既有读取与入口链路专项）
+   - `node tests/test_proactive_memory_ux.mjs`（主动记忆 UX）
+   - `node tests/test_search_enhancement_and_scale.mjs`（检索增强与规模）
+3. 确保全部测试 100% PASS，0 失败，0 残留。
+
+
+## 归档：NOTES_v638_c.md
+
+# v6.38-c 修复记录：后台副作用清理与离线扫描占位消除
+
+## 1. 任务背景与文件所有权原则
+- **BUG-37-2（高危）**：后台异步队列消费器（triggerBackgroundDrain）在消费时，通过调用 MagpieMemoryHub 误杀宿主生产定时去重调度器，且入队/落库置信度字段量纲错配，导致置信度被重置为默认 100。
+- **BUG-37-4a（中危）**：离线扫描对话落盘（harvestGateway）在落库 saveMemory 时漏传 related_entities；在调用 pitfallSave 时对缺失根因的踩坑硬编码拼接占位文案 “执行过程中出现 <title>，已处置解决”。
+- **文件所有权遵守**：
+  - 修改文件：gateway_harvest.hooks.js、gateway_harvest.js
+  - 新增文件：NOTES_v638_c.md、tests/test_v638_c_harvest.mjs
+  - **严禁改动 tools.js**：所有修复均在 hook 与 gateway 层闭环处理，不触碰正在被其他 Agent 修改的 tools.js。
+
+---
+
+## 2. 根因剖析
+
+### BUG-37-2a：后台消费误杀生产调度器
+- **位置**：gateway_harvest.hooks.js:1225
+- **成因**：triggerBackgroundDrain 在消费队列需要调用工具时，执行：
+  hubInstance = (options && options.hub) || await MagpieMemoryHub({}, { _client: safeClient, _cfg: (options && options.cfg) || {} });
+  在 options.hub 为空且 caller 传入空 options 或 cfg 嵌套在 _cfg 下时，MagpieMemoryHub 内部的 readOptions 无法在顶级选项读取到 dedup_schedule，因而解析为 "off"。
+  tools.js 内部逻辑判定 if (dedupSched === "off" || dedupSched === "none") { stopAuditScheduler(); }，无条件调用了模块单例的 stopAuditScheduler()，直接掐断生产定时去重计时器并置空 _auditOptionsGetter。
+
+### BUG-37-2b：置信度量纲与字段错配
+- **位置**：gateway_harvest.hooks.js:960 与 gateway_harvest.hooks.js:1266
+- **成因**：在入队构建 memoryPayload 时仅写入了 confidence_score: 82（整数量纲 0~100）。
+  而在 tools.js 中 saveMemory 真正读取的字段是 m.confidence（期望 0~1 小数量纲或 0~100 整数）。
+  因为 payload 仅有 confidence_score，m.confidence 为 undefined，rawConf 被回退至默认值 1，进而 confidence_score 被放大存为 100。
+
+### BUG-37-4a：离线扫描漏传实体与硬编码占位根因
+- **位置**：gateway_harvest.js:1017-1029 及 gateway_harvest.js:1070
+- **成因**：
+  1. 离线提炼入库 saveMemory 载荷中遗漏了 related_entities 属性，导致模型提炼的关联实体无法落盘。
+  2. 离线提炼入库 pitfallSave 载荷中写有：
+     root_cause: p.root_cause || `执行过程中出现 ${p.symptom}，已处置解决`,
+     当未提炼出明确根因时，强行拼接无信息量的套话，造成知识库污染。
+
+---
+
+## 3. 修复方案
+
+### 修复 1：调度器防护与真实配置透传
+1. 优先复用 options.hub。
+2. 若 options.hub 不存在，在调用 MagpieMemoryHub 时：
+   - 提取真实排期：从 options.dedup_schedule、options.cfg.dedup_schedule 中读取。
+   - 若 options 中未指定，但当前进程单例已处于启动状态（通过 MagpieMemoryHub.ensureAuditScheduler().started === true 探知），则从当前的活跃配置中继承 dedup_schedule 并显式透传给 MagpieMemoryHub 的 input 与 options。
+   - 这样保证传入的 dedupSched 与生产运行状态一致（如 "daily"），绝不触发 stopAuditScheduler()。
+3. 在 processDialogueAndHarvest 中调用 triggerBackgroundDrain(client, options) 时完整透传 options。
+4. **集成建议**：未来集成阶段建议在 tools.js 的 MagpieMemoryHub 增加 _no_scheduler: true 标记，专供纯工具消费类实例使用。
+
+### 修复 2：置信度字段与量纲标准化
+1. 在 gateway_harvest.hooks.js 的 memoryPayload 构造处，显式写入 confidence: 0~1 浮点数，并保留 confidence_score: 0~100。
+2. 在 triggerBackgroundDrain 消费队列时，对 memPayload.confidence 进行兼容标准化：
+   - 若包含 confidence 则规范为 <= 1 的浮点数。
+   - 若仅包含 confidence_score（如历史遗留队列数据），自动换算为 / 100 赋给 memPayload.confidence。
+   - 确保 saveMemory 能正确读到 m.confidence，落库保存为真实值（如 82）而非 100。
+
+### 修复 3：离线扫描实体透传与占位根因清除
+1. gateway_harvest.js 在 saveMemory 时补齐 related_entities: item.related_entities ? String(item.related_entities).trim() : ""。
+2. gateway_harvest.js 在 pitfallSave 时补齐 related_entities，并将 root_cause 修正为 p.root_cause ? String(p.root_cause).trim() : ""。无根因时传空字符串，绝不产生「已处置解决」占位文案。
+
+---
+
+## 4. 双向反证验收设计
+在 tests/test_v638_c_harvest.mjs 中构建双向反证：
+1. **调度器反证**：
+   - 在已启动调度器前提下触发 triggerBackgroundDrain，打桩监控 stopAuditScheduler，断言调用次数恒为 0，且 ensureAuditScheduler().started 仍为 true。
+   - 对照反证：若故意传入 dedup_schedule: "off" 且无防护，调度器会被关闭；而受保护链路绝不被关闭。
+2. **置信度反证**：
+   - 写入包含 confidence: 0.82 及仅包含 confidence_score: 82 的队列项，经过 drain 后从数据库查询，断言 confidence_score 为 82，反证绝不是 100。
+3. **离线扫描占位根因与实体反证**：
+   - 离线提炼无根因的对话，落库的 root_cause 不得包含「已处置解决」，断言为空串。
+   - 正常有根因和实体的对话，落库的 root_cause 与 related_entities 必须完整保留真实提炼值。
+4. **测试元规范（test_meta）合规**：
+   - 完整遵守命名空间隔离、cleanup、residue 断言、反证标记与非 0 退出。
+

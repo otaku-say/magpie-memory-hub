@@ -253,7 +253,7 @@ async function run() {
       project: env.project,
       category: "fact",
       title: factTitle,
-      content: "服务默认端口为 8080",
+      content: "服务统一通过 API 网关对外提供能力",
     }));
     assert.strictEqual(fRes.action, "ADD");
     const origFactId = fRes.id;
@@ -263,7 +263,7 @@ async function run() {
       project: env.project,
       category: "principle",
       title: factTitle,
-      content: "【核心行为准则】微服务严禁绑定公共 80 端口，必须统一走 8080 API 网关转发",
+      content: "【核心行为准则】微服务严禁直接对外暴露，必须统一走 API 网关转发",
     }));
 
     assert.strictEqual(pRes.category, "principle", "【反证门 c1 通过】：跨类去重命中时，新准则不得被降级为 fact！必须保留为 principle！");
