@@ -1729,6 +1729,7 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
     const supersededMems = memRows.filter((m) => {
       if (m.category === "principle") return false;
       if (hasConflictingNumbers(m.title, symptom)) return false;
+      if (hasConflictingNumbers(m.content || m.full_text || "", solution || rootCause || "")) return false;
       const mTitle = normalizeSemanticText(m.title);
       if (mTitle && (mTitle === normSym || mTitle.includes(normSym) || normSym.includes(mTitle))) {
         if (!hasConflictingNumbers(m.title, symptom)) return true;
@@ -1778,7 +1779,7 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
     if (!rc || !String(rc).trim()) return true;
     const s = String(rc).trim();
     if (sym && s === String(sym).trim()) return true;
-    if (/未知|待查|临时|unknown|todo|tbd/i.test(s)) return true;
+    if (/未知|待查|临时|unknown|todo|tbd|已处置解决|执行过程中出现/i.test(s)) return true;
     return false;
   }
 
@@ -1788,7 +1789,7 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
     const solStr = String(sol || "").trim();
     if (!rcStr || !solStr) return false;
     if (rcStr.toLowerCase() === symStr.toLowerCase()) return false;
-    const placeholderRe = /未知|待查|临时|unknown|todo|tbd/i;
+    const placeholderRe = /未知|待查|临时|unknown|todo|tbd|已处置解决|执行过程中出现/i;
     if (placeholderRe.test(rcStr) || placeholderRe.test(solStr)) return false;
     return true;
   }
@@ -1815,6 +1816,10 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
       }
       const ironTags = Array.from(new Set(existingTags)).join(", ");
 
+      const compList = comp ? [comp] : [];
+      const incomingEntities = String(args.related_entities || "").split(/[,;\s，、]+/).map((s) => scrubSecrets(s.trim())).filter(Boolean);
+      const ironEntities = Array.from(new Set([...compList, ...incomingEntities])).join(", ");
+
       const memRows = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT }));
       const existingPrinciple = memRows.find(
         (r) => r.category === "principle" && !r.invalid_at && (r.lifecycle_status === "active" || !r.lifecycle_status) && String(r.title || "").trim() === ironTitle
@@ -1825,11 +1830,16 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
         const ironNext = (Number(existingPrinciple.recurrence) || 1) + 1;
         const existingPTags = String(existingPrinciple.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
         const mergedIronTags = Array.from(new Set([...existingPTags, ...existingTags])).join(", ");
+        const existingPEntities = String(existingPrinciple.related_entities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+        const mergedIronEntities = Array.from(new Set([...existingPEntities, ...compList, ...incomingEntities])).join(", ");
+        const updatedIronFp = semanticFingerprint(project, "principle", ironTitle, ironContent, mergedIronTags);
         await client.update("memories", existingPrinciple.id, {
           recurrence: ironNext,
           content: ironContent,
           full_text: ironContent,
           tags: mergedIronTags,
+          related_entities: mergedIronEntities || comp,
+          content_fingerprint: updatedIronFp,
           updated_at: nowSql(),
         });
         ironId = existingPrinciple.id;
@@ -1846,9 +1856,9 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
             content: ironContent,
             full_text: ironContent,
             tags: ironTags,
-            related_entities: comp,
+            related_entities: ironEntities || comp,
             content_fingerprint: ironFp,
-            confidence_score: 1.0,
+            confidence_score: 100,
             lifecycle_status: "active",
             superseded_by_id: null,
             revision: 1,
@@ -1875,11 +1885,18 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
             );
             if (dupP) {
               const ironNext = (Number(dupP.recurrence) || 1) + 1;
+              const dupPTags = String(dupP.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+              const mergedIronTags = Array.from(new Set([...dupPTags, ...existingTags])).join(", ");
+              const dupPEntities = String(dupP.related_entities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
+              const mergedIronEntities = Array.from(new Set([...dupPEntities, ...compList, ...incomingEntities])).join(", ");
+              const updatedIronFp = semanticFingerprint(project, "principle", ironTitle, ironContent, mergedIronTags);
               await client.update("memories", dupP.id, {
                 recurrence: ironNext,
                 content: ironContent,
                 full_text: ironContent,
-                tags: ironTags,
+                tags: mergedIronTags,
+                related_entities: mergedIronEntities || comp,
+                content_fingerprint: updatedIronFp,
                 updated_at: nowSql(),
               });
               ironId = dupP.id;
@@ -1903,18 +1920,28 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
     const oldRc = String(dup.root_cause || "").trim();
     const oldSym = String(dup.symptom || "").trim();
 
+    // EVO-16: 既有 tags 与本次传入 tags 取并集（用于 EVOLVED 与 NOOP 回写）
+    const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
+
     // BUG-1 (2): 数字冲突守卫：新旧 solution 存在数字冲突时禁止演进覆盖，改为返回 NOOP 并在 note 说明数字冲突
     const hasSolConflict = hasConflictingNumbers(oldSol, newSol);
     if (hasSolConflict) {
       try {
-        await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now });
+        await client.update("pitfalls", dup.id, {
+          recurrence: next,
+          tags: mergedTags || dup.tags,
+          last_occurred_at: now,
+          updated_at: now,
+        });
         markRecent(recentKey);
         const out = await checkAndApplyIronlaw({
           action: "NOOP",
           id: dup.id,
           recurrence: next,
           note: "方案存在数字冲突，禁止演进覆盖，累加复发计数",
-        }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, dup.tags);
+        }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, mergedTags || dup.tags);
         return jsonOut(out);
       } catch (e) {
         if (!/404|not found/i.test(String(e.message))) throw e;
@@ -1941,11 +1968,6 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
       else if (isRootCauseExplicitUpdated) reasons.push(`根因更新（原根因: "${oldRc || '(空)'}" -> 新根因: "${explicitRc}"）`);
       const reason = reasons.join("；");
 
-      // BUG-1 (3): 演进时 tags 取并集
-      const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-      const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-      const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
-
       const updatePayload = {
         solution: (isSolutionMoreDetailed && newSol) ? newSol : oldSol,
         root_cause: (hasExplicitRootCause && explicitRc) ? explicitRc : oldRc,
@@ -1971,14 +1993,19 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
       }
     } else {
       try {
-        await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now });
+        await client.update("pitfalls", dup.id, {
+          recurrence: next,
+          tags: mergedTags || dup.tags,
+          last_occurred_at: now,
+          updated_at: now,
+        });
         markRecent(recentKey);
         const out = await checkAndApplyIronlaw({
           action: "NOOP",
           id: dup.id,
           recurrence: next,
           note: dup.content_fingerprint === fp ? undefined : "语义相似踩坑去重命中，累加复发计数",
-        }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, dup.tags);
+        }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, mergedTags || dup.tags);
         return jsonOut(out);
       } catch (e) {
         if (!/404|not found/i.test(String(e.message))) throw e;
@@ -2051,8 +2078,24 @@ async function pitfallSave(client, cfg, rawArgs, ctx) {
           return jsonOut(out);
         }
 
-        try { await client.update("pitfalls", dup.id, { recurrence: next, last_occurred_at: now, updated_at: now }); } catch (_) {}
-        const out = await checkAndApplyIronlaw({ action: "NOOP", id: dup.id, recurrence: next, note: "唯一索引拦下重复" }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, dup.tags);
+        const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+        const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+        const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
+
+        try {
+          await client.update("pitfalls", dup.id, {
+            recurrence: next,
+            tags: mergedTags || dup.tags,
+            last_occurred_at: now,
+            updated_at: now,
+          });
+        } catch (_) {}
+        const out = await checkAndApplyIronlaw({
+          action: "NOOP",
+          id: dup.id,
+          recurrence: next,
+          note: "唯一索引拦下重复",
+        }, next, dup.component || component, dup.symptom || symptom, dup.root_cause || rootCause, oldSol, mergedTags || dup.tags);
         return jsonOut(out);
       }
       return jsonOut({ action: "NOOP", id: null, note: "唯一索引拦下重复" });
