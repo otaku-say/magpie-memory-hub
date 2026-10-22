@@ -40,7 +40,7 @@ import path from "node:path";
 import { dbInit, dbReset, dbStatus, dbProvision, storageSetup, ncbCheck, secretCheck, RESET_CONFIRM } from "../../db_tools.js";
 import { r2Setup, r2Check, cleanProbes } from "../../r2.js";
 import { lookupRealDatabase, lookupActionState, rememberActionState } from "../../local_state.js";
-import { harvestGateway } from "../../gateway_harvest.js";
+import { harvestGateway } from "../services/harvest/index.js";
 
 /** 插件目录下的状态文件路径（供 iframe 内设置页通过 script 标签加载）。 */
 export const STATUS_JS_PATH = fileURLToPath(new URL("../../_status.js", import.meta.url));

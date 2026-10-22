@@ -8,9 +8,8 @@ import {
   dbStatus, dbInit, dbProvision, dbReset, storageSetup, storageUpload, storageGuide, ncbCheck, RESET_CONFIRM,
 } from "../db_tools.js";
 import { r2List, r2Delete, r2Check } from "../r2.js";
-import { runPendingAction, readAction, writeCardStatus, parseDbInfo } from "../page_actions.js";
-import { harvestGateway, isTestMode } from "../gateway_harvest.js";
-import { triggerBackgroundDrain } from "../gateway_harvest.hooks.js";
+import { runPendingAction, readAction, writeCardStatus, parseDbInfo } from "./page/actions.js";
+import { harvestGateway, isTestMode, triggerBackgroundDrain } from "./services/harvest/index.js";
 
 import { CATEGORIES, SCOPES, SEVERITIES, readOptions } from "./core/config.js";
 import { makeClient } from "./integration/ncb.js";
