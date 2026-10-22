@@ -79,12 +79,9 @@ try {
     }
   }
   console.log("[offline fallback] functions:", allFns.size);
-  if (allFns.size >= 140) {
-    console.log("OK offline fallback");
-    process.exit(0);
-  }
-  console.log("FAIL offline fallback");
-  process.exit(1);
+  assert.ok(allFns.size >= 140, `[offline fallback] functions (${allFns.size}) 必须不少于 140 个`);
+  console.log("OK offline fallback");
+  process.exit(0);
 }
 const baseFns = extractFunctions(baselineSrc);
 console.log(`[基线] 提取到 ${baseFns.size} 个顶层函数`);
