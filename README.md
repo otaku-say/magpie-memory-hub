@@ -2,13 +2,13 @@
 
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
-[![Version](https://img.shields.io/badge/version-v6.45.4-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-v6.46.0-blue.svg)](package.json)
 [![Tests](https://img.shields.io/badge/tests-91%20passed-brightgreen.svg)](tests/)
 [![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
 
 ---
 
-## 一、记忆工作模式与运行架构 (v6.45.4)
+## 一、记忆工作模式与运行架构 (v6.46.0)
 
 | 环节 | 运行时机制 | 协作方式与说明 |
 |---|---|---|
@@ -108,7 +108,7 @@ rm -rf /config/home/.cache/magpie/bun/install-cache/*
 
 # 3. 校验版本
 grep '"version"' /config/magpie/plugins/node_modules/magpie-memory-hub/package.json
-# 输出: "version": "6.45.4"
+# 输出: "version": "6.46.0"
 ```
 
 ---
