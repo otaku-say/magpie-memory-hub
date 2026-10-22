@@ -3,7 +3,7 @@
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
 [![Version](https://img.shields.io/badge/version-v6.45.4-blue.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-90%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-91%20passed-brightgreen.svg)](tests/)
 [![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
 
 ---
@@ -51,10 +51,10 @@ Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记�
 |---|---|---|---|
 | **`memory_context`** | **【首选一站式上下文召回】**<br>开始新任务、排查问题或编写代码前必调：一次调用全景召回当前项目准则、历史记忆与 Top 3 踩坑排障解法。 | `query` (当前任务词), `project` (项目名), `max_items`, `max_chars` | • 准则无条件置顶<br>• 融入 Top 3 避坑解法<br>• 跨项目全局穿透兜底<br>• 双路查询改写扩展 |
 | **`memory_search`** | **【深度记忆检索】**<br>针对特定主题、实体或技术背景的高精度深搜。回答历史相关提问前调用。 | `query`, `project`, `category`, `limit`, `search_rerank` | • 原始+改写词双路融合<br>• 在线大模型智能重排<br>• 项目专属优先 + 全局兜底 |
-| **`memory_save`** | **【持久化沉淀】**<br>沉淀长期有效的事实、架构决策或工程规范。确立铁律时必须设 `category="principle"`。 | `title`, `content`, `category`, `tags`, `project` | • 入库自动脱敏密钥<br>• 同名新内容自动 supersede<br>• 规范准则优先置顶 |
+| **`memory_save`** | **【持久化沉淀】**<br>沉淀长期有效的事实、架构决策或工程规范。确立铁律时必须设 `category="principle"`。 | `title`, `content`, `category`, `tags`, `project`, `feedback` (可选 `"helpful"`) | • 入库自动脱敏密钥<br>• 同名新内容自动 supersede<br>• 规范准则优先置顶<br>• `feedback="helpful"` 命中重复/演进时 confidence +10（封顶 100）并累加 recurrence |
 | **`pitfall_search`** | **【已知故障与避坑检索】**<br>遇到报错、排查故障或准备执行关键操作前调用：先查已知症状与已验证解法。 | `query`, `project`, `component`, `limit` | • 检索已知错误与解法<br>• 在线模型重排相关度<br>• 跨项目全局避坑穿透 |
 | **`pitfall_save`** | **【避坑排障沉淀】**<br>定位并解决报错后必须调用：沉淀故障现象与验证过的解法，杜绝重复踩坑。 | `symptom`, `solution`, `component` (可选，默认 general), `root_cause` (可选) | • 参数放宽（仅需现象与解法）<br>• 自动脱敏密钥与连接串<br>• 语义归一复发计数 (+1) |
-| **`memory_get`** | **【记忆全文查看】**<br>根据记忆 ID 精确取出一条记录的完整原文。上下文卡片显示不全时展开详情。 | `id` (记忆ID) | • 异步更新访问热度与时间戳<br>• 零时间戳篡改（不改 updated_at） |
+| **`memory_get`** | **【记忆全文查看】**<br>根据记忆 ID 精确取出一条记录的完整原文。上下文卡片显示不全时展开详情。 | `id` (记忆ID), `ids` (批量), `feedback` (可选 `"helpful"`) | • 异步更新访问热度与时间戳<br>• 零时间戳篡改（不改 updated_at）<br>• `feedback="helpful"` confidence +10、recurrence +1 |
 | **`memory_list`** | **【知识总览】**<br>分页列出当前项目或全局的活跃记忆列表，快速了解项目知识全貌。 | `project`, `limit` | • 按访问热度与新鲜度排序<br>• 过滤已软失效的脏数据 |
 | **`memory_forget`** | **【记忆软失效】**<br>标记过时、失效或已被废弃的记忆。支持 ID 精确失效或关键词匹配。 | `id`, `query`, `limit` | • 软失效（写 invalid_at）<br>• 绝不物理删除，留存审计痕迹 |
 | **`memory_audit`** | **【全自动去重巡检与撤销】**<br>分批语义查重合并记忆与踩坑，支持定时去重与指定时间点一键还原。 | `project`, `full`, `schedule`, `undo_before`, `since_days` | • 双表独立增量游标<br>• 并发互斥锁 (`_isAuditing`)<br>• 精确累加 recurrence<br>• 支持撤销至指定时间戳 |
@@ -108,22 +108,31 @@ rm -rf /config/home/.cache/magpie/bun/install-cache/*
 
 # 3. 校验版本
 grep '"version"' /config/magpie/plugins/node_modules/magpie-memory-hub/package.json
-# 输出: "version": "6.45.3"
+# 输出: "version": "6.45.4"
 ```
 
 ---
 
 ## 五、测试与质量保证
 
-全套 **90 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
+全套 **91 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
 
 ```bash
-node tests/test_meta.mjs             # 90 个测试文件元检查（100% 隔离合规）
+node tests/test_meta.mjs             # 91 个测试文件元检查（100% 隔离合规）
 node tests/adversarial_v629_gate.mjs # 红队 6 大核心缺陷反证靶场（6/6 GREEN）
 node tests/test_proactive_memory_ux.mjs # 主动记忆、一站式召回与脱敏专项测试
 node tests/settings_page_test.mjs    # 设置页表单与 DOM 交互测试
 node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 ```
+
+**计数口径（三处数字同源，均取 `tests/` 活跃套件总数 91）**：徽章、本节正文与项目结构树声明的是同一批套件；
+`tests/test_meta.mjs` 的锁定断言 `testFiles.length === 91` 是唯一权威值，`tests/test_helpers.mjs` 是共享桩库、
+`tests/test_meta.mjs` 自身是元检查器，二者不计入套件数。
+
+全量逐套执行入口 `bash /tmp/ra.sh`（跳过 `test_meta.mjs`、其余 92 个文件全部执行）实测：
+**通过 88 / 跳过 4 / 失败 0**。92 = 91 套件 + `test_helpers.mjs` 桩库；4 套跳过
+（`test_all_20_tools_e2e`、`test_backend_acceptance`、`test_mcp_only`、`test_pollution_guard`）均因容器内缺少
+真实 NoCodeBackend 凭证或宿主环境而显式 `exit 77`，属于可解释跳过而非失败。
 
 ---
 
@@ -141,7 +150,7 @@ node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 │   │   └── harvest/    对话采集
 │   ├── tools/          MCP 工具入口
 │   └── page/           设置页面
-├── tests/              测试套件（89 套）
+├── tests/              测试套件（91 套）
 ├── docs/               架构文档与决策记录
 └── tools.js 等         仅保留宿主契约入口（tools / middleware / hooks）与运行时状态
 ```
