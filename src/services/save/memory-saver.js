@@ -6,7 +6,7 @@
 
 import { CATEGORIES, SCOPES, FETCH_LIMIT, nowSql, expiresAtFor } from "../../core/config.js";
 import { markRecent, justWritten } from "../../core/state-recent.js";
-import { rowsOf } from "../../integration/ncb.js";
+import { rowsOf, fetchAll } from "../../integration/ncb.js";
 import { freshness } from "../../domain/scoring.js";
 import { scrubSecrets } from "../../core/sanitize.js";
 import {
@@ -458,6 +458,9 @@ export async function saveMemory(client, cfg, m, ctx) {
   const newId = created && (created.id || created.insertId);
   markRecent("m:" + project + ":" + fp); markRecent("m:" + fp);
 
+  // v6.46: 交接棒接力链核销 + 跨项目画像收敛（实现收敛于文件末尾私有辅助函数）
+  await _processHandoffAndProfile(client, project, newId, allActiveRows, m, category, scopeLevel, tags, title, content, fullText, relatedEntities, confidence);
+
   // EVO-9a: 处理显式 supersede_id 与旧版 supersede 版本链
   const allSupersedeIds = new Set();
   if (hasValidSupersede && targetSupersedeId) allSupersedeIds.add(targetSupersedeId);
@@ -555,3 +558,126 @@ export async function saveMemory(client, cfg, m, ctx) {
 /* ================================================================== *
  * 工具入参零摩擦容错归一化 (EVO-6)
  * ================================================================== */
+
+/* ================================================================== *
+ * 私有辅助：交接棒（Handoff）接力链核销 与 跨项目开发者画像收敛
+ * 说明：仅本模块内部使用，不对外导出；全部 fail-open，绝不影响主写入事务
+ * ================================================================== */
+
+const HANDOFF_OPEN_TAG_RE = /\bhandoff:open\b/i;
+
+/**
+ * 新交接棒写入后，把同项目内旧的 open 交接棒标记为已被取代。
+ * 单一有效接力棒原则：旧棒留着会让新 Agent 接到过期的"下一步"。
+ */
+async function _supersedeStaleHandoffs(client, project, newId, allActiveRows, tags) {
+  if (!HANDOFF_OPEN_TAG_RE.test(String(tags || ""))) return 0;
+  const stale = (allActiveRows || []).filter((r) =>
+    r && Number(r.id) !== Number(newId) && !r.invalid_at &&
+    (!r.lifecycle_status || r.lifecycle_status === "active") &&
+    String(r.project || project) === project &&
+    HANDOFF_OPEN_TAG_RE.test(String(r.tags || ""))
+  );
+  let supersededCount = 0;
+  for (const s of stale) {
+    try {
+      await client.update("memories", s.id, {
+        tags: String(s.tags || "").replace(/\bhandoff:open\b/gi, "handoff:superseded"),
+        lifecycle_status: "superseded",
+        superseded_by_id: newId,
+        invalid_at: nowSql(),
+        invalid_reason: "handoff_superseded-by:" + newId,
+        updated_at: nowSql(),
+      });
+      supersededCount++;
+    } catch (e) {
+      if (!/404|not found/i.test(String(e.message))) throw e;
+    }
+  }
+  return supersededCount;
+}
+
+/**
+ * 跨项目画像收敛：同一 preference/principle 标题在 >= 2 个不同项目出现时，
+ * 在 project="global" / scope_level="user" 下合成一条全局开发者习惯（幂等）。
+ */
+async function _promoteCrossProjectProfile(client, project, m, category, tags, title, content, fullText, relatedEntities, confidence) {
+  const cat = String(category || "").toLowerCase();
+  if (cat !== "preference" && cat !== "principle") return null;
+  if (!project || project === "global") return null;
+  if (m && (m.profile_promote === false || m.profile_promote === "false")) return null;
+  const normTitle = normalizeSemanticText(title);
+  if (!normTitle || normTitle.length < 4) return null;
+
+  const rows = await fetchAll(client, "memories", { lifecycle_status: "active" });
+  const projects = new Set([project]);
+  for (const r of rows) {
+    if (!r || r.invalid_at) continue;
+    if (r.lifecycle_status && r.lifecycle_status !== "active") continue;
+    if (String(r.project || "") === "global") continue;
+    if (normalizeSemanticText(r.title) !== normTitle) continue;
+    projects.add(String(r.project || ""));
+  }
+  if (projects.size < 2) return null;
+
+  // 幂等：global 下已有同标题画像则复用，避免每次印证都新增一条
+  const existingGlobal = (await fetchAll(client, "memories", { project: "global" }))
+    .filter((r) => r && !r.invalid_at && normalizeSemanticText(r.title) === normTitle);
+  if (existingGlobal.length > 0) return existingGlobal[0];
+
+  const now = nowSql();
+  const profileTags = "profile, profile:converged, " + cat;
+  const payload = {
+    project: "global",
+    category: cat,
+    scope_level: "user",
+    client: "system",
+    origin: "profile-convergence",
+    title,
+    content,
+    full_text: fullText || content,
+    tags: profileTags,
+    related_entities: relatedEntities,
+    content_fingerprint: semanticFingerprint("global", cat, title, content, profileTags),
+    confidence_score: confidence,
+    lifecycle_status: "active",
+    superseded_by_id: null,
+    revision: 1,
+    recurrence: projects.size,
+    retrieval_count: 0,
+    invalid_at: null,
+    invalid_reason: "",
+    expires_at: expiresAtFor("user"),
+    last_used_at: null,
+    created_at: now,
+    updated_at: now,
+    source_session: null,
+    source_turn: null,
+  };
+  const created = await client.create("memories", payload);
+  return created || null;
+}
+
+/**
+ * 新记忆落库后的派生事务：接力棒链核销 + 跨项目画像收敛。
+ * 任何一步失败都 fail-open —— 派生能力缺失绝不能让主写入丢数据。
+ */
+async function _processHandoffAndProfile(client, project, newId, allActiveRows, m, category, scopeLevel, tags, title, content, fullText, relatedEntities, confidence) {
+  if (!newId) return null;
+  let handoffSuperseded = 0;
+  try {
+    handoffSuperseded = await _supersedeStaleHandoffs(client, project, newId, allActiveRows, tags);
+  } catch (_) {
+    // fail-open：核销失败只会留下多条 open 交接棒，不影响本次写入结果
+  }
+  let profile = null;
+  if (scopeLevel !== "session" && scopeLevel !== "turn") {
+    try {
+      profile = await _promoteCrossProjectProfile(client, project, m, category, tags, title, content, fullText, relatedEntities, confidence);
+    } catch (_) {
+      // fail-open：画像收敛属于增强能力，失败时静默降级（无全局画像，本地记忆照常可用）
+      profile = null;
+    }
+  }
+  return { handoff_superseded: handoffSuperseded, profile };
+}
