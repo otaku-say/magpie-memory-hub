@@ -1,6 +1,6 @@
 {
   "name": "magpie-memory-hub",
-  "version": "6.45.0",
+  "version": "6.45.1",
   "description": "Magpie \u7f51\u5173\u7684\u900f\u660e\u8bb0\u5fc6\u5c42\uff1a\u81ea\u52a8\u63d0\u70bc\u4e0a\u4e0b\u6587\u5b58\u5165 NoCodeBackend\uff0c\u5411 agent \u63d0\u4f9b\u8bb0\u5fc6\u68c0\u7d22\u4e0e R2 \u6587\u4ef6\u5b58\u50a8 MCP \u5de5\u5177\uff1b\u5185\u7f6e\u5e42\u7b49\u7684\u6570\u636e\u5e93\u521d\u59cb\u5316\u4e0e\u6e05\u7a7a\u3002",
   "type": "module",
   "main": "./tools.js",
