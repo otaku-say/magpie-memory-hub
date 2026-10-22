@@ -1,6 +1,6 @@
 /**
  * 模块职责: 在线分类模型意图判定 (classify_model / classify_endpoint)，自适应 systemone / chat 端点
- * 依赖: ./scaffolding.js (_diag), ../../model_budget.js (modelBudgetCheck, modelBudgetRecord, getInternalModelHeaders)
+ * 依赖: ./scaffolding.js (_diag), src/domain/token-budget.js (modelBudgetCheck, modelBudgetRecord, getInternalModelHeaders)
  * 被依赖: src/services/harvest/harvest-pipeline.js, src/services/harvest/offline-scan.js, gateway_harvest.hooks.js, gateway_harvest.js
  */
 

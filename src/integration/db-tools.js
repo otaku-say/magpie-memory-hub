@@ -1,6 +1,6 @@
 /**
  * 模块职责：数据库结构管理与 R2 存储工具实现（探针/建库/初始化/重置/差集检测）
- * 依赖：../../ncb_mcp.js, ../../schema.js, src/core/state.js, ../../r2.js, ../../online_models.js
+ * 依赖：src/integration/ncb.js, src/integration/schema.js, src/core/state.js, src/integration/r2-storage.js, src/integration/provider-models.js
  * 被依赖：src/integration/db-tools.js, src/index.js, page_actions.js, tests
  */
 

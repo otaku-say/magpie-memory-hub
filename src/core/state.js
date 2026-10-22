@@ -1,6 +1,6 @@
 /**
  * 模块职责：插件在宿主本地的持久状态（单例状态与文件存取）
- * 依赖：node:fs, node:os, node:path, node:url, ../../semantic_dedup.js
+ * 依赖：node:fs, node:os, node:path, node:url, src/domain/semantic-dedup.js
  * 被依赖：local_state.js, src/core/config.js, src/services/**, src/tools/**, 宿主网关、各测试套件
  */
 

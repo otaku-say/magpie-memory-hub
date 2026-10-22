@@ -1,7 +1,7 @@
 /**
  * 模块职责：只用 MCP key 的数据读写客户端（拼 SQL / 白名单防护 / 标识符与值转义）
- * 依赖：../../schema.js, ../../ncb_mcp.js, src/core/state.js, ../../r2.js
- * 被依赖：../../mcp_client.js, src/integration/ncb.js
+ * 依赖：src/integration/schema.js, src/integration/ncb.js, src/core/state.js, src/integration/r2-storage.js
+ * 被依赖：src/integration/mcp-client.js, src/integration/ncb.js
  */
 import { TABLES } from "./schema.js";
 import { NcbMcp } from "./ncb-client.js";

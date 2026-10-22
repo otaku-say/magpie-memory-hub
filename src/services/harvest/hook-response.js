@@ -1,6 +1,6 @@
 /**
  * 模块职责: 网关响应后置钩子 onResponse 主体（Bounded Await 受限等待、生命周期防护、超时脱钩与任务调度）
- * 依赖: ./scaffolding.js (_diag), ./dialog-extract.js (buildDialogueText, countTurnsFromMessages), ./project-resolve.js (deriveProjectFromCwd), ./harvest-pipeline.js (processDialogueAndHarvest), ./offline-scan.js (isTestMode), ./hook-request.js (_hookProbe), ../../model_budget.js (isInternalHarvestRequest), ../../tools.js (makeClient)
+ * 依赖: ./scaffolding.js (_diag), ./dialog-extract.js (buildDialogueText, countTurnsFromMessages), ./project-resolve.js (deriveProjectFromCwd), ./harvest-pipeline.js (processDialogueAndHarvest), ./offline-scan.js (isTestMode), ./hook-request.js (_hookProbe), src/domain/token-budget.js (isInternalHarvestRequest), tools.js (makeClient)
  * 被依赖: src/services/harvest/index.js, gateway_harvest.hooks.js
  */
 

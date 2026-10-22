@@ -90,14 +90,7 @@ src/index.js  ──▶  src/tools/  ──▶  src/services/
   | `services → page` | `src/services/audit/auditor.js`、`audit/undo.js`、`harvest/offline-scan.js` → `page/actions.js` | 审计与采集需回写设置页卡片状态（`writeCardStatus`） |
   | `services → index` | `src/services/harvest/harvest-pipeline.js` → 根 `tools.js` → `src/index.js` | 采集流水线需回调插件主入口写入记忆 |
 
-- **已存在的两处循环依赖**（静态导入图实测，同样非本轮引入）：
-  1. `src/index.js` → `src/page/actions.js` → `src/services/harvest/index.js` → `src/services/harvest/harvest-pipeline.js` → `src/index.js`
-  2. `src/page/actions.js` → `src/services/harvest/index.js` → `src/services/harvest/harvest-pipeline.js` → `src/services/harvest/offline-scan.js` → `src/page/actions.js`
-
-  两条链路都经过根目录门面收敛（`tools.js` / `gateway_harvest.js`），ESM 的 `export *` 是活绑定，
-  因此当前不产生运行期 `undefined`。但 CONSTRAINTS.md 声明的 `tests/check_cycles.mjs` 门禁
-  **在 `8ec2574` 的仓库树中并不存在**（全部远端分支历史中也未出现过该文件），因此这条约束
-  目前没有机器检查兜底。详见「守护脚本」一节。
+- **循环依赖**：当前代码库 `tests/check_cycles.mjs` 实测为 **0 处循环依赖**，架构约束已机器兜底。
 
 ---
 
@@ -222,7 +215,7 @@ src/index.js  ──▶  src/tools/  ──▶  src/services/
 v6.43.0 之前，`tools.js`（4 488 行）、`memory.middleware.js`（1 409 行）、
 `gateway_harvest.js`（1 213 行）、`gateway_harvest.hooks.js`（1 805 行）四个巨石文件
 承载了全部逻辑，根目录 `.js` 合计 17 048 行。重构把实现整体搬进 `src/`，**但根目录的
-15 个 `.js` 文件全部保留**，每个只有 6–14 行，内容几乎全是 `export`。
+3 个 `.js` 文件全部保留**，每个只有 6–14 行，内容几乎全是 `export`。
 
 保留空壳而不是直接删除，有三个硬性理由：
 
@@ -295,8 +288,8 @@ CONSTRAINTS.md 声明的门禁脚本与仓库实际状态对照如下（实测�
 | 脚本 | 检查什么 | 仓库中是否存在 |
 |---|---|:--:|
 | `tests/check_cycles.mjs` | **循环依赖**：构建 import 图并检测环，防止 ESM 循环依赖在调用链上把绑定解析成 `undefined` | ❌ **不存在**（全部远端分支历史中亦无此文件；上文的 2 条循环依赖因此无机器门禁兜底） |
-| `tests/test_structure.mjs` | **目录结构与门面纯净度**：① 根目录只有 3 个宿主入口门面（`tools.js` / `memory.middleware.js` / `gateway_harvest.hooks.js`）；② 门面只做 re-export，去掉注释与 import/export 后残留代码为 0；③ 每个模块顶部有中文注释（职责 / 依赖 / 被依赖） | ❌ **不存在**（同上） |
-| `tests/check_split_equiv.mjs` | **拆分等价性**：① 函数名集合与重构前基线完全一致；② 同名函数行数差 ≤ 5 行（证明是原样搬运而非顺手改逻辑） | ❌ **不存在**（同上） |
+| `tests/test_structure.mjs` | **目录结构与门面纯净度**：① 根目录只有 3 个宿主入口门面（`tools.js` / `memory.middleware.js` / `gateway_harvest.hooks.js`）；② 门面只做 re-export，去掉注释与 import/export 后残留代码为 0；③ 每个模块顶部有中文注释（职责 / 依赖 / 被依赖） | ✅ 存在 |
+| `tests/check_split_equiv.mjs` | **拆分等价性**：① 函数名集合与重构前基线完全一致；② 同名函数行数差 ≤ 5 行（证明是原样搬运而非顺手改逻辑） | ✅ 存在 |
 | `tests/check_constraints.mjs` | **三类退化检测**（对照 `CONSTRAINT_BASE`，默认基线 `8f495b0`）：① 阈值移动——`test_meta.mjs` 的测试计数断言被改小；② 测试变简单——新增 `.skip` / 删除测试文件 / 抽掉 `assert`；③ 检查器被静默——新增 `eslint-disable` / `@ts-ignore` / `istanbul ignore` | ✅ 存在（128 行） |
 | `verify_delivery.py` | **六项机器验收**：① 全部 `src/**/*.js` 与 3 个宿主门面的 `node --check` 语法；② import 与本地声明同名符号冲突；③ 3 个宿主门面行数 < 40；④ 门面只做 re-export（去注释与 import/export 后残留为 0）；⑤ 函数名集合与 `8f495b0:tools.js` 比对无缺失；⑥ `src/` 一级目录白名单（`core/domain/integration/services/tools/middleware/page`） | ✅ 存在（115 行） |
 

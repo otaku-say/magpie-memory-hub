@@ -2,7 +2,7 @@
  * 模块职责：数据库结构的唯一真相源、DDL 语句生成与幂等迁移计划计算
  * 依赖：无
  * 契约：versionUpsertSQL 显式写 updated_at: (k, v, updated_at)
- * 被依赖：../../schema.js, ../../mcp_client.js, src/integration/db-tools.js, tests
+ * 被依赖：src/integration/schema.js, src/integration/mcp-client.js, src/integration/db-tools.js, tests
  */
 
 export const SCHEMA_VERSION = 6;
