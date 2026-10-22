@@ -925,12 +925,12 @@
 
   /* ---------------- 提交信标 ---------------- */
   function submitAction(op, extra) {
-  var ALLOWED_OPS = ["provision","ncb_check","secret_check","storage_setup","r2_check","clean_probe","model_check","memory_audit","harvest_gateway","sync_snapshot","status","reset"];
-  if (ALLOWED_OPS.indexOf(op) === -1) {
-    say("未知操作: " + op, "bad");
-    setActionButtonsDisabled(false);
-    return;
-  }
+    const ALLOWED_OPS = ["provision","ncb_check","secret_check","storage_setup","r2_check","clean_probe","model_check","memory_audit","harvest_gateway","sync_snapshot","status","reset"];
+    if (!ALLOWED_OPS.includes(op)) {
+      say("未知操作：" + op, "bad");
+      setActionButtonsDisabled(false);
+      return;
+    }
     var targetCard = cardOfOp(op);
     var currentContainerId = containerOfOp(op);
 
@@ -962,7 +962,7 @@
       var payload = collect();
       var action = {
         op: op,
-        id: op + "-" + Date.now(),
+        id: op + "-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10),
         at: Date.now()
       };
       var db = payload.ncb_instance || ($("ncb_instance") && $("ncb_instance").value.trim());
@@ -1066,6 +1066,7 @@
       return;
     }
     var next = collect();
+    delete next._action; // 普通配置保存绝对禁止携带上次执行过的 _action 信标重发！
     var warn = check(next);
     var btn = $("save");
     if (btn) btn.disabled = true;
@@ -1153,6 +1154,15 @@
           var note = "";
           if (cardKey === "ncb" && !next.ncb_secret) {
             note = "（未填写 Secret Key：R2 的列举/删除需要它，留空时这两项不可用，记忆读写不受影响）";
+          } else if (cardKey === "r2") {
+            // 原独立 saveR2 的已填项统计已收敛至此（消除重复实现）
+            var _filled = 0, _any = 0;
+            (CARD_FIELDS.r2 || []).forEach(function (k) { _any++; if (next[k]) _filled++; });
+            if (_filled === 0) {
+              cardSay(statusId, "已保存本卡片（凭据留空，挂载时 NCB 将复用已有连接）", "warn");
+              return;
+            }
+            note = "（已填 " + _filled + "/" + _any + " 项）";
           }
           cardSay(statusId, "已保存本卡片" + note, "ok");
         },
@@ -1169,56 +1179,8 @@
     });
   }
 
-  /* ---------------- 独立保存 R2 设置（卡片 2） ---------------- */
-  function r2Say(msg, kind) {
-    cardSay("r2_status", msg, kind);
-  }
-
-  function saveR2() {
-    if (!window.magpie || !window.magpie.options) {
-      r2Say("桥接未就绪", "bad");
-      return;
-    }
-    var btn = $("btn_save_r2");
-    if (btn) btn.disabled = true;
-    r2Say("保存中…");
-
-    Promise.resolve(window.magpie.options.get()).then(function (remote) {
-      var next = Object.assign({}, remote || {});
-      var filled = 0, any = 0;
-      var R2_FIELDS = CARD_FIELDS.r2;
-      R2_FIELDS.forEach(function (k) {
-        var el = $(k);
-        if (!el) return;
-        var v = String(el.value || "").trim();
-        next[k] = v;
-        any++;
-        if (v) filled++;
-      });
-      return queuedOptionsSet(next, true).then(
-        function (written) {
-          if (btn) btn.disabled = false;
-          current = written || next;
-          fill(current);
-          paintMode(current);
-          if (filled === 0) {
-            r2Say("已保存本卡片（凭据留空，挂载时 NCB 将复用已有连接）", "warn");
-          } else {
-            r2Say("已保存本卡片（已填 " + filled + "/" + any + " 项）", "ok");
-          }
-        },
-        function (e) {
-          if (btn) btn.disabled = false;
-          var m = String((e && e.message) || e);
-          var is429 = /429|too many requests/i.test(m);
-          r2Say(is429 ? "操作过于频繁，请稍后再试（频控 1 秒/次）" : ("保存失败：" + m), is429 ? "warn" : "bad");
-        }
-      );
-    }).catch(function (e) {
-      if (btn) btn.disabled = false;
-      r2Say("读取配置失败：" + String((e && e.message) || e), "bad");
-    });
-  }
+  /* P2-4：原 saveR2 已统一合并入 saveCard("r2")，消除 45 行重复逻辑；
+   * 单行包装 r2Say 已移除，R2 按钮绑定改为直调 saveCard("r2", "btn_save_r2", "r2_status")。 */
 
   function copyMcpUrl() {
     var el = $("mcp_url");
@@ -1359,7 +1321,9 @@
     }
 
     var saveR2Btn = $("btn_save_r2");
-    if (saveR2Btn) saveR2Btn.addEventListener("click", saveR2);
+    if (saveR2Btn) saveR2Btn.addEventListener("click", function () {
+      saveCard("r2", "btn_save_r2", "r2_status");
+    });
 
     var saveCardHarvestBtn = $("btn_save_card_harvest");
     if (saveCardHarvestBtn) {

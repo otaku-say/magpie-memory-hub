@@ -166,6 +166,18 @@ export async function runPendingAction(options, cfg) {
    * 陈旧阈值取 5 分钟：正常点击到宿主加载远小于它。 */
   const STALE_MS = 5 * 60 * 1000;
   if (action.op === "reset") {
+    // P1 清库纵深：严格校验时间戳有效性（fail-closed）。0/NaN/负数/超 5 分钟均拒绝，
+    // 防止伪造或重放的老信标触发破坏性清库（覆盖 state.missing 分支的盲区）。
+    const atNum = Number(action.at);
+    if (!Number.isFinite(atNum) || atNum <= 0 || (Date.now() - atNum > STALE_MS)) {
+      return {
+        ran: false, op: action.op, id: action.id,
+        ok: false, action: "NOOP",
+        error: "清库信标已失效或时间戳非法（超过 5 分钟限制），拒绝执行破坏性清库操作",
+        reason: "清库信标已失效或时间戳非法（超过 5 分钟限制），拒绝执行破坏性清库操作。" +
+          "请在设置页重新点击「清空数据库」提交一条新任务。",
+      };
+    }
     if (!state.ok) {
       return {
         ran: false, op: action.op, id: action.id,
@@ -587,7 +599,8 @@ async function execute(action, cfg, fs, sp, state, options) {
         }
       })();
     }
-    else result = await dbStatus(cfg, args);
+    else if (action.op === "status") result = await dbStatus(cfg, args);
+    else { result = { ok: false, op: action.op, at: Date.now(), title: "未知操作", lines: ["不支持的操作：" + String(action.op)] }; }
   } catch (e) {
     result = { ok: false, op: action.op, error: String(e && e.message || e) };
   }
