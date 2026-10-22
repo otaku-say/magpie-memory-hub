@@ -677,8 +677,18 @@ async function listMemories(client2, table, params) {
   }
   return [];
 }
+/** 协作快照的空态工厂：每次返回全新对象，避免多处共享引用被就地改写。
+ * mailbox 与 handoff/profile/health 同源（memories 表 tags 中的 mail:unread），零 DDL。 */
+function emptyCollabSnapshot() {
+  return {
+    handoff: { open: false },
+    profile: [],
+    health: { active: 0, cold: 0, invalid: 0 },
+    mailbox: { unread: 0, from: "", title: "", at: 0, ids: [] },
+  };
+}
 async function collectCollabSnapshot(client2, project) {
-  const empty = { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } };
+  const empty = emptyCollabSnapshot();
   if (!client2) return empty;
   let projRows = [];
   let globalRows = [];
@@ -709,16 +719,30 @@ async function collectCollabSnapshot(client2, project) {
     if (project && project !== "global") params.project = project;
     invalid = (await listMemories(client2, "memories", params)).length;
   } catch (_) {}
+  // 跨项目信箱：未读 = 当前项目命名空间下 tags 含 mail:unread 且未失效的记录
+  // （与 memory_context 的 _detectAndClaimHandoff 判定口径一致；无 project 时退化为全库视图）
+  const unreadMail = projRows
+    .filter((r) => hasTag(r, "mail:unread") && !r.invalid_at && (!r.lifecycle_status || r.lifecycle_status === "active"))
+    .sort((a, b) => Date.parse(b.updated_at || b.created_at || 0) - Date.parse(a.updated_at || a.created_at || 0));
+  const latestMail = unreadMail[0] || null;
+  const mailbox = {
+    unread: unreadMail.length,
+    ids: unreadMail.map((r) => r.id),
+    from: latestMail ? String(latestMail.client || latestMail.origin || "未知 Agent") : "",
+    title: latestMail ? String(latestMail.title || "").slice(0, 120) : "",
+    at: latestMail ? (Date.parse(latestMail.updated_at || latestMail.created_at || 0) || 0) : 0,
+  };
   return {
     handoff: open ? { open: true, title: String(open.title || ""), summary: String(open.content || "").slice(0, 200), from: String(open.client || open.origin || "未知 Agent"), at: Date.parse(open.updated_at || open.created_at || 0) || 0 } : { open: false },
     profile,
     health: { active: pool.length, cold, invalid },
+    mailbox,
   };
 }
 async function execHandoffClaim(action, cfg, client2, options) {
   const project = resolveCollabProject(action, cfg, options);
   if (!client2) {
-    const snap = { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } };
+    const snap = emptyCollabSnapshot();
     return { ok: true, at: Date.now(), op: "handoff_claim", title: "暂无可核销的交接任务", lines: ["当前项目无待认领交接（handoff:open 为空）。", "无需操作"], detail: snap };
   }
   try {
@@ -740,13 +764,13 @@ async function execHandoffClaim(action, cfg, client2, options) {
     snap.handoff = Object.assign({}, snap.handoff, { lastClaimedAt: Date.now() });
     return { ok: true, at: Date.now(), op: "handoff_claim", title: "交接任务已核销认领", lines: [`已认领：「${String(open.title || "").slice(0, 60)}」`, "单次消费，不可重复认领"], detail: snap };
   } catch (e) {
-    return { ok: false, at: Date.now(), op: "handoff_claim", title: "核销认领失败", lines: [`原因：${String((e && e.message) || e).slice(0, 120)}`, "请检查数据库连接后重试"], detail: { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } } };
+    return { ok: false, at: Date.now(), op: "handoff_claim", title: "核销认领失败", lines: [`原因：${String((e && e.message) || e).slice(0, 120)}`, "请检查数据库连接后重试"], detail: emptyCollabSnapshot() };
   }
 }
 async function execCompactCold(action, cfg, client2, options) {
   const project = resolveCollabProject(action, cfg, options);
   if (!client2) {
-    const snap = { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } };
+    const snap = emptyCollabSnapshot();
     return { ok: true, at: Date.now(), op: "compact_cold", title: "冷记忆压缩就绪（无可用连接）", lines: ["当前无数据库连接，压缩任务已跳过。", "未执行"], detail: snap };
   }
   try {
@@ -756,12 +780,12 @@ async function execCompactCold(action, cfg, client2, options) {
     snap.health.compacted = `本次压缩 ${res.compacted} 条 · 释放 ${res.saved_chars} 字符 · 剩余待压缩 ${snap.health.cold} 条`;
     return { ok: true, at: Date.now(), op: "compact_cold", title: res.compacted > 0 ? `冷记忆压缩完成（${res.compacted} 条）` : "冷记忆压缩完成（无待压缩）", lines: [`本次压缩：${res.compacted} 条（释放 ${res.saved_chars} 字符）`, `剩余待压缩：${snap.health.cold} 条`], detail: snap };
   } catch (e) {
-    return { ok: false, at: Date.now(), op: "compact_cold", title: "冷记忆压缩失败", lines: [`原因：${String((e && e.message) || e).slice(0, 120)}`, "请检查数据库连接后重试"], detail: { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } } };
+    return { ok: false, at: Date.now(), op: "compact_cold", title: "冷记忆压缩失败", lines: [`原因：${String((e && e.message) || e).slice(0, 120)}`, "请检查数据库连接后重试"], detail: emptyCollabSnapshot() };
   }
 }
 
 /** 直接执行信标动作（供测试或内部直接调用） */
-export async function executeAction(action, cfg, targetDb, customStatusPath) {
+export async function executeAction(action, cfg) {
   const fsMod = await import("node:fs");
   const osMod = await import("node:os");
   const pathMod = await import("node:path");

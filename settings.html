@@ -755,6 +755,21 @@
 
       <div class="row" aria-live="polite">
         <div class="row-head">
+          <span id="lbl_mailbox">跨项目信箱</span>
+          <span class="badge req" id="mailbox_badge">未读提醒</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">展示当前项目是否有其他 Agent 投递的未读协作信件（[Agent Mailbox: X unread messages]）与最新信件来源。信件在智能体读取上下文时单次消费，读后自动标记 mail:read。</div>
+        </div>
+        <div class="control">
+          <div class="collab-block" id="mailbox_block" role="status" aria-live="polite">
+            <div class="log-line">正在读取跨项目信箱…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" aria-live="polite">
+        <div class="row-head">
           <span id="lbl_profile">全局画像</span>
           <span class="badge">跨项目收敛</span>
         </div>
@@ -784,6 +799,21 @@
         <div class="btn-row">
           <button type="button" id="btn_compact_cold">一键执行冷记忆抽取压缩</button>
         </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="explain_debug" id="lbl_explain_debug">检索可解释性追踪</label>
+          <span class="badge rec">调试 关</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">开启后 memory_search / pitfall_search 会透出各路打分（原始词面分、改写词面分、实体分、新鲜度因子、综合排序分、Rerank 名次）与各阶段耗时明细，用于排查排序异常。</div>
+          <div class="hint-diff"><strong>开</strong>：结果附带 score_details 与 timings，返回体积增大，仅调试期使用；<strong>关</strong>：仅返回精简结果，零额外开销。</div>
+        </div>
+        <div class="side">
+          <label class="switch"><input type="checkbox" id="explain_debug"><span></span></label>
+        </div>
+        <div class="hint-desc collab-explain-hint" id="explain_debug_hint">当前：关（检索结果不带打分与耗时明细）</div>
       </div>
 
       <div class="action-status-box" id="collab_action_status" style="display:none;"></div>

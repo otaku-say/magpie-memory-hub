@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 const HTML = readFileSync(new URL("../settings.html", import.meta.url), "utf8");
 const JS = readFileSync(new URL("../src/page/settings.js", import.meta.url), "utf8");
+const CSS = readFileSync(new URL("../src/page/settings.css", import.meta.url), "utf8");
 
 let fail = 0;
 const ok = (m) => console.log(`  ✓ ${m}`);
@@ -23,7 +24,17 @@ function makeEl(id, tag = "input") {
       return this.textContent || "";
     },
     set innerText(v) { this._innerText = v; },
-    classList: { add() {}, remove() {}, contains() { return false; } },
+    classList: {
+      _set: new Set(),
+      add(c) { this._set.add(c); },
+      remove(c) { this._set.delete(c); },
+      contains(c) { return this._set.has(c); },
+      toggle(c, on) {
+        var want = (on === undefined) ? !this._set.has(c) : !!on;
+        if (want) this._set.add(c); else this._set.delete(c);
+        return want;
+      },
+    },
     addEventListener(ev, fn) { (this._events[ev] = this._events[ev] || []).push(fn); },
     removeEventListener() {},
     fire(ev, arg) { (this._events[ev] || []).forEach((f) => f(arg || { target: this })); },
@@ -406,6 +417,185 @@ console.log("\n=== 11. 状态回传渲染测试（伪造 window.__memhubStatus �
   check(gatewayText.includes("对话提炼完成"), "harvest_action_status 包含 gateway.title");
   check(gatewayText.includes("已扫描对话轮次：30"), "harvest_action_status 包含 gateway.lines[0]");
   check(gatewayText.includes("提炼记忆已入库：5 条事实"), "harvest_action_status 包含 gateway.lines[1]");
+}
+
+console.log("\n=== 12. 协作卡片真实 DOM 结构断言（card_collab / 各区块 / 按钮 / 开关）===");
+{
+  const cardMatch = HTML.match(/<details class="card" id="card_collab"[\s\S]*?<\/details>/);
+  check(!!cardMatch, "settings.html 存在 <details class=\"card\" id=\"card_collab\"> 协作卡片");
+  const card = cardMatch ? cardMatch[0] : "";
+
+  check(/<summary>[\s\S]*?任务接力与记忆自洁[\s\S]*?<\/summary>/.test(card), "协作卡片 summary 标题为「任务接力与记忆自洁」");
+  check(/跨 Agent 交接核销/.test(card) && /冷记忆压缩/.test(card), "协作卡片副标题覆盖交接核销与冷记忆压缩");
+
+  // 四个真实内容区块：必须是 role=status + aria-live=polite 的动态容器
+  for (const id of ["handoff_block", "mailbox_block", "profile_block", "health_block"]) {
+    const re = new RegExp(`<div class="collab-block" id="${id}" role="status" aria-live="polite">`);
+    check(re.test(card), `区块 #${id} 为 role=status / aria-live=polite 的真实容器`);
+  }
+
+  // 三个按钮：必须是 type=button（防表单隐式提交），且带中文可读文案
+  const btnSpecs = [
+    ["btn_handoff_claim", "手动核销认领"],
+    ["btn_collab_refresh", "刷新协作状态"],
+    ["btn_compact_cold", "一键执行冷记忆抽取压缩"],
+  ];
+  for (const [id, text] of btnSpecs) {
+    const re = new RegExp(`<button type="button" id="${id}"[^>]*>${text}</button>`);
+    check(re.test(card), `按钮 #${id} 为 type=button 且文案为「${text}」`);
+  }
+
+  // 跨项目信箱区块：标题 + 未读徽章 + 明确的 Agent Mailbox 语义说明
+  check(/<span id="lbl_mailbox">跨项目信箱<\/span>/.test(card), "信箱区块标题为「跨项目信箱」");
+  check(/<span class="badge req" id="mailbox_badge">未读提醒<\/span>/.test(card), "信箱区块带「未读提醒」必读徽章");
+  check(/\[Agent Mailbox: X unread messages\]/.test(card), "信箱说明明确给出 [Agent Mailbox: X unread messages] 语义");
+
+  // 检索可解释性追踪开关：真实 checkbox + 关联 label + 推荐值徽章 + 状态文案位
+  check(/<label class="switch"><input type="checkbox" id="explain_debug"><span><\/span><\/label>/.test(card),
+    "explain_debug 为开关结构内的真实 checkbox");
+  check(/<label for="explain_debug" id="lbl_explain_debug">检索可解释性追踪<\/label>/.test(card),
+    "explain_debug 具备可点击的关联 label（无障碍）");
+  check(/for="explain_debug"[\s\S]*?<span class="badge rec">/.test(card), "explain_debug 行带推荐值徽章");
+  check(/id="explain_debug_hint"/.test(card), "explain_debug 具备运行状态文案容器 #explain_debug_hint");
+  check(/各路打分/.test(card) && /耗时明细/.test(card), "explain_debug 提示文案明确说明打分与耗时明细");
+
+  // 前端实现必须真正接到这些节点上（防止只加 HTML 不加逻辑的空壳）
+  check(JS.includes('$("mailbox_block")'), "settings.js 真实读取 #mailbox_block");
+  check(JS.includes("collab-mailbox-unread"), "settings.js 对未读信箱打真实高亮类");
+  check(/escapeHtml\(mail\.from/.test(JS), "信箱来源字段 100% 经 escapeHtml 净化");
+  check(JS.includes('$("explain_debug")') && JS.includes("saveExplainDebug"), "explain_debug 已绑定保存逻辑");
+
+  // CSS 必须消费系统主题变量（暗色自适应），且未读高亮确实存在
+  check(/\.collab-block\.collab-mailbox-unread\s*\{[^}]*border-color:\s*var\(--magpie-amber\)/.test(CSS),
+    "未读信箱高亮样式存在且使用 --magpie-amber");
+  check(/\.collab-mailbox-flag\s*\{[\s\S]*?var\(--magpie-amber\)/.test(CSS), "Agent Mailbox 标记使用主题色变量");
+  check(/\.collab-explain-hint\s*\{[^}]*var\(--magpie-muted\)/.test(CSS), "开关状态文案使用 --magpie-muted 变量");
+}
+
+console.log("\n=== 13. 协作卡运行时渲染断言（含信箱未读高亮与 XSS 净化反证）===");
+{
+  check(typeof global.window.renderCollabBlocks === "function", "window.renderCollabBlocks 已导出可调用");
+  const at = Date.parse("2026-10-22 10:00:00");
+  const snapshot = {
+    detail: {
+      handoff: { open: true, title: "接管检索层", summary: "已完成 3/5", from: "AgentA<script>alert(1)</script>", at },
+      profile: ["偏好：缩进用 2 空格", "<svg onload=alert(1)>"],
+      health: { active: 42, cold: 7, invalid: 3, compacted: "本次压缩 2 条" },
+      mailbox: { unread: 2, from: "AgentB<b>", title: "切库通知 <img src=x onerror=alert(1)>", at, ids: [11, 12] },
+    },
+  };
+  global.window.renderCollabBlocks(snapshot);
+
+  const handoffHtml = els.handoff_block.innerHTML;
+  const mailboxHtml = els.mailbox_block.innerHTML;
+  const profileHtml = els.profile_block.innerHTML;
+  const healthHtml = els.health_block.innerHTML;
+
+  check(handoffHtml.includes("待接力") && handoffHtml.includes("接管检索层") && handoffHtml.includes("已完成 3/5"),
+    "handoff_block 渲染待接力标题与摘要");
+  check(handoffHtml.includes("&lt;script&gt;") && !/<script/i.test(handoffHtml),
+    "handoff 来源 Agent 被 escapeHtml 净化（无 <script> 注入）");
+
+  check(mailboxHtml.includes("[Agent Mailbox: 2 unread messages]"), "mailbox_block 渲染 [Agent Mailbox: 2 unread messages]");
+  check(mailboxHtml.includes("最新来源") && mailboxHtml.includes("AgentB&lt;b&gt;"), "mailbox_block 渲染最新来源并经净化");
+  check(mailboxHtml.includes("切库通知") && !/<img/i.test(mailboxHtml),
+    "mailbox 信件标题被 escapeHtml 净化（无 <img onerror> 注入）");
+  check(els.mailbox_block.classList.contains("collab-mailbox-unread") === true,
+    "有未读信件时 mailbox_block 真实带上 collab-mailbox-unread 高亮类");
+
+  check(profileHtml.includes("偏好：缩进用 2 空格"), "profile_block 渲染全局画像条目");
+  check(profileHtml.includes("&lt;svg") && !/<svg/i.test(profileHtml), "profile 条目被 escapeHtml 净化（无 <svg onload> 注入）");
+
+  check(healthHtml.includes("42") && healthHtml.includes("7") && healthHtml.includes("3"),
+    "health_block 渲染 active / cold / invalid 三项指标");
+  check(healthHtml.includes("本次压缩 2 条"), "health_block 渲染上次压缩说明");
+
+  // 反证：未读归零必须撤掉高亮并给出空态，绝不能残留上一次的红点
+  global.window.renderCollabBlocks({ detail: { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 }, mailbox: { unread: 0, from: "", title: "", at: 0, ids: [] } } });
+  const emptyMailboxHtml = els.mailbox_block.innerHTML;
+  check(!emptyMailboxHtml.includes("[Agent Mailbox:"), "未读为 0 时不渲染 Agent Mailbox 标记");
+  check(emptyMailboxHtml.includes("暂无未读跨项目信件"), "未读为 0 时渲染明确的信箱空态");
+  check(els.mailbox_block.classList.contains("collab-mailbox-unread") === false, "未读为 0 时高亮类被撤除");
+
+  // 反证：完全没有快照时不得凭空编造未读数
+  global.window.renderCollabBlocks(null);
+  check(els.mailbox_block.innerHTML.includes("暂无跨项目信件"), "无快照时信箱渲染读取中/暂无态，绝不编造未读数");
+}
+
+console.log("\n=== 14. 检索可解释性开关真实落盘（勾选即保存，且不丢其它字段）===");
+{
+  await new Promise((r) => setTimeout(r, 1200)); // 绕开频控
+  check(!!els.explain_debug, "找到 explain_debug 复选框");
+  check(els.explain_debug.checked === false, "远端无该字段时默认关闭（不默认开启调试）");
+  check(els.explain_debug_hint.textContent.includes("当前：关"), "初始状态文案为「当前：关」");
+
+  lastSet = null; setCalls = 0;
+  els.explain_debug.checked = true;
+  els.explain_debug.fire("change");
+  check(els.explain_debug_hint.textContent.includes("当前：开"), "勾选后状态文案立即变为「当前：开」");
+  await new Promise((r) => setTimeout(r, 1300));
+  check(setCalls > 0, `勾选后 options.set 被调用 ${setCalls} 次`);
+  if (lastSet) {
+    check(lastSet.explain_debug === true, "explain_debug 已落盘为 true");
+    check(lastSet.ncb_instance === REMOTE.ncb_instance, "保存开关不冲掉 ncb_instance");
+    check(JSON.stringify(lastSet.memories) === JSON.stringify(REMOTE.memories), "保存开关不丢 memories 快照");
+    check(lastSet.some_future_field === REMOTE.some_future_field, "保存开关保留未知扩展字段");
+    check(!lastSet._action, "保存开关绝不携带 _action 信标重发");
+  }
+
+  // 反向：取消勾选同样落盘为 false，证明是双向开关而非一次性
+  await new Promise((r) => setTimeout(r, 1200));
+  lastSet = null; setCalls = 0;
+  els.explain_debug.checked = false;
+  els.explain_debug.fire("change");
+  await new Promise((r) => setTimeout(r, 1300));
+  check(setCalls > 0, `取消勾选后 options.set 被调用 ${setCalls} 次`);
+  if (lastSet) check(lastSet.explain_debug === false, "取消勾选后 explain_debug 落盘为 false");
+  check(els.explain_debug_hint.textContent.includes("当前：关"), "取消勾选后状态文案回到「当前：关」");
+}
+
+console.log("\n=== 15. 协作快照真实产出（actions.js mailbox 未读计数与最新来源）===");
+{
+  const rows = [
+    { id: 11, project: "proj-x", lifecycle_status: "active", tags: "agent-mail, mail:unread", title: "切库通知", client: "AgentB", updated_at: "2026-10-22 10:00:00" },
+    { id: 12, project: "proj-x", lifecycle_status: "active", tags: "mail:unread", title: "旧信", client: "AgentA", updated_at: "2026-10-21 10:00:00" },
+    { id: 13, project: "proj-x", lifecycle_status: "active", tags: "mail:unread", title: "已失效的信", client: "AgentC", invalid_at: "2026-10-20 00:00:00", updated_at: "2026-10-23 09:00:00" },
+    { id: 14, project: "global", lifecycle_status: "active", tags: "mail:unread", title: "别的项目的信", client: "AgentG", updated_at: "2026-10-23 08:00:00" },
+    { id: 15, project: "proj-x", lifecycle_status: "active", category: "preference", scope_level: "user", tags: "profile", title: "习惯X", client: "me", updated_at: "2026-10-19 08:00:00" },
+  ];
+  const fakeClient = {
+    list: async (table, params) => {
+      const p = params || {};
+      return { data: rows.filter((r) => (!p.project || r.project === p.project) && (!p.lifecycle_status || r.lifecycle_status === p.lifecycle_status)) };
+    },
+    update: async () => ({ ok: true }),
+  };
+
+  try {
+    const { executeAction } = await import("../src/page/actions.js");
+    const res = await executeAction(
+      { op: "handoff_claim", id: "collab-snapshot-" + Date.now(), at: Date.now(), project: "proj-x" },
+      { options: { dir: "/tmp" }, client: fakeClient }
+    );
+    check(res && res.ran === true, "executeAction 真实执行 handoff_claim 信标");
+    const snap = res && res.result && res.result.detail;
+    check(!!snap && !!snap.mailbox, "协作快照 detail.mailbox 存在（前端渲染的唯一数据源）");
+    if (snap && snap.mailbox) {
+      check(snap.mailbox.unread === 2, `mailbox.unread 精确为 2（实际 ${snap.mailbox.unread}）`);
+      check(snap.mailbox.from === "AgentB", `mailbox.from 取最新信件来源 AgentB（实际 ${snap.mailbox.from}）`);
+      check(snap.mailbox.title === "切库通知", "mailbox.title 取最新信件标题");
+      check(snap.mailbox.at > 0, "mailbox.at 为可渲染的时间戳");
+      check(Array.isArray(snap.mailbox.ids) && snap.mailbox.ids.length === 2, "mailbox.ids 精确列出 2 封未读");
+      check(!snap.mailbox.ids.includes(13), "反证：已失效（invalid_at）的信件不得计入未读");
+      check(!snap.mailbox.ids.includes(14), "反证：其它项目（global）的信件不得计入本项目的未读");
+      check(!("handoff" in snap) || snap.handoff.open === false, "无 handoff:open 时交接态如实为未开启");
+    }
+    const detailObj = (res && res.result && res.result.detail) || null;
+    check(!!detailObj && !!(detailObj.mailbox || detailObj.collab),
+      "快照 structure 可供设置页 renderCollabBlocks 直读");
+  } catch (e) {
+    no("协作快照调用失败：" + String((e && e.message) || e));
+  }
 }
 
 // 门禁与隔离凭据（符合 test_meta 规范）
