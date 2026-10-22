@@ -653,7 +653,7 @@ function extractDialogueText(turn) {
   return stripScaffolding(parts.join("\n"));
 }
 
-function turnFingerprint(turn) {
+function offlineTurnKey(turn) {
   const agent = String(turn.agent || turn.Agent || "").trim();
   const session = String(turn.session || turn.Session || "").trim();
   const time = String(turn.time || turn.Time || "").trim();
@@ -837,7 +837,7 @@ export async function harvestGateway(args, context) {
       const sourceSession = sessId ? sessId.slice(0, 128) : null;
       const sourceTurn = (typeof turn.turn === "number" && turn.turn >= 1) ? Math.floor(turn.turn) : turnIndex;
 
-      const fp = turnFingerprint(turn);
+      const fp = offlineTurnKey(turn);
       if (!options.force_rescan && processedFpSet.has(fp)) {
         continue;
       }
