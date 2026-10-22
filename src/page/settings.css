@@ -1237,6 +1237,35 @@ code, .mono {
 .collab-empty {
   color: var(--magpie-muted);
 }
+
+/* ---------- 跨项目信箱（未读高亮，暗色自适应） ---------- */
+.collab-block.collab-mailbox-unread {
+  border-color: var(--magpie-amber);
+  background: color-mix(in srgb, var(--magpie-amber) 12%, var(--magpie-bg));
+}
+.collab-mailbox-flag {
+  font-family: var(--magpie-code);
+  font-size: var(--fs-code);
+  font-weight: 700;
+  color: var(--magpie-amber);
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+.collab-mailbox-latest {
+  color: var(--magpie-fg-2);
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+.collab-mailbox-latest .who {
+  color: var(--magpie-fg);
+  font-weight: 600;
+}
+
+/* ---------- 检索可解释性追踪开关 ---------- */
+.collab-explain-hint {
+  margin-top: 6px;
+  color: var(--magpie-muted);
+}
 @media (max-width: 560px) {
   .collab-stats {
     grid-template-columns: 1fr;

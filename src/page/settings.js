@@ -51,7 +51,8 @@
     "ccr_cards",
     "inject_principles",
     "search_rewrite",
-    "search_rerank"
+    "search_rerank",
+    "explain_debug"
   ];
 
   var current = {};
@@ -340,6 +341,18 @@
       $("dedup_day").value = isNaN(dv) ? 1 : Math.max(1, Math.min(28, dv));
     }
     updateDedupUI();
+    paintExplainHint();
+  }
+
+  /* 检索可解释性追踪开关的即时文案（关闭时不产生任何额外传输开销） */
+  function paintExplainHint() {
+    var el = $("explain_debug");
+    var hint = $("explain_debug_hint");
+    if (!hint) return;
+    var on = !!(el && el.checked);
+    hint.textContent = on
+      ? "当前：开（检索结果附带 score_details 与 timings 明细）"
+      : "当前：关（检索结果不带打分与耗时明细）";
   }
 
   function collect() {
@@ -958,12 +971,14 @@
     var hb = $("handoff_block");
     var pb = $("profile_block");
     var tb = $("health_block");
-    if (!hb && !pb && !tb) return;
+    var mb = $("mailbox_block");
+    if (!hb && !pb && !tb && !mb) return;
     var d = (collab && collab.detail && typeof collab.detail === "object") ? collab.detail : null;
     if (!d) {
       if (hb) hb.innerHTML = '<div class="log-line">暂无待接力任务（当前项目无 handoff:open 记录）。</div>';
       if (pb) pb.innerHTML = '<div class="log-line">暂无全局画像（跨项目收敛习惯为空）。</div>';
       if (tb) tb.innerHTML = '<div class="log-line">暂无健康指标（等待宿主回传）。</div>';
+      if (mb) mb.innerHTML = '<div class="log-line">暂无跨项目信件（当前项目无 mail:unread 记录）。</div>';
       return;
     }
     if (hb) {
@@ -981,6 +996,25 @@
         hb.innerHTML = '<div class="collab-empty">暂无待接力任务' +
           (h && h.lastClaimedAt ? "（上次核销：" + escapeHtml(collabTime(h.lastClaimedAt)) + "）" : "（当前项目无 handoff:open 记录）") +
           "。</div>";
+      }
+    }
+    if (mb) {
+      var mail = d.mailbox || null;
+      var unreadRaw = mail ? parseInt(mail.unread, 10) : 0;
+      var unread = (!isNaN(unreadRaw) && unreadRaw > 0) ? unreadRaw : 0;
+      if (mb.classList) {
+        if (unread > 0) { if (mb.classList.add) mb.classList.add("collab-mailbox-unread"); }
+        else if (mb.classList.remove) mb.classList.remove("collab-mailbox-unread");
+      }
+      if (unread > 0) {
+        var mh = '<div class="collab-mailbox-flag">[Agent Mailbox: ' + escapeHtml(unread) + ' unread messages]</div>';
+        mh += '<div class="collab-mailbox-latest">最新来源：<span class="who">' + escapeHtml(mail.from || mail.latest_from || "未知 Agent") + "</span>";
+        if (mail.title) mh += " · " + escapeHtml(String(mail.title).slice(0, 120));
+        if (mail.at) mh += " · " + escapeHtml(collabTime(mail.at));
+        mh += "</div>";
+        mb.innerHTML = mh;
+      } else {
+        mb.innerHTML = '<div class="collab-empty">暂无未读跨项目信件（当前项目无 mail:unread 记录）。</div>';
       }
     }
     if (pb) {
@@ -1197,6 +1231,31 @@
       function (e) {
         if (btn) btn.disabled = false;
         say("保存失败：" + (e && e.message ? e.message : e), "bad");
+      }
+    );
+  }
+
+  /* 检索可解释性追踪：勾选即落盘（单开关独立保存，绝不携带 _action 信标重发） */
+  function saveExplainDebug() {
+    var el = $("explain_debug");
+    if (!el) return;
+    if (!window.magpie || !window.magpie.options) {
+      say("桥接未就绪", "bad");
+      return;
+    }
+    var next = collect();
+    delete next._action;
+    next.explain_debug = !!el.checked;
+    queuedOptionsSet(next, true).then(
+      function (written) {
+        current = written || next;
+        paintExplainHint();
+        say(next.explain_debug
+          ? "检索可解释性追踪已开启（检索结果将附带打分与耗时明细）"
+          : "检索可解释性追踪已关闭（恢复精简结果）", "ok");
+      },
+      function (e) {
+        say("保存失败：" + String((e && e.message) || e), "bad");
       }
     );
   }
@@ -1609,6 +1668,15 @@
     if (collabRefreshBtn) {
       collabRefreshBtn.addEventListener("click", function () {
         refreshCollabBlocks();
+      });
+    }
+
+    // 检索可解释性追踪：勾选即保存（无需再点底部保存）
+    var explainDebugEl = $("explain_debug");
+    if (explainDebugEl) {
+      explainDebugEl.addEventListener("change", function () {
+        paintExplainHint();
+        saveExplainDebug();
       });
     }
 
