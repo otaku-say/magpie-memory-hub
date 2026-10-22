@@ -8,6 +8,25 @@ import { normalizeToolArgs } from "./args.js";
 import { rowsOf } from "../integration/ncb.js";
 import { jsonOut } from "../domain/scoring.js";
 
+/**
+ * feedback=helpful 提权：confidence +10（封顶 100）、recurrence +1，并顺带累加访问热度。
+ * 落库失败仅吞掉写操作（读取结果不受影响，fail-open），返回回显标记供调用方透出。
+ */
+async function _applyHelpfulFeedback(client, table, id, hit, count, now, helpful) {
+  const patch = { retrieval_count: count, last_used_at: now };
+  if (helpful) {
+    const cur = Number(hit.confidence_score);
+    patch.confidence_score = Math.min(100, (isNaN(cur) ? 100 : cur) + 10);
+    patch.recurrence = (Number(hit.recurrence) || 1) + 1;
+  }
+  try {
+    await client.update(table, id, patch);
+  } catch (_) {
+    return null; // 访问计数/反馈写失败不阻塞读取（fail-open）
+  }
+  return helpful ? "helpful" : null;
+}
+
 export async function memoryGet(client, cfg, rawArgs) {
   const args = normalizeToolArgs(rawArgs, cfg);
   const explicitTable = (rawArgs && rawArgs.table != null && String(rawArgs.table).trim() !== "")
@@ -15,6 +34,7 @@ export async function memoryGet(client, cfg, rawArgs) {
     : null;
   const table = (explicitTable === "pitfalls") ? "pitfalls" : "memories";
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  const helpful = String(args.feedback || "").toLowerCase().trim() === "helpful";
 
   const isBatch = Array.isArray(args.ids) || (args.ids != null && typeof args.ids === "string" && args.ids.includes(","));
   let targetIds = [];
@@ -173,14 +193,11 @@ export async function memoryGet(client, cfg, rawArgs) {
           items.push(formatPitfallRecord(hit, isFallback));
         } else {
           const count = (Number(hit.retrieval_count) || 0) + 1;
-          try {
-            await client.update("memories", tid, {
-              retrieval_count: count,
-              last_used_at: now,
-            });
-          } catch (_) {}
-          const historyInfo = await getSupersededHistory(hit);
-          items.push(formatMemoryRecord(hit, count, now, historyInfo));
+          const fbApplied = await _applyHelpfulFeedback(client, "memories", tid, hit, count, now, helpful);
+          // 先落库（含 helpful 提权）再装配返回体，保证 count / confidence 与回显一致
+          const rec = formatMemoryRecord(hit, count, now, await getSupersededHistory(hit));
+          if (fbApplied) rec.feedback_applied = fbApplied;
+          items.push(rec);
         }
       }
     }
@@ -209,14 +226,12 @@ export async function memoryGet(client, cfg, rawArgs) {
     return jsonOut(formatPitfallRecord(hit, isFallback));
   } else {
     const count = (Number(hit.retrieval_count) || 0) + 1;
-    try {
-      await client.update("memories", singleId, {
-        retrieval_count: count,
-        last_used_at: now,
-      });
-    } catch (_) {}
-    const historyInfo = await getSupersededHistory(hit);
-    return jsonOut(formatMemoryRecord(hit, count, now, historyInfo));
+    const fbApplied = await _applyHelpfulFeedback(client, "memories", singleId, hit, count, now, helpful);
+    // 先落库（含 helpful 提权）再装配返回体，保证 count / confidence 与回显一致
+    const rec = formatMemoryRecord(hit, count, now,
+      await getSupersededHistory(hit));
+    if (fbApplied) rec.feedback_applied = fbApplied;
+    return jsonOut(rec);
   }
 }
 

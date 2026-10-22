@@ -64,15 +64,60 @@ export function rankMemory(row) {
   return conf * (1 + 0.25 * b) * (0.5 + 0.5 * freshness(row));
 }
 
+/** 检索可解释性明细（explain:true 时透出）：词面分、实体加权、新鲜度衰减、综合排序分 */
 export function explainScoreDetails(row, terms) {
+  const list = Array.isArray(terms) ? terms : [];
+  const entities = (Array.isArray(row.related_entities)
+    ? row.related_entities.join(",")
+    : String(row.related_entities || "")
+  ).toLowerCase();
   const f = freshness(row);
   const rank = rankMemory(row);
   return {
+    lexical_score: scoreMemory(row, list),
+    entity_weight: list.filter((t) => entities.includes(t)).length * 3,
     confidence: Number(row.confidence_score) || 100,
     retrieval_count: Number(row.retrieval_count) || 0,
     recurrence: Number(row.recurrence) || 1,
     freshness_factor: Number(f.toFixed(4)),
     rank_score: Number(rank.toFixed(4)),
+  };
+}
+
+/** 踩坑检索可解释性明细：现象/根因/解法词面分 + 复发权重 + 新鲜度衰减（rank_score 为诊断值，不参与排序） */
+export function explainPitfallScoreDetails(row, terms) {
+  const list = Array.isArray(terms) ? terms : [];
+  const f = freshness(row);
+  const rank = (1 + 0.25 * _m8Boost(row)) * (0.5 + 0.5 * f);
+  return {
+    lexical_score: scorePitfall(row, list),
+    recurrence_weight: Number((0.15 * Math.min(Math.max(0, (Number(row.recurrence) || 1) - 1), 20)).toFixed(4)),
+    freshness_factor: Number(f.toFixed(4)),
+    rank_score: Number(rank.toFixed(4)),
+  };
+}
+
+/**
+ * 检索可解释性阶段计时器（explain:true 时启用）
+ * enabled=false 时 mark 为空操作、report 不输出任何字段，保证旧格式零侵入
+ */
+export function createExplainTimer(enabled) {
+  const on = enabled === true;
+  const t0 = Date.now();
+  let last = t0;
+  const ms = { total_ms: 0, rewrite_ms: 0, fetch_ms: 0, score_ms: 0, rerank_ms: 0 };
+  return {
+    mark(phase) {
+      if (!on) return;
+      const now = Date.now();
+      const key = `${phase}_ms`;
+      if (Object.prototype.hasOwnProperty.call(ms, key)) ms[key] = Math.max(0, now - last);
+      ms.total_ms = Math.max(0, now - t0);
+      last = now;
+    },
+    report() {
+      return Object.assign({}, ms);
+    },
   };
 }
 

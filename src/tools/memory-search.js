@@ -6,13 +6,25 @@
 
 import { normalizeToolArgs } from "./args.js";
 import { fetchAll } from "../integration/ncb.js";
-import { scoreMemory, rankMemory, jsonOut, termsOf } from "../domain/scoring.js";
+import { scoreMemory, rankMemory, explainScoreDetails, createExplainTimer, jsonOut, termsOf } from "../domain/scoring.js";
 import { isMemoryValid } from "../domain/validity.js";
 import { trackMemoryRetrievals } from "../services/audit/scheduler.js";
 import { rewriteSearchQuery, rerankSearchResultsWithModel } from "../integration/provider-models.js";
 
+/** 单条命中的可解释性明细（仅 explain:true 时装配，默认路径零字段） */
+function _hitScoreDetails(x, terms, finalRank) {
+  return Object.assign(explainScoreDetails(x.row, terms), {
+    rewrite_score: x.rewriteHit,
+    fusion_score: x.hit,
+    final_rank: finalRank,
+    rerank_score: x._rerank_score || null,
+    rerank_reason: x._rerank_reason || null,
+  });
+}
+
 export async function memorySearch(client, cfg, rawArgs) {
   const args = normalizeToolArgs(rawArgs, cfg);
+  const explain = args.explain === true, tm = createExplainTimer(explain);
   const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
   const rawQuery = String(args.query || "").trim();
   const origTerms = termsOf(rawQuery);
@@ -89,6 +101,7 @@ export async function memorySearch(client, cfg, rawArgs) {
   // 历史版本默认不返回（Headroom：查询默认排除 superseded）
   if (args.include_history !== true) pool = pool.filter((r) => r.lifecycle_status !== "superseded");
   pool = pool.filter((r) => isMemoryValid(r));
+  tm.mark("fetch");
 
   // 优先级 2：在线提炼模型改写自然语言查询（在配置了模型且开启改写时）
   let rewrittenInfo = null;
@@ -111,6 +124,7 @@ export async function memorySearch(client, cfg, rawArgs) {
 
   const hasOrig = origTerms.length > 0;
   const hasRewrite = rewrittenTerms.length > 0;
+  tm.mark("rewrite");
 
   const scored = pool
     .map((r) => {
@@ -144,6 +158,7 @@ export async function memorySearch(client, cfg, rawArgs) {
       }
       return b.hit - a.hit || rankMemory(b.row) - rankMemory(a.row);
     });
+  tm.mark("score");
 
   // 检索增强：模型语义重排与精准挑选（在配置了模型且开启 rerank 时）
   let rerankUsed = false;
@@ -193,8 +208,9 @@ export async function memorySearch(client, cfg, rawArgs) {
       rerankModel = null;
     }
   }
+  tm.mark("rerank");
 
-  const out = scored.slice(0, limit).map((x) => ({
+  const out = scored.slice(0, limit).map((x, i) => Object.assign({
     id: x.row.id,
     project: x.row.project,
     category: x.row.category,
@@ -213,11 +229,11 @@ export async function memorySearch(client, cfg, rawArgs) {
     _hit: x.hit,
     _rerank_score: x._rerank_score || null,
     _rerank_reason: x._rerank_reason || null,
-  }));
+  }, explain ? { score_details: _hitScoreDetails(x, origTerms, i + 1) } : {}));
 
   trackMemoryRetrievals(client, scored.slice(0, limit).map((x) => x.row));
 
-  return jsonOut({
+  return jsonOut(Object.assign({
     total_active: all.length,
     matched: scored.length,
     returned: out.length,
@@ -227,5 +243,5 @@ export async function memorySearch(client, cfg, rawArgs) {
     rerank_model: rerankModel,
     memories: out,
     _agent_hint: "若本次任务产出了新结论、配置变更或排障解法，请在结束前调用 memory_save 或 pitfall_save 沉淀。",
-  });
+  }, explain ? { timings: tm.report() } : {}));
 }

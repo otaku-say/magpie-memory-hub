@@ -6,11 +6,23 @@
 
 import { normalizeToolArgs } from "./args.js";
 import { fetchAll } from "../integration/ncb.js";
-import { scorePitfall, jsonOut, termsOf } from "../domain/scoring.js";
+import { scorePitfall, explainPitfallScoreDetails, createExplainTimer, jsonOut, termsOf } from "../domain/scoring.js";
 import { rewriteSearchQuery, rerankSearchResultsWithModel } from "../integration/provider-models.js";
+
+/** 单条踩坑命中的可解释性明细（仅 explain:true 时装配，默认路径零字段） */
+function _pitfallScoreDetails(x, terms, finalRank) {
+  return Object.assign(explainPitfallScoreDetails(x.row, terms), {
+    rewrite_score: x.rewriteHit,
+    fusion_score: x.hit,
+    final_rank: finalRank,
+    rerank_score: x._rerank_score || null,
+    rerank_reason: x._rerank_reason || null,
+  });
+}
 
 export async function pitfallSearch(client, cfg, rawArgs) {
   const args = normalizeToolArgs(rawArgs, cfg);
+  const explain = args.explain === true, tm = createExplainTimer(explain);
   const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
   const rawQuery = String(args.query || "").trim();
   const origTerms = termsOf(rawQuery);
@@ -57,6 +69,7 @@ export async function pitfallSearch(client, cfg, rawArgs) {
   }
   if (args.client) pool = pool.filter((r) => String(r.client || "") === String(args.client));
   if (args.component) pool = pool.filter((r) => String(r.component || "") === args.component);
+  tm.mark("fetch");
 
   // 双路词面扩展打分：在线提炼模型改写自然语言查询（fail-open）
   let rewrittenInfo = null;
@@ -107,6 +120,7 @@ export async function pitfallSearch(client, cfg, rawArgs) {
       }
       return b.hit - a.hit || (Number(b.row.recurrence) || 0) - (Number(a.row.recurrence) || 0);
     });
+  tm.mark("score");
 
   // 检索增强：调用模型重排候选踩坑
   let rerankUsed = false;
@@ -150,6 +164,7 @@ export async function pitfallSearch(client, cfg, rawArgs) {
       rerankModel = null;
     }
   }
+  tm.mark("rerank");
 
   // EVO-15: 透出诊断标记（内联根因占位判断，与 isPlaceholderRootCause 语义保持一致，后续可提取公共函数）
   const checkRootCausePlaceholder = (rc, sym) => {
@@ -160,7 +175,7 @@ export async function pitfallSearch(client, cfg, rawArgs) {
     return false;
   };
 
-  const out = scored.slice(0, limit).map((x) => {
+  const out = scored.slice(0, limit).map((x, i) => {
     const rec = Number(x.row.recurrence) || 1;
     const isChronic = rec >= 3;
     const rcIsPlaceholder = checkRootCausePlaceholder(x.row.root_cause, x.row.symptom);
@@ -170,9 +185,9 @@ export async function pitfallSearch(client, cfg, rawArgs) {
       _hit: x.hit,
       _rerank_score: x._rerank_score || null,
       _rerank_reason: x._rerank_reason || null,
-    });
+    }, explain ? { score_details: _pitfallScoreDetails(x, origTerms, i + 1) } : {});
   });
-  return jsonOut({
+  return jsonOut(Object.assign({
     total_pitfalls: all.length,
     matched: scored.length,
     returned: out.length,
@@ -186,7 +201,7 @@ export async function pitfallSearch(client, cfg, rawArgs) {
       (out.some((p) => p.is_chronic && p.root_cause_is_placeholder)
         ? " 命中高频顽疾且缺真实根因，排查后请用 pitfall_save 补 root_cause。"
         : ""),
-  });
+  }, explain ? { timings: tm.report() } : {}));
 }
 
 /* 单条或批量读取（CCR 展开用），支持 memories 与 pitfalls 跨表读取 */

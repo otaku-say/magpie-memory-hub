@@ -6,20 +6,47 @@
 
 import { normalizeToolArgs } from "./args.js";
 import { fetchAll, rowsOf } from "../integration/ncb.js";
+import { nowSql } from "../core/config.js";
 import { scoreMemory, scorePitfall, jsonOut, termsOf } from "../domain/scoring.js";
 
-async function _handleFeedback(client, id, feedback) {
-  if (feedback !== "not_helpful") return null;
-  const row = await client.get("memories", id);
-  if (!row) return jsonOut({ ok: false, error: "not found" });
-  const newConf = Math.max(0, (Number(row.confidence_score) || 100) - 25);
-  await client.update("memories", id, { confidence_score: newConf, updated_at: nowSql() });
-  return jsonOut({ ok: true, action: "FEEDBACK_DOWNVOTE", id, confidence_score: newConf });
+const FORGET_FEEDBACK_VALUES = ["not_helpful", "stale", "wrong"];
+
+/**
+ * 记忆质量反馈协议（四分支）：
+ * - not_helpful：降 confidence 25 分（下限 0），不写 invalid_at，记录仍在检索池内；
+ * - stale / wrong：软失效（invalid_at + invalid_reason: "feedback:<值>"）；
+ * - 无 feedback：返回 null，交由调用方走原普通软删除逻辑；
+ * - 非法 feedback：直接抛错，绝不静默回落成误删。
+ */
+async function _handleFeedback(client, id, feedback, table) {
+  if (!feedback) return null;
+  if (!FORGET_FEEDBACK_VALUES.includes(feedback)) {
+    throw new Error(`不支持的 feedback: "${feedback}"（可选 not_helpful / stale / wrong），本次未执行任何删除`);
+  }
+  if (!id) throw new Error("feedback 模式必须提供 id，本次未执行任何删除");
+  if (table === "pitfalls") throw new Error("feedback 仅支持 memories 表（pitfalls 无 confidence_score）");
+  const rows = rowsOf(await client.list("memories", { id, limit: 1 })).filter((r) => Number(r.id) === id);
+  if (!rows.length) return jsonOut({ ok: false, error: "not found" });
+  const row = rows[0];
+  if (feedback === "not_helpful") {
+    const cur = Number(row.confidence_score);
+    const newConf = Math.max(0, (isNaN(cur) ? 100 : cur) - 25);
+    await client.update("memories", id, { confidence_score: newConf, updated_at: nowSql() });
+    return jsonOut({ ok: true, action: "FEEDBACK_DOWNVOTE", id, confidence_score: newConf });
+  }
+  const reason = "feedback:" + feedback;
+  await client.update("memories", id, {
+    invalid_at: nowSql(),
+    invalid_reason: reason,
+    lifecycle_status: "invalid",
+    updated_at: nowSql(),
+  });
+  return jsonOut({ ok: true, action: "FORGET", id, reason });
 }
 
 export async function memoryForget(client, cfg, rawArgs) {
   const args = normalizeToolArgs(rawArgs, cfg);
-  const fb = await _handleFeedback(client, Number(args.id), String(args.feedback || "").toLowerCase().trim());
+  const fb = await _handleFeedback(client, Number(args.id), String(args.feedback || "").toLowerCase().trim(), String(args.table || "").toLowerCase().trim());
   if (fb) return fb;
   const table = (args.table && String(args.table).trim().toLowerCase() === "pitfalls") ? "pitfalls" : "memories";
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
