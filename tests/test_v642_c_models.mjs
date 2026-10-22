@@ -145,10 +145,10 @@ console.log("▶ [Test 1] 正向门 1: package.json 声明 permissions 与 page.
   assert.ok(pkg.magpie.page, "magpie 必须包含 page 配置");
   assert.ok(pkg.magpie.page.titles, "magpie.page 必须声明 titles 多语言映射");
   const titles = pkg.magpie.page.titles;
-  assert.strictEqual(titles.zh, "记忆中枢设置", "titles.zh 必须为「记忆中枢设置」");
-  assert.strictEqual(titles["zh-TW"], "記憶中樞設定", "titles.zh-TW 必须为「記憶中樞設定」");
-  assert.strictEqual(titles.ja, "メモリハブ設定", "titles.ja 必须为「メモリハブ設定」");
-  assert.strictEqual(titles.de, "Memory-Hub-Einstellungen", "titles.de 必须为「Memory-Hub-Einstellungen」");
+  assert.strictEqual(titles.zh, "记忆中枢", "titles.zh 必须为「记忆中枢」");
+  assert.strictEqual(titles["zh-TW"], "記憶中樞", "titles.zh-TW 必须为「記憶中樞」");
+  assert.strictEqual(titles.ja, "メモリハブ", "titles.ja 必须为「メモリハブ」");
+  assert.strictEqual(titles.de, "Memory Hub", "titles.de 必须为「Memory Hub」");
 
   console.log("  ✓ 正向门 1 通过: package.json permissions 与 page.titles 声明完全合规\n");
 }
@@ -207,7 +207,7 @@ console.log("▶ [Test 3] 反证门 2: page.titles 语言缺失/篡改反证");
   // 故意构造缺失 zh-TW 和 ja 的反例
   let caughtTitles = false;
   try {
-    validateTitles({ zh: "记忆中枢设置", de: "Memory-Hub-Einstellungen" });
+    validateTitles({ zh: "记忆中枢", de: "Memory Hub" });
   } catch (err) {
     caughtTitles = true;
     assert.ok(err.message.includes("missing language title for zh-TW"), "必须捕获缺失语言");

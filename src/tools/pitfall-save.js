@@ -225,7 +225,7 @@ export async function pitfallSave(client, cfg, rawArgs, ctx) {
           });
           ironId = createdMem && (createdMem.id || createdMem.insertId);
           if (ironId) {
-            markRecent("m:" + ironFp);
+            markRecent("m:" + project + ":" + ironFp); markRecent("m:" + ironFp);
           }
         } catch (e) {
           if (/duplicate entry/i.test(String(e.message))) {

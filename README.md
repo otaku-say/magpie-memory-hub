@@ -108,7 +108,7 @@ rm -rf /config/home/.cache/magpie/bun/install-cache/*
 
 # 3. 校验版本
 grep '"version"' /config/magpie/plugins/node_modules/magpie-memory-hub/package.json
-# 输出: "version": "6.43.0"
+# 输出: "version": "6.45.3"
 ```
 
 ---

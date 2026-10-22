@@ -42,9 +42,9 @@ function safeEnqueueHarvestItems(items) {
 const RECENT_CAP = 1000;
 const recentFingerprints = new Map();
 
-function markRecentTurn(fp) {
+function markRecentTurn(fp, syncShared = true) {
   if (!fp) return;
-  markRecent(fp);
+  if (syncShared) markRecent(fp);
   if (recentFingerprints.size >= RECENT_CAP) {
     const oldestKey = recentFingerprints.keys().next().value;
     if (oldestKey) recentFingerprints.delete(oldestKey);
@@ -251,8 +251,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       source_turn: sourceTurn,
     };
     safeEnqueueHarvestItems([{ id: queueId, table: "memories", data: memoryPayload, project, fp }]);
-    if (recentFingerprints.size >= RECENT_CAP) { o = recentFingerprints.keys().next().value; if (o) recentFingerprints.delete(o); }
-    recentFingerprints.set(memKey, Date.now());
+    markRecentTurn(memKey, false);
     memoriesSaved++;
   }
 
@@ -308,8 +307,7 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       source_turn: sourceTurn,
     };
     safeEnqueueHarvestItems([{ id: queueId, table: "pitfalls", data: pitfallPayload, project, fp }]);
-    if (recentFingerprints.size >= RECENT_CAP) { o = recentFingerprints.keys().next().value; if (o) recentFingerprints.delete(o); }
-    recentFingerprints.set(pitKey, Date.now());
+    markRecentTurn(pitKey, false);
     pitfallsSaved++;
   }
 

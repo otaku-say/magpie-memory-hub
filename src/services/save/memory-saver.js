@@ -223,7 +223,7 @@ export async function saveMemory(client, cfg, m, ctx) {
 
       try {
         await client.update("memories", dup.id, Object.assign({}, updatePayload, { updated_at: updatePayload.updated_at || nowSql() }));
-        markRecent("m:" + (newFp || dup.content_fingerprint || fp));
+        markRecent("m:" + (newFp || dup.content_fingerprint || fp)); markRecent("m:" + project + ":" + (newFp || dup.content_fingerprint || fp));
         return {
           action: "ENRICHED",
           id: dup.id,
@@ -261,7 +261,7 @@ export async function saveMemory(client, cfg, m, ctx) {
       }
       try {
         await client.update("memories", dup.id, Object.assign({}, updatePayload, { updated_at: updatePayload.updated_at || nowSql() }));
-        markRecent("m:" + (updatePayload.content_fingerprint || dup.content_fingerprint || fp));
+        markRecent("m:" + (updatePayload.content_fingerprint || dup.content_fingerprint || fp)); markRecent("m:" + project + ":" + (updatePayload.content_fingerprint || dup.content_fingerprint || fp));
         const baseNote = dup.content_fingerprint === fp ? "内容未变化，累加复发计数" : "语义相似去重命中，累加复发计数";
         const note = isCrystallized ? (baseNote + "，已升维为 principle") : baseNote;
         return {
@@ -335,7 +335,7 @@ export async function saveMemory(client, cfg, m, ctx) {
 
     try {
       await client.update("memories", crossDup.id, Object.assign({}, updatePayload, { updated_at: now }));
-      markRecent("m:" + (fp || crossDup.content_fingerprint));
+      markRecent("m:" + (fp || crossDup.content_fingerprint)); markRecent("m:" + project + ":" + (fp || crossDup.content_fingerprint));
       let crossNote = isNewPrinciple
         ? ("跨类别去重命中（既有记录分类: " + crossDup.category + " 已升级为 principle），已保留准则版本并累加复发计数")
         : ("跨类别去重命中（既有记录分类: " + crossDup.category + "，传入分类: " + category + "），已合并至既有记录并累加复发计数");

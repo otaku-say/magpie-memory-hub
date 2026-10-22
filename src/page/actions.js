@@ -1,6 +1,6 @@
 /**
  * 模块职责：设置页信标动作执行器（处理设置页按钮触发的后台动作并回写状态）
- * 依赖：src/integration/db-tools.js, src/integration/r2-storage.js, src/core/state.js, ../../gateway_harvest.js, tools.js, ../../gateway_harvest.hooks.js, src/domain/token-budget.js
+ * 依赖：src/integration/db-tools.js, src/integration/r2-storage.js, src/core/state.js, src/core/status-writer.js, src/services/harvest/offline-scan.js, src/services/harvest/extract.js, src/services/harvest/index.js, src/services/audit/auditor.js, src/integration/ncb.js, src/domain/token-budget.js
  * 被依赖：page_actions.js, src/index.js, tests
  */
 /**

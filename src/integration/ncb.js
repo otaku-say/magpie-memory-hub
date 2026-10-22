@@ -110,7 +110,7 @@ export function makeRestClient(cfg, signal) {
       const detail = json.error || json.message || json._raw || "";
       let hint = "";
       if (/secret_key/i.test(String(detail))) {
-        hint = " —— Secret Key 不正确。请在「记忆中枢设置」里填入该 NoCodeBackend 数据库的 Secret Key。";
+        hint = " —— Secret Key 不正确。请在「记忆中枢」里填入该 NoCodeBackend 数据库的 Secret Key。";
       } else if (res.status === 401 || res.status === 403) {
         hint = " —— 该表未对外开放，必须配置正确的数据库 Secret Key。";
       }

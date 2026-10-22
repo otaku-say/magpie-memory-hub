@@ -18,9 +18,7 @@
 
 ```
 ┌─────────────────────────────────────────────────┐
-│ 根目录宿主契约层（tools.js · memory.middleware.js · gateway_*.js）    │
-│ tools.js · memory.middleware.js · gateway_*.js    │
-│ local_state.js · scrub.js · ncb_mcp.js · ...     │
+│ 根目录宿主契约层（tools.js · memory.middleware.js · gateway_harvest.hooks.js） │
 ├─────────────────────────────────────────────────┤
 │ src/tools/    工具入口（MCP 工具处理函数）          │
 ├─────────────────────────────────────────────────┤
@@ -40,7 +38,7 @@
 
 | 层 | 文件数 | 行数 | 定位 |
 |---|---:|---:|---|
-| `src/core/` | 5 | 1 259 | 基础设施：配置常量、宿主本地状态、时间窗口、凭据脱敏 |
+| `src/core/` | 7 | 1 670 | 基础设施：配置常量、宿主本地状态、时间窗口、凭据脱敏、环境检测、状态写入 |
 | `src/domain/` | 5 | 846 | 领域逻辑：指纹、相关性评分、语义去重、模型调用预算、有效性校验 |
 | `src/integration/` | 7 | 3 787 | 外部集成：NoCodeBackend、Cloudflare R2、MCP 客户端、Schema、在线模型 |
 | `src/middleware/` | 6 | 1 455 | 网关中间件：请求注入、流式事件、响应清洗 |
@@ -99,13 +97,15 @@ src/index.js  ──▶  src/tools/  ──▶  src/services/
 下表按 `src/` 一级子目录组织。「主要依赖」列给出该模块的实际 import 目标（已把根目录门面
 还原成其实现所在的层），依据各文件头部注释的「模块职责 / 依赖 / 被依赖」三段式声明。
 
-### `src/core/` — 基础设施（5 个模块 / 1 259 行）
+### `src/core/` — 基础设施（7 个模块 / 1 670 行）
 
 | 文件名 | 行数 | 职责 | 主要依赖 |
 |---|---:|---|---|
-| `config.js` | 92 | 统一配置解析、SQL 时间戳与常量定义（`CATEGORIES`/`SCOPES`/`SEVERITIES`/`FETCH_LIMIT`） | `core/state.js`（门面 `local_state.js`） |
+| `config.js` | 92 | 统一配置解析、SQL 时间戳与常量定义（`CATEGORIES`/`SCOPES`/`SEVERITIES`/`FETCH_LIMIT`） | `core/state.js` |
+| `env.js` | 36 | 运行环境检测（测试模式判定，从 offline-scan.js 下沉以解除循环依赖） | `node:path` |
+| `status-writer.js` | 358 | 设置页信标状态写入器（从 page/actions.js 下沉以解除循环依赖） | `node:fs`/`path`/`url`、`core/state.js` |
 | `sanitize.js` | 91 | 敏感凭据脱敏公共模块（单一真相源实现，幂等占位符） | 无 |
-| `state-recent.js` | 32 | 进程内近期写入指纹单例（防 NCB 约 2 秒写后可见延迟造成的重复写入） | 无 |
+| `state-recent.js` | 49 | 进程内近期写入指纹单例（防 NCB 约 2 秒写后可见延迟造成的重复写入） | 无 |
 | `state.js` | 973 | 插件在宿主本地的持久状态（`state.json` 单例、mtime 缓存、紧凑序列化、文件存取） | `node:fs`/`os`/`path`/`url`、`domain/semantic-dedup.js` |
 | `time.js` | 71 | 定时去重时间窗口计算与触发判定（daily/weekly/monthly → SQL 时间戳） | 无 |
 
@@ -260,24 +260,12 @@ v6.43.0 之前，`tools.js`（4 488 行）、`memory.middleware.js`（1 409 行�
 |---|---:|---|---|
 | `tools.js` | 14 | `src/index.js` + 4 个白名单辅助导出 | ①③ |
 | `memory.middleware.js` | 8 | `src/middleware/memory.middleware.js` | ①③ |
-| `gateway_harvest.js` | 6 | `src/services/harvest/index.js` | ① |
 | `gateway_harvest.hooks.js` | 8 | `src/services/harvest/index.js` | ①③ |
-| `local_state.js` | 6 | `src/core/state.js` | ①③ |
-| `scrub.js` | 6 | `src/core/sanitize.js` | ① |
-| `ncb_mcp.js` | 6 | `src/integration/ncb-client.js` | ①③ |
-| `mcp_client.js` | 6 | `src/integration/mcp-client.js` | ① |
-| `db_tools.js` | 6 | `src/integration/db-tools.js` | ①③ |
-| `r2.js` | 6 | `src/integration/r2-storage.js` | ①③ |
-| `schema.js` | 7 | `src/integration/schema.js` | ① |
-| `semantic_dedup.js` | 6 | `src/domain/semantic-dedup.js` | ① |
-| `model_budget.js` | 6 | `src/domain/token-budget.js` | ① |
-| `online_models.js` | 6 | `src/integration/provider-models.js` | ① |
-| `page_actions.js` | 6 | `src/page/actions.js` | ① |
 
-其中 **`tools.js`、`memory.middleware.js`、`gateway_harvest.hooks.js`** 三个是
-CONSTRAINTS.md 定义的**宿主入口门面**：它们是 `package.json` 声明的宿主加载点，
-且必须保持「去掉注释与 import/export 后残留代码为 0」。其余 12 个是**兼容门面**，
-只为保住①③两类引用而存在。
+根目录仅保留以上 3 个宿主入口门面（`package.json` 声明的宿主加载点，
+且必须保持「去掉注释与 import/export 后残留代码为 0」）。历史兼容门面
+（`gateway_harvest.js`、`local_state.js`、`scrub.js`、`ncb_mcp.js` 等 12 个）
+已随 v6.45.x 重构退役，残留引用已迁移至 `src/` 实现。
 
 ---
 
@@ -287,7 +275,7 @@ CONSTRAINTS.md 声明的门禁脚本与仓库实际状态对照如下（实测�
 
 | 脚本 | 检查什么 | 仓库中是否存在 |
 |---|---|:--:|
-| `tests/check_cycles.mjs` | **循环依赖**：构建 import 图并检测环，防止 ESM 循环依赖在调用链上把绑定解析成 `undefined` | ❌ **不存在**（全部远端分支历史中亦无此文件；上文的 2 条循环依赖因此无机器门禁兜底） |
+| `tests/check_cycles.mjs` | **循环依赖**：构建 import 图并检测环，防止 ESM 循环依赖在调用链上把绑定解析成 `undefined` | ✅ 存在（当前实测 0 处循环依赖） |
 | `tests/test_structure.mjs` | **目录结构与门面纯净度**：① 根目录只有 3 个宿主入口门面（`tools.js` / `memory.middleware.js` / `gateway_harvest.hooks.js`）；② 门面只做 re-export，去掉注释与 import/export 后残留代码为 0；③ 每个模块顶部有中文注释（职责 / 依赖 / 被依赖） | ✅ 存在 |
 | `tests/check_split_equiv.mjs` | **拆分等价性**：① 函数名集合与重构前基线完全一致；② 同名函数行数差 ≤ 5 行（证明是原样搬运而非顺手改逻辑） | ✅ 存在 |
 | `tests/check_constraints.mjs` | **三类退化检测**（对照 `CONSTRAINT_BASE`，默认基线 `8f495b0`）：① 阈值移动——`test_meta.mjs` 的测试计数断言被改小；② 测试变简单——新增 `.skip` / 删除测试文件 / 抽掉 `assert`；③ 检查器被静默——新增 `eslint-disable` / `@ts-ignore` / `istanbul ignore` | ✅ 存在（128 行） |
@@ -300,8 +288,7 @@ CONSTRAINTS.md 声明的门禁脚本与仓库实际状态对照如下（实测�
 | `tests/check_schema_sync.mjs` | Schema 声明与代码实际写入字段是否对齐（防止漏列这类致命 bug） | ✅ 存在（209 行） |
 | `tests/test_exports.mjs` | 导出面复核：`tools.js` 仅允许 9 个白名单导出；`memory.middleware.js` 仅允许 `onRequest`/`onEvent`/`onResponse` | ✅ 存在（32 行） |
 
-> **注意**：CONSTRAINTS.md 的「检查器」小节列出的 7 个命令中，有 3 个
-> （`check_cycles.mjs` / `test_structure.mjs` / `check_split_equiv.mjs`）在当前仓库树中
-> 并不存在。这意味着「无循环依赖」「门面只做 re-export」「拆分等价性」三条架构约束
-> 目前**没有自动化兜底**，需要人工评审把关。补齐这三个脚本属于后续待办。
+> **注意**：`check_cycles.mjs` / `test_structure.mjs` / `check_split_equiv.mjs`
+> 三个脚本在当前仓库树中均已存在（`check_cycles.mjs` 实测 0 处循环依赖），
+> 「无循环依赖」「门面只做 re-export」「拆分等价性」三条架构约束已有自动化兜底。
 > `CONSTRAINTS.md` 是唯一权威来源，脚本只是它的镜像——两者冲突时以 `CONSTRAINTS.md` 为准。
