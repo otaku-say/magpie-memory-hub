@@ -67,8 +67,6 @@ function isRecentTurn(fp) {
 export function turnFingerprint(text) {
   return crypto.createHash("sha256").update(String(text || "").trim()).digest("hex");
 }
-// 向后兼容别名：仅供旧调用方过渡，语义为对话轮次键，不可用于写库指纹（写库指纹用 domain/fingerprint.js）
-export const fingerprint = turnFingerprint;
 
 export async function processDialogueAndHarvest(dialogueText, meta = {}, client = null, options = {}) {
   if (!dialogueText || dialogueText.length < 20) {
