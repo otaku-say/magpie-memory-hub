@@ -451,7 +451,8 @@
     r2: "r2_action_status",
     model: "model_action_status",
     gateway: "harvest_action_status",
-    inject: "inject_action_status"
+    inject: "inject_action_status",
+    collab: "inject_action_status"
   };
 
   /**
@@ -460,10 +461,14 @@
    * - r2: storage_setup, r2_check, clean_probe
    * - model: model_check
    * - gateway: harvest_gateway
+   * - collab: handoff_claim, compact_cold（状态容器复用注入卡，卡片 key 独立用于轮询隔离）
    */
   function cardOfOp(op) {
     if (!op || typeof op !== "string") return "ncb";
     var s = String(op).toLowerCase().trim();
+    if (s === "collab" || s === "handoff_claim" || s === "handoff" || s === "compact_cold" || s === "compact") {
+      return "collab";
+    }
     if (s === "r2" || s === "storage_setup" || s === "r2_check" || s === "clean_probe") {
       return "r2";
     }
@@ -621,6 +626,20 @@
       // 该卡片正在等待更新的结果 → 不用旧结果覆盖等待态
       if (pendingSince[key] && !(card.at >= pendingSince[key])) continue;
       renderStatusBlock(cid, card);
+    }
+    // 协作卡片：handoff_claim / compact_cold 回传挂在 inject.detail.collab，
+    // 渲染三区块（handoff/profile/health），同时把 op 行画进注入卡状态盒。
+    // 非协作 op（如 sync_snapshot）回传时保留已渲染的协作三区块，不用空态覆盖。
+    var collabCard = statusData.collab || statusData.inject || null;
+    var hasCollabDetail = !!(collabCard && collabCard.detail && collabCard.detail.collab);
+    if (hasCollabDetail || (collabCard && (collabCard.op === "handoff_claim" || collabCard.op === "compact_cold"))) {
+      var collabDetail = hasCollabDetail ? collabCard.detail.collab : (collabCard && collabCard.detail ? collabCard.detail : null);
+      renderCollabBlocks(collabDetail ? { detail: collabDetail } : collabCard);
+    }
+    if (collabCard && (collabCard.op === "handoff_claim" || collabCard.op === "compact_cold")) {
+      if (!pendingSince.collab || (collabCard.at >= pendingSince.collab)) {
+        renderStatusBlock(containerOfOp("collab"), collabCard);
+      }
     }
 
     if (statusData.audit) {
@@ -897,7 +916,9 @@
         reset: "清空数据库",
         status: "检查结构状态",
         harvest_gateway: "立即扫描对话录制",
-        sync_snapshot: "刷新记忆快照"
+        sync_snapshot: "刷新记忆快照",
+        handoff_claim: "手动核销认领交接",
+        compact_cold: "冷记忆抽取压缩"
       };
       var opName = opLabels[act.op] || act.op;
       var timeStr = act.at ? new Date(act.at).toLocaleString("zh-CN", { hour12: false }) : "未知时间";
@@ -915,7 +936,7 @@
       "btn_db_provision", "btn_check_ncb", "btn_check_secret", "btn_db_storage_setup", "btn_db_status", "btn_db_reset",
       "btn_confirm_provision", "btn_confirm_reset",
       "btn_check_r2", "btn_clean_probe", "btn_check_model", "btn_memory_audit", "btn_dedup_undo",
-      "btn_harvest_gateway", "btn_sync_snapshot"
+      "btn_harvest_gateway", "btn_sync_snapshot", "btn_handoff_claim", "btn_compact_cold", "btn_collab_refresh"
     ];
     ids.forEach(function (id) {
       var el = $(id);
@@ -923,9 +944,90 @@
     });
   }
 
+  /* ---------------- 任务接力与记忆自洁（协作卡片） ---------------- */
+  /* 数据源：宿主 actions.js 回传的 _status.json collab 卡（detail.handoff/profile/health），
+   * 无状态时渲染"暂无/读取中"空态，绝不凭空编造。所有动态插值 100% 经 escapeHtml。 */
+  function collabTime(ts) {
+    try {
+      if (!ts) return "";
+      return new Date(ts).toLocaleString("zh-CN", { hour12: false });
+    } catch (_) { return ""; }
+  }
+
+  function renderCollabBlocks(collab) {
+    var hb = $("handoff_block");
+    var pb = $("profile_block");
+    var tb = $("health_block");
+    if (!hb && !pb && !tb) return;
+    var d = (collab && collab.detail && typeof collab.detail === "object") ? collab.detail : null;
+    if (!d) {
+      if (hb) hb.innerHTML = '<div class="log-line">暂无待接力任务（当前项目无 handoff:open 记录）。</div>';
+      if (pb) pb.innerHTML = '<div class="log-line">暂无全局画像（跨项目收敛习惯为空）。</div>';
+      if (tb) tb.innerHTML = '<div class="log-line">暂无健康指标（等待宿主回传）。</div>';
+      return;
+    }
+    if (hb) {
+      var h = d.handoff || null;
+      if (h && h.open) {
+        var html = '<div class="collab-meta">';
+        html += '<span class="badge req">待接力</span>';
+        html += '<span class="badge">' + escapeHtml(h.from || "未知 Agent") + '</span>';
+        if (h.at) html += '<span class="badge">' + escapeHtml(collabTime(h.at)) + '</span>';
+        html += "</div>";
+        html += '<div class="collab-title">' + escapeHtml(h.title || "跨 Agent 交接") + "</div>";
+        html += '<div class="collab-summary">' + escapeHtml(h.summary || "") + "</div>";
+        hb.innerHTML = html;
+      } else {
+        hb.innerHTML = '<div class="collab-empty">暂无待接力任务' +
+          (h && h.lastClaimedAt ? "（上次核销：" + escapeHtml(collabTime(h.lastClaimedAt)) + "）" : "（当前项目无 handoff:open 记录）") +
+          "。</div>";
+      }
+    }
+    if (pb) {
+      var list = Array.isArray(d.profile) ? d.profile : [];
+      if (list.length > 0) {
+        var ph = '<ul class="collab-list">';
+        list.slice(0, 8).forEach(function (item) {
+          ph += "<li>" + escapeHtml(item) + "</li>";
+        });
+        ph += "</ul>";
+        pb.innerHTML = ph;
+      } else {
+        pb.innerHTML = '<div class="collab-empty">暂无全局画像（跨项目收敛习惯为空）。</div>';
+      }
+    }
+    if (tb) {
+      var health = d.health || null;
+      if (health) {
+        var th = '<div class="collab-stats">';
+        th += '<div class="collab-stat"><div class="num">' + escapeHtml(health.active) + '</div><div class="lbl">活跃记忆</div></div>';
+        th += '<div class="collab-stat"><div class="num">' + escapeHtml(health.cold) + '</div><div class="lbl">待压缩冷记忆</div></div>';
+        th += '<div class="collab-stat"><div class="num">' + escapeHtml(health.invalid) + '</div><div class="lbl">已失效</div></div>';
+        th += "</div>";
+        if (health.compacted) th += '<div class="collab-summary">上次压缩：' + escapeHtml(health.compacted) + "</div>";
+        tb.innerHTML = th;
+      } else {
+        tb.innerHTML = '<div class="collab-empty">暂无健康指标（等待宿主回传）。</div>';
+      }
+    }
+  }
+
+  function refreshCollabBlocks() {
+    var s = window.__memhubStatus || null;
+    var card = (s && (s.collab || s.inject)) || null;
+    var detail = (card && card.detail && card.detail.collab) ? card.detail.collab : (card && card.detail ? card.detail : null);
+    renderCollabBlocks(detail ? { detail: detail } : card);
+    loadStatus(function () {
+      var s2 = window.__memhubStatus || null;
+      var card2 = (s2 && (s2.collab || s2.inject)) || null;
+      var detail2 = (card2 && card2.detail && card2.detail.collab) ? card2.detail.collab : (card2 && card2.detail ? card2.detail : null);
+      renderCollabBlocks(detail2 ? { detail: detail2 } : card2);
+    });
+  }
+
   /* ---------------- 提交信标 ---------------- */
   function submitAction(op, extra) {
-    const ALLOWED_OPS = ["provision","ncb_check","secret_check","storage_setup","r2_check","clean_probe","model_check","memory_audit","harvest_gateway","sync_snapshot","status","reset"];
+    const ALLOWED_OPS = ["provision","ncb_check","secret_check","storage_setup","r2_check","clean_probe","model_check","memory_audit","harvest_gateway","sync_snapshot","status","reset","handoff_claim","compact_cold"];
     if (!ALLOWED_OPS.includes(op)) {
       say("未知操作：" + op, "bad");
       setActionButtonsDisabled(false);
@@ -1031,6 +1133,10 @@
             msg = "已提交扫描对话录制任务（ID: " + action.id + "）。正在等待宿主执行…";
           } else if (op === "sync_snapshot") {
             msg = "已提交刷新记忆快照任务（ID: " + action.id + "）。正在等待宿主执行…";
+          } else if (op === "handoff_claim") {
+            msg = "已提交手动核销认领任务（ID: " + action.id + "）。正在等待宿主执行…";
+          } else if (op === "compact_cold") {
+            msg = "已提交冷记忆抽取压缩任务（ID: " + action.id + "）。正在等待宿主执行…";
           }
           paintDbStatus(action, msg, "ok", op);
           say("信标已提交", "ok");
@@ -1486,6 +1592,26 @@
       });
     }
 
+    // 协作卡片：手动核销认领 / 一键冷记忆压缩 / 刷新协作状态
+    var handoffClaimBtn = $("btn_handoff_claim");
+    if (handoffClaimBtn) {
+      handoffClaimBtn.addEventListener("click", function () {
+        submitAction("handoff_claim");
+      });
+    }
+    var compactColdBtn = $("btn_compact_cold");
+    if (compactColdBtn) {
+      compactColdBtn.addEventListener("click", function () {
+        submitAction("compact_cold");
+      });
+    }
+    var collabRefreshBtn = $("btn_collab_refresh");
+    if (collabRefreshBtn) {
+      collabRefreshBtn.addEventListener("click", function () {
+        refreshCollabBlocks();
+      });
+    }
+
     // 检查状态
     var statusBtn = $("btn_db_status");
     if (statusBtn) {
@@ -1548,6 +1674,8 @@
     window.loadStatus = loadStatus;
     window.renderStatus = renderAllStatus;
     window.renderAllStatus = renderAllStatus;
+    window.renderCollabBlocks = renderCollabBlocks;
+    window.refreshCollabBlocks = refreshCollabBlocks;
     window.renderDbPrefix = renderDbPrefix;
     window.__renderMemhubStatus = renderAllStatus;
     window.fill = fill;
@@ -1566,6 +1694,7 @@
     if (!window.magpie || !window.magpie.options) {
       say("桥接脚本未加载", "bad");
       loadStatus();
+      refreshCollabBlocks();
       return;
     }
 
@@ -1583,6 +1712,7 @@
         var warn = check(current);
         if (warn) say(warn, "warn");
         loadStatus();
+        refreshCollabBlocks();
       })
       .catch(function (e) {
         say("读取配置失败：" + (e && e.message ? e.message : e), "bad");

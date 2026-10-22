@@ -726,6 +726,70 @@
     </div>
   </details>
 
+  <!-- ⑤ 任务接力与记忆自洁 -->
+  <details class="card" id="card_collab" open>
+    <summary>
+      <span class="chev"></span>
+      <span class="t">任务接力与记忆自洁</span>
+      <span class="sub">跨 Agent 交接核销 · 全局画像 · 冷记忆压缩</span>
+    </summary>
+    <div class="body">
+      <div class="row" aria-live="polite">
+        <div class="row-head">
+          <span id="lbl_handoff">待接力任务</span>
+          <span class="badge rec" id="handoff_badge">跨 Agent 接力</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">展示当前项目是否有跨 Agent 待接力任务（发送 Agent、时间戳、摘要）。核销后单次认领，防止重复消费。</div>
+        </div>
+        <div class="control">
+          <div class="collab-block" id="handoff_block" role="status" aria-live="polite">
+            <div class="log-line">正在读取交接状态…</div>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="btn_handoff_claim">手动核销认领</button>
+          <button type="button" id="btn_collab_refresh">刷新协作状态</button>
+        </div>
+      </div>
+
+      <div class="row" aria-live="polite">
+        <div class="row-head">
+          <span id="lbl_profile">全局画像</span>
+          <span class="badge">跨项目收敛</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">展示已跨项目收敛的个人习惯列表（全局开发者画像，冷启动自动生效）。</div>
+        </div>
+        <div class="control">
+          <div class="collab-block" id="profile_block" role="status" aria-live="polite">
+            <div class="log-line">正在读取全局画像…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" aria-live="polite">
+        <div class="row-head">
+          <span id="lbl_health">记忆自洁与压缩</span>
+          <span class="badge rec">健康度</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">展示记忆健康指标（活跃 / 待压缩 / 已失效），一键执行冷记忆抽取压缩，原文无损留存。</div>
+        </div>
+        <div class="control">
+          <div class="collab-block" id="health_block" role="status" aria-live="polite">
+            <div class="log-line">正在读取健康指标…</div>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="btn_compact_cold">一键执行冷记忆抽取压缩</button>
+        </div>
+      </div>
+
+      <div class="action-status-box" id="collab_action_status" style="display:none;"></div>
+    </div>
+  </details>
+
   <!-- MCP 接入地址 -->
   <section>
     <h2>MCP 接入地址</h2>

@@ -73,6 +73,8 @@ export const OPS = {
   memory_audit: "记忆体检（扫描重复、冲突与高频踩坑，只出建议卡片不改数据）",
   harvest_gateway: "立即扫描网关对话录制并提炼记忆",
   sync_snapshot: "拉取最新活跃记忆快照供前端同步至中间件",
+  handoff_claim: "手动核销认领跨 Agent 交接（单次核销，幂等）",
+  compact_cold: "冷记忆抽取压缩（正则首句摘要，原文留存，幂等）",
 };
 
 function statePath(fs, os, path) {
@@ -600,6 +602,8 @@ async function execute(action, cfg, fs, sp, state, options) {
       })();
     }
     else if (action.op === "status") result = await dbStatus(cfg, args);
+    else if (action.op === "handoff_claim") result = await execHandoffClaim(action, cfg, client, options);
+    else if (action.op === "compact_cold") result = await execCompactCold(action, cfg, client, options);
     else { result = { ok: false, op: action.op, at: Date.now(), title: "未知操作", lines: ["不支持的操作：" + String(action.op)] }; }
   } catch (e) {
     result = { ok: false, op: action.op, error: String(e && e.message || e) };
@@ -616,8 +620,16 @@ async function execute(action, cfg, fs, sp, state, options) {
         memory_audit: "audit",
         harvest_gateway: "gateway",
         sync_snapshot: "inject",
+        handoff_claim: "inject", compact_cold: "inject",
       };
       const cardKey = CARD_OF_OP[action.op] || "ncb";
+      if (action.op === "handoff_claim" || action.op === "compact_cold") {
+        // 协作卡片走注入卡聚合：把 collab 快照挂到 inject.detail.collab，前端 renderCollabBlocks 直读
+        try {
+          const prev = (result && result.detail && typeof result.detail === "object") ? result.detail : {};
+          result.detail = Object.assign({}, prev, { collab: prev });
+        } catch (_) {}
+      }
       writeCardStatus(cardKey, result, action.op);
     }
   } catch (e) {
@@ -641,6 +653,134 @@ async function execute(action, cfg, fs, sp, state, options) {
     history: (state.history || []).concat([{ id: action.id, op: action.op, at: Date.now(), ok: !!(result && result.ok) }]),
   });
   return { ran: true, op: action.op, id: action.id, executed: true, result };
+}
+
+/** 协作卡片状态真相源：handoff_claim / compact_cold 共享同一聚合器，null client 时降级空态。
+ * 幂等：claim 按「tags 含 handoff:open」过滤，未命中即 NOOP；compact 对已压缩（tags 含 compacted）跳过。
+ * 零 DDL：100% 复用 memories 表已有列（category/scope_level/title/content/tags/full_text/invalid_at/invalid_reason）。 */
+function nowSql() {
+  return new Date().toISOString().slice(0, 19).replace("T", " ");
+}
+function hasTag(row, tag) {
+  return String((row && row.tags) || "").split(/[,，\s]+/).some((t) => t === tag);
+}
+function resolveCollabProject(action, cfg, options) {
+  const p = String((action && action.project) || (cfg && cfg.project) || (options && options.project) || "").trim();
+  return p || "";
+}
+async function listMemories(client2, table, params) {
+  if (client2 && typeof client2.list === "function") {
+    const res = await client2.list(table, params);
+    if (Array.isArray(res && res.data)) return res.data;
+    if (Array.isArray(res)) return res;
+    return [];
+  }
+  return [];
+}
+async function collectCollabSnapshot(client2, project) {
+  const empty = { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } };
+  if (!client2) return empty;
+  let projRows = [];
+  let globalRows = [];
+  try {
+    if (project && project !== "global") {
+      [projRows, globalRows] = await Promise.all([
+        listMemories(client2, "memories", { project, lifecycle_status: "active", order_by: "updated_at DESC", limit: 50 }),
+        listMemories(client2, "memories", { project: "global", lifecycle_status: "active", order_by: "updated_at DESC", limit: 50 }),
+      ]);
+    } else {
+      projRows = await listMemories(client2, "memories", { lifecycle_status: "active", order_by: "updated_at DESC", limit: 50 });
+    }
+  } catch (_) { return empty; }
+  const pool = [...projRows, ...globalRows].filter((m) => m && !m.invalid_at && (!m.lifecycle_status || m.lifecycle_status === "active"));
+  const open = (project ? projRows : pool).filter((r) => hasTag(r, "handoff:open") && !r.invalid_at).sort((a, b) => Date.parse(b.updated_at || b.created_at || 0) - Date.parse(a.updated_at || a.created_at || 0))[0] || null;
+  const profile = globalRows.concat(pool.filter((r) => String(r.project || "") === "global"))
+    .filter((r) => ["preference", "principle"].includes(String(r.category || "").toLowerCase()) && !r.invalid_at)
+    .slice(0, 8).map((r) => String(r.title || "").slice(0, 120));
+  let cold = 0;
+  const cutoff = Date.now() - 60 * 24 * 3600 * 1000;
+  for (const r of pool) {
+    const t = Date.parse(r.last_used_at || r.updated_at || r.created_at || 0) || 0;
+    if (t < cutoff && String(r.content || "").length > 240 && !hasTag(r, "compacted")) cold++;
+  }
+  let invalid = 0;
+  try {
+    const params = { lifecycle_status: "invalid", limit: 5 };
+    if (project && project !== "global") params.project = project;
+    invalid = (await listMemories(client2, "memories", params)).length;
+  } catch (_) {}
+  return {
+    handoff: open ? { open: true, title: String(open.title || ""), summary: String(open.content || "").slice(0, 200), from: String(open.client || open.origin || "未知 Agent"), at: Date.parse(open.updated_at || open.created_at || 0) || 0 } : { open: false },
+    profile,
+    health: { active: pool.length, cold, invalid },
+  };
+}
+async function execHandoffClaim(action, cfg, client2, options) {
+  const project = resolveCollabProject(action, cfg, options);
+  if (!client2) {
+    const snap = { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } };
+    return { ok: true, at: Date.now(), op: "handoff_claim", title: "暂无可核销的交接任务", lines: ["当前项目无待认领交接（handoff:open 为空）。", "无需操作"], detail: snap };
+  }
+  try {
+    const params = { lifecycle_status: "active", order_by: "updated_at DESC", limit: 50 };
+    if (project && project !== "global") params.project = project;
+    const rows = await listMemories(client2, "memories", params);
+    const open = rows.filter((r) => hasTag(r, "handoff:open") && !r.invalid_at).sort((a, b) => Date.parse(b.updated_at || b.created_at || 0) - Date.parse(a.updated_at || a.created_at || 0))[0] || null;
+    if (!open) {
+      const snap = await collectCollabSnapshot(client2, project);
+      return { ok: true, at: Date.now(), op: "handoff_claim", title: "暂无可核销的交接任务", lines: ["当前项目无待认领交接（handoff:open 为空）。", "无需操作"], detail: snap };
+    }
+    const now = nowSql();
+    const tags = String(open.tags || "").split(/[,，\s]+/).filter(Boolean).filter((t) => t !== "handoff:open");
+    if (!tags.includes("handoff:claimed")) tags.push("handoff:claimed");
+    try {
+      await client2.update("memories", open.id, { tags: tags.join(","), invalid_at: now, invalid_reason: "handoff_claimed", lifecycle_status: "invalid", updated_at: now });
+    } catch (_) {}
+    const snap = await collectCollabSnapshot(client2, project);
+    snap.handoff = Object.assign({}, snap.handoff, { lastClaimedAt: Date.now() });
+    return { ok: true, at: Date.now(), op: "handoff_claim", title: "交接任务已核销认领", lines: [`已认领：「${String(open.title || "").slice(0, 60)}」`, "单次消费，不可重复认领"], detail: snap };
+  } catch (e) {
+    return { ok: false, at: Date.now(), op: "handoff_claim", title: "核销认领失败", lines: [`原因：${String((e && e.message) || e).slice(0, 120)}`, "请检查数据库连接后重试"], detail: { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } } };
+  }
+}
+function compactExtract(content) {
+  const text = String(content || "");
+  const first = (text.split(/(?<=[。！？.!?])\s*/).filter(Boolean)[0] || text.slice(0, 120)).slice(0, 160);
+  const toks = [...new Set([...text.matchAll(/([A-Za-z]:\\[^\s，。,;；]*|[A-Za-z0-9_./-]+\.(?:js|mjs|py|ts|md|json)|[A-Z]{2,}[_-]?\d+|[a-z_]+(?:_key|_id|_url|_name))/g)].map((m) => m[0]))].slice(0, 6);
+  return { first, toks };
+}
+async function execCompactCold(action, cfg, client2, options) {
+  const project = resolveCollabProject(action, cfg, options);
+  if (!client2) {
+    const snap = { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } };
+    return { ok: true, at: Date.now(), op: "compact_cold", title: "冷记忆压缩就绪（无可用连接）", lines: ["当前无数据库连接，压缩任务已跳过。", "未执行"], detail: snap };
+  }
+  try {
+    const params = { lifecycle_status: "active", order_by: "updated_at DESC", limit: 100 };
+    if (project && project !== "global") params.project = project;
+    const rows = await listMemories(client2, "memories", params);
+    const cutoff = Date.now() - 60 * 24 * 3600 * 1000;
+    const cands = rows.filter((r) => {
+      if (!r || r.invalid_at || hasTag(r, "compacted")) return false;
+      const t = Date.parse(r.last_used_at || r.updated_at || r.created_at || 0) || 0;
+      return t < cutoff && String(r.content || "").length > 240;
+    }).slice(0, 20);
+    let done = 0;
+    for (const r of cands) {
+      const { first, toks } = compactExtract(r.content);
+      const tags = String(r.tags || "").split(/[,，\s]+/).filter(Boolean);
+      if (!tags.includes("compacted")) tags.push("compacted");
+      try {
+        await client2.update("memories", r.id, { full_text: r.full_text || r.content, content: `${first}${toks.length ? `（关键：${toks.join(" / ")}）` : ""}`, tags: tags.join(","), updated_at: nowSql() });
+        done++;
+      } catch (_) {}
+    }
+    const snap = await collectCollabSnapshot(client2, project);
+    snap.health.compacted = `本次压缩 ${done} 条 · 剩余待压缩 ${snap.health.cold} 条`;
+    return { ok: true, at: Date.now(), op: "compact_cold", title: done > 0 ? `冷记忆压缩完成（${done} 条）` : "冷记忆压缩完成（无待压缩）", lines: [`本次压缩：${done} 条`, `剩余待压缩：${snap.health.cold} 条`], detail: snap };
+  } catch (e) {
+    return { ok: false, at: Date.now(), op: "compact_cold", title: "冷记忆压缩失败", lines: [`原因：${String((e && e.message) || e).slice(0, 120)}`, "请检查数据库连接后重试"], detail: { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } } };
+  }
 }
 
 /** 直接执行信标动作（供测试或内部直接调用） */
