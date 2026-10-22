@@ -3,7 +3,7 @@
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
 [![Version](https://img.shields.io/badge/version-v6.45.4-blue.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-88%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-89%20passed-brightgreen.svg)](tests/)
 [![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
 
 ---
@@ -115,10 +115,10 @@ grep '"version"' /config/magpie/plugins/node_modules/magpie-memory-hub/package.j
 
 ## 五、测试与质量保证
 
-全套 **88 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
+全套 **89 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
 
 ```bash
-node tests/test_meta.mjs             # 88 个测试文件元检查（100% 隔离合规）
+node tests/test_meta.mjs             # 89 个测试文件元检查（100% 隔离合规）
 node tests/adversarial_v629_gate.mjs # 红队 6 大核心缺陷反证靶场（6/6 GREEN）
 node tests/test_proactive_memory_ux.mjs # 主动记忆、一站式召回与脱敏专项测试
 node tests/settings_page_test.mjs    # 设置页表单与 DOM 交互测试
@@ -141,7 +141,7 @@ node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 │   │   └── harvest/    对话采集
 │   ├── tools/          MCP 工具入口
 │   └── page/           设置页面
-├── tests/              测试套件（88 套）
+├── tests/              测试套件（89 套）
 ├── docs/               架构文档与决策记录
 └── tools.js 等         仅保留宿主契约入口（tools / middleware / hooks）与运行时状态
 ```

@@ -46,7 +46,7 @@ import { formatCardStatus as _fcs } from "../core/status-writer.js";
 import { parseDbInfo as _pdi } from "../core/status-writer.js";
 import { writeCardStatus as _wcs } from "../core/status-writer.js";
 import { makeClient, fetchAll } from "../integration/ncb.js";
-import { memoryAudit } from "../services/audit/auditor.js";
+import { memoryAudit, compactColdMemories } from "../services/audit/auditor.js";
 
 /** 插件目录下的状态文件路径（供 iframe 内设置页通过 script 标签加载）。 */
 export const STATUS_JS_PATH = fileURLToPath(new URL("../../_status.js", import.meta.url));
@@ -743,12 +743,6 @@ async function execHandoffClaim(action, cfg, client2, options) {
     return { ok: false, at: Date.now(), op: "handoff_claim", title: "核销认领失败", lines: [`原因：${String((e && e.message) || e).slice(0, 120)}`, "请检查数据库连接后重试"], detail: { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } } };
   }
 }
-function compactExtract(content) {
-  const text = String(content || "");
-  const first = (text.split(/(?<=[。！？.!?])\s*/).filter(Boolean)[0] || text.slice(0, 120)).slice(0, 160);
-  const toks = [...new Set([...text.matchAll(/([A-Za-z]:\\[^\s，。,;；]*|[A-Za-z0-9_./-]+\.(?:js|mjs|py|ts|md|json)|[A-Z]{2,}[_-]?\d+|[a-z_]+(?:_key|_id|_url|_name))/g)].map((m) => m[0]))].slice(0, 6);
-  return { first, toks };
-}
 async function execCompactCold(action, cfg, client2, options) {
   const project = resolveCollabProject(action, cfg, options);
   if (!client2) {
@@ -756,28 +750,11 @@ async function execCompactCold(action, cfg, client2, options) {
     return { ok: true, at: Date.now(), op: "compact_cold", title: "冷记忆压缩就绪（无可用连接）", lines: ["当前无数据库连接，压缩任务已跳过。", "未执行"], detail: snap };
   }
   try {
-    const params = { lifecycle_status: "active", order_by: "updated_at DESC", limit: 100 };
-    if (project && project !== "global") params.project = project;
-    const rows = await listMemories(client2, "memories", params);
-    const cutoff = Date.now() - 60 * 24 * 3600 * 1000;
-    const cands = rows.filter((r) => {
-      if (!r || r.invalid_at || hasTag(r, "compacted")) return false;
-      const t = Date.parse(r.last_used_at || r.updated_at || r.created_at || 0) || 0;
-      return t < cutoff && String(r.content || "").length > 240;
-    }).slice(0, 20);
-    let done = 0;
-    for (const r of cands) {
-      const { first, toks } = compactExtract(r.content);
-      const tags = String(r.tags || "").split(/[,，\s]+/).filter(Boolean);
-      if (!tags.includes("compacted")) tags.push("compacted");
-      try {
-        await client2.update("memories", r.id, { full_text: r.full_text || r.content, content: `${first}${toks.length ? `（关键：${toks.join(" / ")}）` : ""}`, tags: tags.join(","), updated_at: nowSql() });
-        done++;
-      } catch (_) {}
-    }
+    // 压缩实现唯一真相源在 auditor（与 memoryAudit 周期调度共用同一套正则），此处只负责信标编排
+    const res = await compactColdMemories(client2, { project, limit: 100 });
     const snap = await collectCollabSnapshot(client2, project);
-    snap.health.compacted = `本次压缩 ${done} 条 · 剩余待压缩 ${snap.health.cold} 条`;
-    return { ok: true, at: Date.now(), op: "compact_cold", title: done > 0 ? `冷记忆压缩完成（${done} 条）` : "冷记忆压缩完成（无待压缩）", lines: [`本次压缩：${done} 条`, `剩余待压缩：${snap.health.cold} 条`], detail: snap };
+    snap.health.compacted = `本次压缩 ${res.compacted} 条 · 释放 ${res.saved_chars} 字符 · 剩余待压缩 ${snap.health.cold} 条`;
+    return { ok: true, at: Date.now(), op: "compact_cold", title: res.compacted > 0 ? `冷记忆压缩完成（${res.compacted} 条）` : "冷记忆压缩完成（无待压缩）", lines: [`本次压缩：${res.compacted} 条（释放 ${res.saved_chars} 字符）`, `剩余待压缩：${snap.health.cold} 条`], detail: snap };
   } catch (e) {
     return { ok: false, at: Date.now(), op: "compact_cold", title: "冷记忆压缩失败", lines: [`原因：${String((e && e.message) || e).slice(0, 120)}`, "请检查数据库连接后重试"], detail: { handoff: { open: false }, profile: [], health: { active: 0, cold: 0, invalid: 0 } } };
   }

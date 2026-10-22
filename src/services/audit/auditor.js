@@ -23,6 +23,8 @@ import {
   normalizeSemanticText,
   isSemanticallySimilar,
   hasConflictingNumbers,
+  tokenize,
+  jaccardSimilarity,
 } from "../../domain/semantic-dedup.js";
 
 let _isAuditing = false;
@@ -106,6 +108,8 @@ export async function memoryAudit(client, cfg, args, ctx) {
   let totalScannedPitfalls = 0;
   let totalDedupedPitfalls = 0;
 
+  // 【v6.4.6-B】冷记忆压缩累计量与矛盾预警收集器（helper 内部全 fail-open，绝不阻断去重主流程）
+  const coldStats = { scanned: 0, compacted: 0, saved_chars: 0, ids: [] }, contradictions = [];
   const allDedupedMemIds = [];
   const allDedupedPitIds = [];
 
@@ -139,6 +143,8 @@ export async function memoryAudit(client, cfg, args, ctx) {
     memLastId = rawRows[rawRows.length - 1].id;
     totalScannedMemories += rows.length;
 
+    Object.assign(coldStats, await compactColdBatch(client, rows, now, batchTs, rollingLogs));
+    contradictions.push(...lintContradictions(rows));
     // b) 内存中全量规则级查重（指纹相同 / 归一化标题相同 / tags 交集）覆盖整批记录
     const batchDupIds = new Set();
     const groups = [];
@@ -823,9 +829,252 @@ const MODEL_CHUNK = Math.max(5, Math.min(Number.isFinite(rawChunk) ? rawChunk : 
       },
       lines: finalLines,
       logs: rollingLogs,
+      contradictions, cold_compaction: coldStats,
       note: `全自动去重完成。扫描记忆 ${totalScannedMemories} 条，合并 ${totalDedupedMemories} 条；扫描踩坑 ${totalScannedPitfalls} 条，合并 ${totalDedupedPitfalls} 条。`,
     });
   } finally {
     _isAuditing = false;
   }
+}
+
+/* ================================================================== *
+ * 【v6.4.6-B】零 LLM 冷记忆抽取式压缩 (Extractive Cold Compaction)
+ * ------------------------------------------------------------------
+ * 设计铁律：
+ *   1. 绝不调用模型 —— 全确定性正则，可安稳跑在 55s MCP 硬超时预算内；
+ *   2. 绝不丢原文 —— 首次压缩把 content 原样搬进 full_text，之后只替换 content；
+ *   3. 绝不重复压缩 —— tags 里的 "compacted" 是唯一幂等门，也是唯一判定依据；
+ *   4. 绝不阻断主流程 —— 单条写库失败只落日志，去重照常完成（fail-open）。
+ * 接口契约（对外仅两个导出）：
+ *   compactColdContent(content) -> { text, summary, tokens, original_length, saved_length, saved_ratio }
+ *   compactColdMemories(client, { project, limit }) -> { scanned, compacted, saved_chars, ids }
+ * ================================================================== */
+
+const COLD_DAYS = 60;          // 冷记忆判定：距 updated_at / last_used_at 均超过 60 天
+const COLD_MIN_CHARS = 240;    // 参与压缩的最小正文字符数
+const SUMMARY_MAX = 120;       // 首句摘要上限（字）
+const KEEP_RATIO = 0.35;       // 浓缩正文预算：原文 35%，即恒定节省 ≥60% 字符
+const TOKEN_MAX_ITEMS = 12;    // 关键 Token 条数上限
+const CONTRADICTION_MAX = 20;  // 单次审计矛盾预警上限
+const COLD_MAX_PER_RUN = 20;   // 单批压缩条数上限：防止审计把 55s MCP 超时预算耗在压缩上
+const RULE_CATEGORIES = new Set(["principle", "preference", "decision"]); // 规范性规则分类
+
+// 逐个正则只抓「丢了就再也找不回来」的硬信息：URL / 文件路径 / 代码 / 错误码 / 端口 / 配置键值
+const TOKEN_PATTERNS = [
+  /https?:\/\/[^\s"'<>，。；、）]+/g,
+  /(?:[A-Za-z]:\\[^\s"'，。；、）]+|(?:[\w.@-]+\/)+[\w.@-]+\.(?:js|mjs|cjs|ts|tsx|py|json|md|html|css|sh|ya?ml|sql|db|log|txt|ini|conf))/g,
+  /`[^`\n]{1,80}`/g,
+  /\b(?:ERR(?:OR)?_[A-Z0-9_]{2,}|E[A-Z]{2,}\d{2,}|[A-Z]{2,}[_-]\d{2,}|0x[0-9a-fA-F]{4,}|HTTP\s?[1-5]\d{2})\b/g,
+  /(?:端口|listen|port|PORT)\s*[:=：]?\s*\d{2,5}\b|\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\s*:\s*\d{2,5}\b/g,
+  /\b[a-z][a-z0-9_.]{2,}(?:_KEY|_ID|_URL|_NAME|_HOST|_PORT|_TIMEOUT|_LIMIT|_SIZE|_DIR|_PATH|_TOKEN|_MODE|_ENV|_TTL|_COUNT|_MAX|_MIN)?\s*[=:：]\s*"?[-\w./:@]{1,40}"?/g,
+];
+
+/** 时间戳解析：无法解析一律返回 0（绝不把「不认识的时间」当成「刚刚访问过」） */
+function parseStamp(v) {
+  if (!v) return 0;
+  const ms = Date.parse(String(v).replace(" ", "T"));
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+/** tags 归一化为去重后的数组（兼容中英文逗号、分号、竖线与空白分隔） */
+function tagsOf(row) {
+  return String((row && row.tags) || "")
+    .split(/[,;|，、\s]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+/** 首句摘要：取首句；首句不足 40 字时向后补齐，整体不超过 SUMMARY_MAX */
+function firstSentenceOf(text) {
+  const parts = String(text || "").split(/(?<=[。！？!?；;.\n])\s*/).filter(Boolean);
+  let out = "";
+  for (const p of parts) {
+    out += p;
+    if (out.length >= 40) break;
+  }
+  return out.slice(0, SUMMARY_MAX);
+}
+
+/** 正则抽取关键 Token：各类别轮转取用（保证 URL / 路径 / 错误码 / 端口 / 配置都有机会入选）、
+ *  去重、限条数，并严格受字符预算约束，避免把正文又撑回去 */
+function extractKeyTokens(text, budget) {
+  const out = [];
+  if (budget <= 0) return out;
+  const buckets = TOKEN_PATTERNS.map((re) => {
+    re.lastIndex = 0;
+    const seen = [];
+    for (const m of String(text).matchAll(re)) {
+      const tok = String(m[0]).trim().slice(0, 80);
+      if (tok && !seen.includes(tok)) seen.push(tok);
+    }
+    return seen;
+  });
+  const maxLen = Math.max(0, ...buckets.map((b) => b.length));
+  let used = 0;
+  for (let round = 0; round < maxLen; round++) {
+    for (const bucket of buckets) {
+      const tok = bucket[round];
+      if (!tok || out.includes(tok)) continue;
+      if (out.length >= TOKEN_MAX_ITEMS || used + tok.length + 3 > budget) return out;
+      out.push(tok);
+      used += tok.length + 3;
+    }
+  }
+  return out;
+}
+
+/**
+ * 纯正则抽取式压缩（零 LLM）：首句摘要 + 关键 Token，恒定节省 ≥60% 字符。
+ * 契约：对任何输入都不抛错、不返回 null；空输入返回全零结果。
+ */
+export function compactColdContent(content) {
+  const raw = String(content == null ? "" : content).trim();
+  if (!raw) {
+    return { text: "", summary: "", tokens: [], original_length: 0, saved_length: 0, saved_ratio: 0 };
+  }
+  const flat = raw.replace(/\s+/g, " ");
+  const budget = Math.floor(raw.length * KEEP_RATIO);
+  const summary = firstSentenceOf(flat).slice(0, Math.min(SUMMARY_MAX, budget));
+  const tokens = extractKeyTokens(flat, budget - summary.length - 10);
+  const text = tokens.length ? `${summary}〔关键Token：${tokens.join(" · ")}〕` : summary;
+  return {
+    text,
+    summary,
+    tokens,
+    original_length: raw.length,
+    saved_length: text.length,
+    saved_ratio: raw.length ? Number((1 - text.length / raw.length).toFixed(4)) : 0,
+  };
+}
+
+/** 冷记忆判定：非 principle / 正文 >240 字 / 无 compacted 标签 / updated_at 与 last_used_at 均超 60 天 */
+function isColdCompactable(row, cutoff) {
+  if (!row || row.invalid_at) return false;
+  if (String(row.category || "").trim() === "principle") return false;
+  if (String(row.content || "").length <= COLD_MIN_CHARS) return false;
+  if (tagsOf(row).includes("compacted")) return false;
+  const ref = Math.max(parseStamp(row.updated_at), parseStamp(row.last_used_at));
+  return ref > 0 && ref < cutoff;
+}
+
+/** 压缩单条记录：原文搬进 full_text（已有则原样保留）、content 换摘要、tags 追加 compacted */
+async function compactColdRow(client, row, now) {
+  const res = compactColdContent(row.content);
+  if (!res.text || res.saved_ratio < 0.6) return null;
+  const tags = tagsOf(row);
+  if (!tags.includes("compacted")) tags.push("compacted");
+  await client.update("memories", row.id, {
+    content: res.text,
+    full_text: String(row.full_text || row.content),
+    tags: tags.join(","),
+    updated_at: now,
+  });
+  return { id: row.id, saved_chars: res.original_length - res.saved_length, saved_ratio: res.saved_ratio };
+}
+
+/** 批量压缩（memoryAudit 主循环与手动信标共用）：内部 fail-open，绝不向上抛错 */
+async function compactColdBatch(client, rows, now, ts, rollingLogs) {
+  const stats = { scanned: Array.isArray(rows) ? rows.length : 0, compacted: 0, saved_chars: 0, ids: [] };
+  if (!Array.isArray(rows) || !client || typeof client.update !== "function") return stats;
+  const cutoff = Number(ts || Date.now()) - COLD_DAYS * 86400000;
+  for (const row of rows) {
+    if (stats.compacted >= COLD_MAX_PER_RUN) break;
+    if (!isColdCompactable(row, cutoff)) continue;
+    try {
+      const r = await compactColdRow(client, row, now);
+      if (!r) continue;
+      stats.compacted++;
+      stats.saved_chars += r.saved_chars;
+      stats.ids.push(row.id);
+    } catch (err) {
+      // fail-open：单条压缩失败只记日志，去重与后续记录照常推进（绝不让审计整轮失败）
+      if (rollingLogs) rollingLogs.push(`[${now}] 冷记忆压缩失败 #${row.id}：${(err && err.message) || err}`);
+    }
+  }
+  if (stats.compacted && rollingLogs) {
+    rollingLogs.push(`[${now}] 冷记忆抽取压缩完成：${stats.compacted} 条，释放 ${stats.saved_chars} 字符`);
+  }
+  return stats;
+}
+
+/**
+ * 手动触发入口（设置页 compact_cold 信标直连）：自己拉取候选集再走同一套压缩 helper，
+ * 与 memoryAudit 周期调度共享唯一实现，杜绝两份压缩逻辑漂移。
+ */
+export async function compactColdMemories(client, options) {
+  const opts = options || {};
+  const stats = { scanned: 0, compacted: 0, saved_chars: 0, ids: [] };
+  if (!client || typeof client.list !== "function" || typeof client.update !== "function") return stats;
+  const limit = Math.max(1, Math.min(Number(opts.limit) || 200, 500));
+  const q = {
+    lifecycle_status: "active",
+    invalid_at: null,
+    limit,
+    order_by: "updated_at ASC",
+    columns: [
+      "id", "project", "category", "title", "content", "full_text",
+      "tags", "updated_at", "last_used_at", "lifecycle_status", "invalid_at",
+    ],
+  };
+  const project = String(opts.project || "").trim();
+  if (project && project !== "global") q.project = project;
+  const rows = rowsOf(await client.list("memories", q))
+    .filter((r) => r && r.lifecycle_status === "active" && !r.invalid_at);
+  const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  return await compactColdBatch(client, rows, now, Date.now());
+}
+
+/* ================================================================== *
+ * 【v6.4.6-B】主动矛盾检测巡检 (Contradiction Lint)
+ * ------------------------------------------------------------------
+ * 同项目 + 同主题 + 数字互斥 = 一条硬性规则被两条记忆各写了一个值。
+ * 只预警不写库：矛盾对的处理权交给人和模型，审计绝不擅自失效任何一方。
+ * ================================================================== */
+
+/** 抽取可读的数字集合（供 UI 直接展示冲突双方的具体取值） */
+function numbersIn(text) {
+  const nums = String(text == null ? "" : text).match(/\d+(?:\.\d+)*/g) || [];
+  return [...new Set(nums)].slice(0, 6);
+}
+
+/** 同主题判定：归一化标题包含，或标题词集 Jaccard ≥ 0.5（宁严勿滥，避免把无关规则判成矛盾） */
+function sameRuleTopic(a, b) {
+  const ta = normalizeSemanticText(a.title);
+  const tb = normalizeSemanticText(b.title);
+  if (!ta || !tb) return false;
+  if (ta === tb || ta.includes(tb) || tb.includes(ta)) return true;
+  return jaccardSimilarity(tokenize(a.title).tokens, tokenize(b.title).tokens) >= 0.5;
+}
+
+/** 巡检：对同项目下的规范性规则做交叉比对，输出矛盾预警数组 */
+function lintContradictions(rows) {
+  const out = [];
+  if (!Array.isArray(rows) || rows.length < 2) return out;
+  const rules = rows.filter(
+    (r) => r && !r.invalid_at && RULE_CATEGORIES.has(String(r.category || "").trim().toLowerCase())
+  );
+  for (let i = 0; i < rules.length; i++) {
+    for (let j = i + 1; j < rules.length; j++) {
+      const a = rules[i];
+      const b = rules[j];
+      if (String(a.project || "") !== String(b.project || "")) continue;
+      if (!sameRuleTopic(a, b)) continue;
+      const contentA = a.content || a.full_text || "";
+      const contentB = b.content || b.full_text || "";
+      if (!hasConflictingNumbers(a.title, b.title) && !hasConflictingNumbers(contentA, contentB)) continue;
+      out.push({
+        project: String(a.project || ""),
+        a_id: a.id,
+        b_id: b.id,
+        a_title: String(a.title || "").slice(0, 80),
+        b_title: String(b.title || "").slice(0, 80),
+        numbers_a: numbersIn(`${a.title || ""} ${contentA}`),
+        numbers_b: numbersIn(`${b.title || ""} ${contentB}`),
+        kind: "numeric_conflict",
+        severity: "warn",
+      });
+      if (out.length >= CONTRADICTION_MAX) return out;
+    }
+  }
+  return out;
 }
