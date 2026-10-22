@@ -1,7 +1,7 @@
 {
   "name": "magpie-memory-hub",
-  "version": "6.45.1",
-  "description": "Magpie 网关的透明记忆层：自动提炼上下文存入 NoCodeBackend，向 agent 提供记忆检索与 R2 文件存储 MCP 工具；内置幂等的数据库初始化与清空。",
+  "version": "6.45.2",
+  "description": "Magpie \u7f51\u5173\u7684\u900f\u660e\u8bb0\u5fc6\u5c42\uff1a\u81ea\u52a8\u63d0\u70bc\u4e0a\u4e0b\u6587\u5b58\u5165 NoCodeBackend\uff0c\u5411 agent \u63d0\u4f9b\u8bb0\u5fc6\u68c0\u7d22\u4e0e R2 \u6587\u4ef6\u5b58\u50a8 MCP \u5de5\u5177\uff1b\u5185\u7f6e\u5e42\u7b49\u7684\u6570\u636e\u5e93\u521d\u59cb\u5316\u4e0e\u6e05\u7a7a\u3002",
   "type": "module",
   "main": "./tools.js",
   "keywords": [
@@ -30,13 +30,13 @@
     "icon": "./icon.svg",
     "maxConcurrency": 4,
     "page": {
-      "title": "记忆中枢设置",
+      "title": "\u8bb0\u5fc6\u4e2d\u67a2\u8bbe\u7f6e",
       "file": "./settings.html",
       "icon": "./icon.svg",
       "titles": {
-        "zh": "记忆中枢设置",
-        "zh-TW": "記憶中樞設定",
-        "ja": "メモリハブ設定",
+        "zh": "\u8bb0\u5fc6\u4e2d\u67a2\u8bbe\u7f6e",
+        "zh-TW": "\u8a18\u61b6\u4e2d\u6a1e\u8a2d\u5b9a",
+        "ja": "\u30e1\u30e2\u30ea\u30cf\u30d6\u8a2d\u5b9a",
         "de": "Memory-Hub-Einstellungen"
       }
     },
