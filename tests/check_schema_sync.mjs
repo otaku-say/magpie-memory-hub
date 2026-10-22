@@ -10,8 +10,12 @@ import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { TABLES } from "../src/integration/schema.js";
 
-const TOOLS_SRC = readFileSync(new URL("../tools.js", import.meta.url), "utf8");
-const HOOKS_SRC = readFileSync(new URL("../gateway_harvest.hooks.js", import.meta.url), "utf8");
+const TOOLS_SRC = [
+  readFileSync(new URL("../src/services/save/memory-saver.js", import.meta.url), "utf8"),
+  readFileSync(new URL("../src/tools/pitfall-save.js", import.meta.url), "utf8"),
+  readFileSync(new URL("../src/tools/memory-get.js", import.meta.url), "utf8"),
+].join("\n");
+const HOOKS_SRC = readFileSync(new URL("../src/services/harvest/harvest-pipeline.js", import.meta.url), "utf8");
 
 /** 从 src 的 pos 处（指向 `{`）解析出对象字面量的顶层键 */
 function keysOfLiteral(text) {

@@ -16,8 +16,8 @@
   "license": "MIT",
   "files": [
     "*.js",
+    "src/**",
     "settings.html",
-    "settings.css",
     "icon.svg",
     "README.md",
     "LICENSE"
