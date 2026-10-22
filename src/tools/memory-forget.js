@@ -8,8 +8,19 @@ import { normalizeToolArgs } from "./args.js";
 import { fetchAll, rowsOf } from "../integration/ncb.js";
 import { scoreMemory, scorePitfall, jsonOut, termsOf } from "../domain/scoring.js";
 
+async function _handleFeedback(client, id, feedback) {
+  if (feedback !== "not_helpful") return null;
+  const row = await client.get("memories", id);
+  if (!row) return jsonOut({ ok: false, error: "not found" });
+  const newConf = Math.max(0, (Number(row.confidence_score) || 100) - 25);
+  await client.update("memories", id, { confidence_score: newConf, updated_at: nowSql() });
+  return jsonOut({ ok: true, action: "FEEDBACK_DOWNVOTE", id, confidence_score: newConf });
+}
+
 export async function memoryForget(client, cfg, rawArgs) {
   const args = normalizeToolArgs(rawArgs, cfg);
+  const fb = await _handleFeedback(client, Number(args.id), String(args.feedback || "").toLowerCase().trim());
+  if (fb) return fb;
   const table = (args.table && String(args.table).trim().toLowerCase() === "pitfalls") ? "pitfalls" : "memories";
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   let targets = [];

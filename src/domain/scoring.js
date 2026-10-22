@@ -50,11 +50,30 @@ export function freshness(row) {
   return days <= 0 ? 1 : 1 / (1 + Math.log10(1 + days));
 }
 
+function _m8Boost(row) {
+  const cnt = Math.min(Number(row.retrieval_count) || 0, 50);
+  const rec = Math.min(Math.max(0, (Number(row.recurrence) || 1) - 1), 20);
+  const af = row.last_used_at ? freshness({ updated_at: row.last_used_at }) : freshness(row);
+  return (Math.log1p(cnt) * (0.4 + 0.6 * af)) + (0.15 * rec);
+}
+
 export function rankMemory(row) {
-  const rawScore = Number(row.confidence_score);
-  const conf = (!isNaN(rawScore) ? rawScore : 100) / 100;
-  const acc = Math.min(Number(row.retrieval_count) || 0, 10);
-  return conf * (1 + 0.1 * acc) * (0.5 + 0.5 * freshness(row));
+  const raw = Number(row.confidence_score);
+  const conf = (!isNaN(raw) ? raw : 100) / 100;
+  const b = _m8Boost(row);
+  return conf * (1 + 0.25 * b) * (0.5 + 0.5 * freshness(row));
+}
+
+export function explainScoreDetails(row, terms) {
+  const f = freshness(row);
+  const rank = rankMemory(row);
+  return {
+    confidence: Number(row.confidence_score) || 100,
+    retrieval_count: Number(row.retrieval_count) || 0,
+    recurrence: Number(row.recurrence) || 1,
+    freshness_factor: Number(f.toFixed(4)),
+    rank_score: Number(rank.toFixed(4)),
+  };
 }
 
 export function cut(s, n) {
