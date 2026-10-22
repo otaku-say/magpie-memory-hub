@@ -1,6 +1,6 @@
 /**
  * 模块职责：设置页信标动作执行器（处理设置页按钮触发的后台动作并回写状态）
- * 依赖：../../db_tools.js, ../../r2.js, ../../local_state.js, ../../gateway_harvest.js, ../../tools.js, ../../gateway_harvest.hooks.js, ../../model_budget.js
+ * 依赖：src/integration/db-tools.js, ../../r2.js, src/core/state.js, ../../gateway_harvest.js, ../../tools.js, ../../gateway_harvest.hooks.js, ../../model_budget.js
  * 被依赖：page_actions.js, src/index.js, tests
  */
 /**
@@ -41,6 +41,12 @@ import { dbInit, dbReset, dbStatus, dbProvision, storageSetup, ncbCheck, secretC
 import { r2Setup, r2Check, cleanProbes } from "../integration/r2-storage.js";
 import { lookupRealDatabase, lookupActionState, rememberActionState } from "../core/state.js";
 import { harvestGateway } from "../services/harvest/index.js";
+import { testModelConnectivity } from "../services/harvest/extract.js";
+import { formatCardStatus as _fcs } from "../core/status-writer.js";
+import { parseDbInfo as _pdi } from "../core/status-writer.js";
+import { writeCardStatus as _wcs } from "../core/status-writer.js";
+import { makeClient, fetchAll } from "../integration/ncb.js";
+import { memoryAudit } from "../services/audit/auditor.js";
 
 /** 插件目录下的状态文件路径（供 iframe 内设置页通过 script 标签加载）。 */
 export const STATUS_JS_PATH = fileURLToPath(new URL("../../_status.js", import.meta.url));
@@ -236,7 +242,6 @@ async function execute(action, cfg, fs, sp, state, options) {
     else if (action.op === "r2_check") result = await r2Check(cfg, args);
     else if (action.op === "clean_probe") result = await cleanProbes(cfg, args);
     else if (action.op === "model_check") {
-      const { testModelConnectivity } = await import("../../gateway_harvest.hooks.js");
       const { getModelBudgetState } = await import("../domain/token-budget.js");
       const modelOpts = Object.assign({}, cfg, options || {});
       const conn = await testModelConnectivity("all", modelOpts);
@@ -645,7 +650,6 @@ export async function executeAction(action, cfg, targetDb, customStatusPath) {
  * { at, op, ok, title, lines: [2~5 条关键事实] }
  */
 // formatCardStatus 已下沉到 src/core/status-writer.js
-import { formatCardStatus as _fcs } from "../core/status-writer.js";
 export const formatCardStatus = _fcs;
 
 
@@ -654,7 +658,6 @@ export const formatCardStatus = _fcs;
  * 格式：{ logical: "agent_memory", prefix: "41694_", full: "41694_agent_memory" }
  */
 // parseDbInfo 已下沉到 src/core/status-writer.js
-import { parseDbInfo as _pdi } from "../core/status-writer.js";
 export const parseDbInfo = _pdi;
 
 
@@ -667,8 +670,5 @@ export const parseDbInfo = _pdi;
  *   - 静默降级：只读目录或写文件报错时不抛异常，只在 console.error 里打日志
  */
 // writeCardStatus 已下沉到 src/core/status-writer.js（解循环依赖）
-import { writeCardStatus as _wcs } from "../core/status-writer.js";
-import { makeClient, fetchAll } from "../integration/ncb.js";
-import { memoryAudit } from "../services/audit/auditor.js";
 export const writeCardStatus = _wcs;
 

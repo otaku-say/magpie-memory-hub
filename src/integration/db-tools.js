@@ -1,7 +1,7 @@
 /**
  * 模块职责：数据库结构管理与 R2 存储工具实现（探针/建库/初始化/重置/差集检测）
- * 依赖：../../ncb_mcp.js, ../../schema.js, ../../local_state.js, ../../r2.js, ../../online_models.js
- * 被依赖：../../db_tools.js, src/index.js, page_actions.js, tests
+ * 依赖：../../ncb_mcp.js, ../../schema.js, src/core/state.js, ../../r2.js, ../../online_models.js
+ * 被依赖：src/integration/db-tools.js, src/index.js, page_actions.js, tests
  */
 
 import { NcbMcp, extractSecret, extractInstance } from "./ncb-client.js";

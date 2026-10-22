@@ -1,6 +1,6 @@
 /**
  * 模块职责：统一配置解析、SQL时间戳与常量定义
- * 依赖：../../local_state.js
+ * 依赖：src/core/state.js
  * 被依赖：src/core/**, src/domain/**, src/integration/**, src/services/**, src/tools/**, src/index.js
  */
 

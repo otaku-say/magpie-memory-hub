@@ -1,7 +1,7 @@
 /**
  * 模块职责：在线模型调用封装（报错人话解释 / 语义改写 / 检索重排 / 语义查重审计）
  * 依赖：../../model_budget.js
- * 被依赖：../../online_models.js, ../../db_tools.js, ../../r2.js, src/services/**, tests
+ * 被依赖：../../online_models.js, src/integration/db-tools.js, ../../r2.js, src/services/**, tests
  */
 
 export const KNOWN_ERRORS_CHEAT_SHEET = `

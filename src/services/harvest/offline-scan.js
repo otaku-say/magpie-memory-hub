@@ -1,6 +1,6 @@
 /**
  * 模块职责: 离线录制目录扫描与增量提炼 (GatewayConversations 读盘、路径安全守卫、文件收集与离线提炼入库)
- * 依赖: ./scaffolding.js (_diag, stripScaffolding), ./dialog-extract.js (isExplicitUserMemory), ./classify.js, ./extract.js, ../../local_state.js, ../../page_actions.js, ../../semantic_dedup.js
+ * 依赖: ./scaffolding.js (_diag, stripScaffolding), ./dialog-extract.js (isExplicitUserMemory), ./classify.js, ./extract.js, src/core/state.js, ../../page_actions.js, ../../semantic_dedup.js
  * 被依赖: src/services/harvest/index.js, src/services/harvest/harvest-pipeline.js, gateway_harvest.js
  */
 
