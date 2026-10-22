@@ -16,7 +16,14 @@
  *   3. memory_get 的 feedback="helpful"：confidence +10（封顶 100）、recurrence +1，并回显 feedback_applied。
  *   4. memory_search / pitfall_search 的 explain:true：每条命中带完整 score_details，顶层带 timings 五段耗时。
  *   5. 【反证】explain 缺省（false）时零侵入：顶层键集合与旧格式逐字节一致，绝不出现 score_details / timings。
- *   6. 全流程零残留：清理后残余计数必须为 0。
+ *   6. 【契约级】对外 MCP inputSchema 必须显式声明 explain / feedback：
+ *      memory_search.explain / pitfall_search.explain（boolean）
+ *      memory_forget.feedback（enum not_helpful|stale|wrong）、memory_get.feedback（enum helpful）。
+ *      只调 execute() 无法发现「漏声明」，故此处直接断言 args.properties（终审 QA-F1）。
+ *   7. 【配置驱动】设置页 explain_debug 全链路：readOptions 透真布尔 → 工具层 explain 判定
+ *      必须 `args.explain === true || cfg.explain_debug === true`，只勾开关也真实产出明细；
+ *      开关关闭时必须精确回退到精简格式（终审 QA-F2）。
+ *   8. 全流程零残留：清理后残余计数必须为 0。
  */
 import assert from "node:assert";
 import { createTestEnv } from "./lib/testenv.mjs";
@@ -296,7 +303,130 @@ for (const fb of ["stale", "wrong"]) {
 }
 
 /* -----------------------------------------------------------------
- * 11. 隔离清理与残余断言
+ * 11. 【契约级】对外 MCP inputSchema 必须显式声明 explain / feedback
+ *
+ * 为什么必须单独断言：execute() 跑通只证明「内部实现存在」，
+ * 而对外契约活在 args.properties 里——漏声明即等于参数永远传不进来，
+ * 能力对调用方（LLM / 宿主）根本不存在（终审 QA-F1：假闭环）。
+ * 所以此处直接读 hub.tool.<name>.args.properties，而非调 execute()。
+ * ----------------------------------------------------------------- */
+{
+  const assertProp = (toolName, tool, prop, type, keywords) => {
+    assert.ok(tool.args, `${toolName} 必须有 args 契约`);
+    assert.strictEqual(tool.args.type, "object", `${toolName}.args.type 必须为 object`);
+    assert.ok(tool.args.properties, `${toolName}.args.properties 必须存在`);
+    const p = tool.args.properties[prop];
+    assert.ok(p, `契约：${toolName}.args.properties 必须显式声明 ${prop}`);
+    assert.strictEqual(p.type, type, `${toolName}.${prop} 必须声明 type=${type}`);
+    assert.strictEqual(typeof p.description, "string", `${toolName}.${prop} 必须带 description（否则 LLM 不知道何时用）`);
+    for (const kw of keywords) {
+      assert.ok(p.description.includes(kw), `${toolName}.${prop} 的 description 必须说明「${kw}」，实际：${p.description}`);
+    }
+    return p;
+  };
+
+  const sProp = assertProp("memory_search", search, "explain", "boolean", ["是否", "默认 false"]);
+  assert.ok(/打分|评分/.test(sProp.description), "memory_search.explain 描述必须说明返回打分明细");
+  assert.ok(/耗时|timings/.test(sProp.description), "memory_search.explain 描述必须说明返回耗时明细");
+
+  const pProp = assertProp("pitfall_search", pitSearch, "explain", "boolean", ["是否", "默认 false"]);
+  assert.ok(/打分|评分/.test(pProp.description), "pitfall_search.explain 描述必须说明打分明细");
+  assert.ok(/耗时|timings/.test(pProp.description), "pitfall_search.explain 描述必须说明耗时明细");
+
+  const fProp = assertProp("memory_forget", forget, "feedback", "string", ["置信度"]);
+  assert.deepStrictEqual(fProp.enum, ["not_helpful", "stale", "wrong"],
+    "memory_forget.feedback 必须用 enum 精确锁死三档，杜绝自由文本被当成合法反馈");
+  assert.ok(/stale|wrong/.test(fProp.description), "memory_forget.feedback 描述必须说明 stale/wrong 的软失效语义");
+
+  const gProp = assertProp("memory_get", get, "feedback", "string", ["置信度"]);
+  assert.deepStrictEqual(gProp.enum, ["helpful"], "memory_get.feedback 必须用 enum 锁死为 helpful（不得混入降权档位）");
+  assert.ok(/recurrence|复发/.test(gProp.description), "memory_get.feedback 描述必须说明累加复发度");
+
+  // 反证 a：新增参数只能是「追加」，不得顺手删掉任何既有契约字段
+  assert.ok(search.args.properties.query, "反证：补 explain 后 memory_search.query 必须仍在");
+  assert.ok(search.args.properties.search_rerank, "反证：补 explain 后 memory_search.search_rerank 必须仍在");
+  assert.ok(pitSearch.args.properties.query, "反证：补 explain 后 pitfall_search.query 必须仍在");
+  assert.ok(forget.args.properties.id && forget.args.properties.ids && forget.args.properties.query,
+    "反证：补 feedback 后 memory_forget 的 id/ids/query 必须全部仍在");
+  assert.ok(get.args.properties.id && get.args.properties.ids && get.args.properties.table,
+    "反证：补 feedback 后 memory_get 的 id/ids/table 必须全部仍在");
+
+  // 反证 b：required 不得因新增可选参数而变（explain / feedback 都是可选的）
+  assert.deepStrictEqual(search.args.required || [], [], "反证：memory_search 不得有必填项");
+  assert.ok(!(forget.args.required || []).includes("feedback"), "反证：feedback 是可选参数，绝不能进 required");
+  assert.ok(!(get.args.required || []).includes("feedback"), "反证：feedback 是可选参数，绝不能进 required");
+
+  // 反证 c：契约声明必须与真实实现同源——声明了却读不到就是假契约
+  const mem = await seedMemory("契约同源样本", { confidence_score: 90 });
+  const viaSchema = parseOut(await search.execute({ query: "explainprobe", project: P, explain: true, search_rerank: false }));
+  assert.ok(viaSchema.timings && viaSchema.memories.some((x) => x.score_details),
+    "反证：schema 声明了 explain 就必须真的产出 timings / score_details");
+  const forgetViaSchema = parseOut(await forget.execute({ id: mem.id, feedback: "not_helpful", project: P }));
+  assert.strictEqual(forgetViaSchema.action, "FEEDBACK_DOWNVOTE", "反证：schema 声明了 feedback 就必须真的生效");
+  console.log("  ✓ 契约：4 个工具的 explain/feedback 显式声明齐全，enum 锁死，既有字段零回退");
+}
+
+/* -----------------------------------------------------------------
+ * 12. 设置页 explain_debug 配置全链路（终审 QA-F2：写而不读 = 假承诺）
+ *
+ * 真实用户路径：设置页勾选「检索可解释性追踪」→ options.explain_debug=true
+ * → readOptions 必须原样带出 → 工具里 explain 判定必须把配置算进去。
+ * 任何一环断掉，用户看到的都是「勾了没反应」，故逐环反证。
+ * ----------------------------------------------------------------- */
+{
+  // 环节 1：配置解析层——必须产出真布尔，且严格只认 true
+  assert.strictEqual(MagpieMemoryHub.readOptions({ explain_debug: true }).explain_debug, true,
+    "readOptions 必须把 explain_debug:true 原样透出（F2 断链点 1）");
+  assert.strictEqual(MagpieMemoryHub.readOptions({}).explain_debug, false,
+    "explain_debug 缺省必须归一化为布尔 false，绝不能是 undefined");
+  assert.strictEqual(MagpieMemoryHub.readOptions({ explain_debug: "true" }).explain_debug, false,
+    "反证：字符串 \"true\" 不得被当成开启（设置页用 !!checked 落盘，只认真布尔）");
+  assert.strictEqual(MagpieMemoryHub.readOptions({ explain_debug: 1 }).explain_debug, false,
+    "反证：数字 1 也不得被当成开启，杜绝真值漂移");
+
+  // 环节 2：工具层——只勾设置页、完全不传 explain，也必须真实产出明细
+  const debugHub = await MagpieMemoryHub(
+    { search_rewrite: false, search_rerank: false, audit_model: "off" },
+    { client: env.client, ncb_instance: env.instance, explain_debug: true }
+  );
+  await seedMemory("配置驱动样本-甲", { confidence_score: 92, related_entities: "explainprobe" });
+  await seedPitfall("配置驱动踩坑样本");
+
+  const cfgSearch = parseOut(await debugHub.tool.memory_search.execute({ query: "explainprobe", project: P, search_rerank: false }));
+  assert.ok(cfgSearch.timings, "配置驱动：勾选 explain_debug 后不传 explain 也必须产出 timings");
+  assert.deepStrictEqual(Object.keys(cfgSearch.timings).sort(), [...TIMING_KEYS].sort(),
+    "配置驱动的 timings 必须同样五段齐全");
+  assert.ok(cfgSearch.memories.length >= 1, "配置驱动检索必须仍然返回命中");
+  assert.ok(cfgSearch.memories.every((x) => x.score_details && typeof x.score_details.lexical_score === "number"),
+    "配置驱动时每条命中都必须带 score_details");
+  assert.ok(cfgSearch.memories.every((x, i) => x.score_details.final_rank === i + 1),
+    "配置驱动的 final_rank 必须与返回次序一致");
+
+  const cfgPit = parseOut(await debugHub.tool.pitfall_search.execute({ query: "explainprobe", project: P, search_rerank: false }));
+  assert.ok(cfgPit.timings, "配置驱动：pitfall_search 同样必须产出 timings");
+  assert.deepStrictEqual(Object.keys(cfgPit.timings).sort(), [...TIMING_KEYS].sort(),
+    "踩坑配置驱动 timings 必须五段齐全");
+  assert.ok(cfgPit.pitfalls.length >= 1 && cfgPit.pitfalls.every((x) => x.score_details),
+    "配置驱动时每条踩坑命中都必须带 score_details");
+
+  // 环节 3：配置是全局调试开关，优先级高于单次入参（args.explain===false 也压不掉）
+  const forced = parseOut(await debugHub.tool.memory_search.execute({ query: "explainprobe", project: P, explain: false, search_rerank: false }));
+  assert.ok(forced.timings, "反证：设置页已开启时，单次 explain:false 不得把全局调试开关关掉（调试开关必须可预期）");
+
+  // 反证：同一份数据、开关关闭 → 必须回到精简格式，证明「有明细」确实来自配置而非永远存在
+  const quietHub = await MagpieMemoryHub(
+    { search_rewrite: false, search_rerank: false, audit_model: "off" },
+    { client: env.client, ncb_instance: env.instance, explain_debug: false }
+  );
+  const quiet = parseOut(await quietHub.tool.memory_search.execute({ query: "explainprobe", project: P, search_rerank: false }));
+  assert.deepStrictEqual(Object.keys(quiet), MEMORY_KEYS, "反证：开关关闭时顶层键集合必须与旧格式完全一致");
+  assert.ok(!("timings" in quiet), "反证：开关关闭时不得凭空产出 timings");
+  assert.ok(quiet.memories.every((m) => !("score_details" in m)), "反证：开关关闭时命中不得带 score_details");
+  console.log("  ✓ 配置链路：readOptions→工具判定→真实明细，开关关闭时精确回退到精简格式");
+}
+
+/* -----------------------------------------------------------------
+ * 13. 隔离清理与残余断言
  * ----------------------------------------------------------------- */
 const residue = await env.countAllTestResidue();
 await env.cleanup();

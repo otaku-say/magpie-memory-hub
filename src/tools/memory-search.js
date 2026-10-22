@@ -2,6 +2,7 @@
  * 模块职责：memory_search MCP 工具入口（语义检索、关键词评分、置顶原则、LLM 重排与召回统计）
  * 依赖：src/core/**, src/domain/**, src/integration/**, src/services/**, online_models.js
  * 被依赖：src/index.js
+ * 配置契约：explain 明细 = 入参 args.explain === true 或 设置页 cfg.explain_debug === true（取或）。
  */
 
 import { normalizeToolArgs } from "./args.js";
@@ -24,7 +25,7 @@ function _hitScoreDetails(x, terms, finalRank) {
 
 export async function memorySearch(client, cfg, rawArgs) {
   const args = normalizeToolArgs(rawArgs, cfg);
-  const explain = args.explain === true, tm = createExplainTimer(explain);
+  const explain = args.explain === true || cfg.explain_debug === true, tm = createExplainTimer(explain);
   const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
   const rawQuery = String(args.query || "").trim();
   const origTerms = termsOf(rawQuery);

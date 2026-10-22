@@ -2,6 +2,7 @@
  * 模块职责：pitfall_search MCP 工具入口（踩坑记录多字段加权检索与重排）
  * 依赖：src/tools/args.js, src/integration/ncb.js, src/domain/scoring.js, online_models.js
  * 被依赖：src/index.js
+ * 配置契约：explain 明细 = 入参 args.explain === true 或 设置页 cfg.explain_debug === true（取或）。
  */
 
 import { normalizeToolArgs } from "./args.js";
@@ -22,7 +23,7 @@ function _pitfallScoreDetails(x, terms, finalRank) {
 
 export async function pitfallSearch(client, cfg, rawArgs) {
   const args = normalizeToolArgs(rawArgs, cfg);
-  const explain = args.explain === true, tm = createExplainTimer(explain);
+  const explain = args.explain === true || cfg.explain_debug === true, tm = createExplainTimer(explain);
   const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
   const rawQuery = String(args.query || "").trim();
   const origTerms = termsOf(rawQuery);

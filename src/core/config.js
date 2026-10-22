@@ -73,6 +73,10 @@ export function readOptions(options) {
     classify_endpoint: o.classify_endpoint || "auto",
     search_rewrite: o.search_rewrite !== false,
     search_rerank: o.search_rerank !== false,
+    // 检索可解释性调试开关（设置页「检索可解释性追踪」勾选即落盘）：
+    // 开启后 memory_search / pitfall_search 即使不显式传 explain 也会返回 score_details + timings。
+    // 严格只认真布尔 true，避免字符串 "false" 之类的真值漂移。
+    explain_debug: o.explain_debug === true,
     gateway_url: o.gateway_url || o.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425",
     gateway_api_key: o.gateway_api_key || o.api_key || process.env.MAGPIE_API_KEY || "",
     // v6.20.0 调用预算与熔断（可配置，保守默认；见 model_budget.js）
