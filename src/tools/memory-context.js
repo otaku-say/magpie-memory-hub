@@ -5,7 +5,8 @@
  */
 
 import { normalizeToolArgs } from "./args.js";
-import { fetchAll } from "../integration/ncb.js";
+import { fetchAll, rowsOf } from "../integration/ncb.js";
+import { nowSql } from "../core/config.js";
 import { scoreMemory, scorePitfall, freshness, rankMemory, cut, jsonOut, termsOf } from "../domain/scoring.js";
 import { isMemoryValid } from "../domain/validity.js";
 import { trackMemoryRetrievals } from "../services/audit/scheduler.js";
@@ -383,6 +384,9 @@ export async function memoryContext(client, cfg, rawArgs) {
     dynamicAgentHint += ` 另有 ${nearCrystallization.length} 条偏好/决策再印证 1 次即可结晶为准则。`;
   }
 
+  const handoffDigest = await _detectAndClaimHandoff(client, projectArg, rawArgs, rawArgs); // 交接棒置顶 + 信箱未读（见文件末尾私有辅助）
+  block = handoffDigest.lines + block; n += handoffDigest.count;
+
   const contextResult = {
     injected: n,
     chars: block.length,
@@ -399,6 +403,135 @@ export async function memoryContext(client, cfg, rawArgs) {
     }
     contextResult.evolution_opportunities = evoOpportunities;
   }
+  if (handoffDigest.active) contextResult.active_handoff = handoffDigest.active; if (handoffDigest.mailbox) contextResult.mailbox = handoffDigest.mailbox;
 
   return jsonOut(contextResult);
+}
+
+/* ================================================================== *
+ * 私有辅助：跨 Agent 交接棒（Handoff）感知/单次核销 与 异步信箱未读消费
+ * 说明：仅本模块内部使用，绝不导出（导出面由 tests/test_exports.mjs 锁定）
+ * 设计：任何一步失败都 fail-open —— 上下文照常输出，宁可少提示也不阻断主流程
+ * ================================================================== */
+
+const HANDOFF_OPEN_TAG = /\bhandoff:open\b/i;
+const MAIL_UNREAD_TAG = /\bmail:unread\b/i;
+
+// 记录排序用的时间戳（NCB 返回 "YYYY-MM-DD HH:MM:SS"，需换成可 parse 的形态）
+function _tsOfRow(row) {
+  const raw = String((row && (row.updated_at || row.created_at)) || "").replace(" ", "T");
+  const t = Date.parse(raw);
+  return isNaN(t) ? 0 : t;
+}
+
+// 仅"活着"的记录才可被接力/投递：未软失效且非 superseded
+function _isLiveRow(row) {
+  if (!row) return false;
+  if (row.invalid_at) return false;
+  return !row.lifecycle_status || row.lifecycle_status === "active";
+}
+
+// 交接棒置顶行：新 Agent 零配置接力，必须最先被看到
+function _handoffLine(row) {
+  const from = row.client || "agent";
+  return "- [Pending Cross-Agent Handoff / 跨智能体待接力任务#" + row.id + " from:" + from + "] "
+    + cut(row.title, 80) + ": " + cut(row.content, 400) + "\n";
+}
+
+// 未读邮件行：其他项目投递的变更通知
+function _mailLine(row) {
+  const from = row.client || "agent";
+  return "- [Unread Agent Mail / 未读跨项目信箱#" + row.id + " from:" + from + "] "
+    + cut(row.title, 80) + ": " + cut(row.content, 300) + "\n";
+}
+
+/**
+ * 检测当前项目的待接力交接棒与未读信箱，返回可直接置顶注入的文本块。
+ * @param {object} client NCB 客户端
+ * @param {string} project 当前项目命名空间
+ * @param {object} rawArgs 原始工具入参（claim_handoff 只认显式 true，避免归一化误判）
+ * @param {object} ctx 调用上下文（仅用于记录认领者，可为空）
+ * @returns {Promise<{lines:string,count:number,active:object|null,mailbox:object|null}>}
+ */
+async function _detectAndClaimHandoff(client, project, rawArgs, ctx) {
+  const digest = { lines: "", count: 0, active: null, mailbox: null };
+  if (!project) return digest;
+
+  let rows = [];
+  try {
+    rows = rowsOf(await client.list("memories", { project, limit: 50 }));
+  } catch (_) {
+    return digest; // fail-open：读不到信箱/交接棒时照常输出上下文，只是不置顶
+  }
+
+  const live = rows.filter(_isLiveRow);
+  const openHandoffs = live
+    .filter((r) => HANDOFF_OPEN_TAG.test(String(r.tags || "")))
+    .sort((a, b) => _tsOfRow(b) - _tsOfRow(a));
+  const unreadMail = live
+    .filter((r) => MAIL_UNREAD_TAG.test(String(r.tags || "")))
+    .sort((a, b) => _tsOfRow(b) - _tsOfRow(a));
+
+  const lines = [];
+  let count = 0;
+
+  if (openHandoffs.length > 0) {
+    const h = openHandoffs[0];
+    lines.push(_handoffLine(h));
+    count++;
+    digest.active = {
+      id: h.id,
+      from_client: h.client || "unknown",
+      title: h.title,
+      content: h.content,
+      updated_at: h.updated_at,
+    };
+    const claim = Boolean(rawArgs && (rawArgs.claim_handoff === true || rawArgs.claim_handoff === "true"));
+    if (claim) {
+      const claimedBy = String((ctx && (ctx.agent || ctx.client)) || "unknown");
+      try {
+        // Claim-Once：改写为 claimed 并软失效，后续 Agent 不再重复消费；
+        // 写失败时保持 open（宁可下次重复看到，也不丢失接力信息）
+        await client.update("memories", h.id, {
+          tags: String(h.tags || "").replace(/\bhandoff:open\b/gi, "handoff:claimed"),
+          invalid_at: nowSql(),
+          invalid_reason: "handoff_claimed_by:" + claimedBy,
+          updated_at: nowSql(),
+        });
+      } catch (_) {
+        // fail-open：核销失败仅导致下次重复提示一次
+      }
+    }
+  }
+
+  if (unreadMail.length > 0) {
+    const ids = [];
+    for (const mail of unreadMail) {
+      lines.push(_mailLine(mail));
+      count++;
+      ids.push(mail.id);
+    }
+    digest.mailbox = {
+      unread: unreadMail.length,
+      ids,
+      from: unreadMail.map((r) => r.client || "unknown"),
+    };
+    for (const mail of unreadMail) {
+      try {
+        // 单次消费：展示即标记 mail:read 并软失效，杜绝同一封邮件反复占预算
+        await client.update("memories", mail.id, {
+          tags: String(mail.tags || "").replace(/\bmail:unread\b/gi, "mail:read"),
+          invalid_at: nowSql(),
+          invalid_reason: "mail_consumed",
+          updated_at: nowSql(),
+        });
+      } catch (_) {
+        // fail-open：消费失败仅导致下次重复提示一次
+      }
+    }
+  }
+
+  digest.lines = lines.join("");
+  digest.count = count;
+  return digest;
 }
