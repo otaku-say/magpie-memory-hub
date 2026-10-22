@@ -1,14 +1,14 @@
 # 架构概览
 
-> 本文档描述 `magpie-memory-hub` v6.43.0 目录结构重构后的代码组织方式。
+> 本文档描述 `magpie-memory-hub` v6.45.0 目录结构重构后的代码组织方式。
 > 数字口径：本文所有行数均为 `wc -l` 实测值，统计基线为提交 `8ec2574`（`integ2`）。
 > 决策背景见 [ADR-001-facade-pattern.md](ADR-001-facade-pattern.md)。
 
 | 统计项 | 数值 |
 |---|---|
-| `src/` 下 JavaScript 模块 | 49 个 / 17 165 行 |
+| `src/` 下 JavaScript 模块 | 51 个 / 17 176 行 |
 | `src/page/settings.css` | 1 169 行 |
-| 根目录门面文件 | 15 个 / 103 行 |
+| 根目录门面文件 | 3 个 / 宿主入口门面 |
 | `src/` 一级子目录 | 7 个（core / domain / integration / middleware / page / services / tools） |
 | 根目录 `.js` 总行数（重构前 `8f495b0`） | 16 个文件 / 17 048 行 |
 

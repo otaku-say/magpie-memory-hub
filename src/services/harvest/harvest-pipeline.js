@@ -1,6 +1,6 @@
 /**
  * 模块职责: 对话提炼与记忆入库流水线 (processDialogueAndHarvest 主体、双轨门禁、指纹去重与后台队列消费)
- * 依赖: ./scaffolding.js (_diag), ./dialog-extract.js (isExplicitUserMemory), ./classify.js (classifyDialogueWithOnlineModel), ./extract.js (harvestWithOnlineModel), ./offline-scan.js (isTestMode), ../../tools.js, ../../scrub.js, ../../local_state.js, ../../semantic_dedup.js
+ * 依赖: ./scaffolding.js (_diag), ./dialog-extract.js (isExplicitUserMemory), ./classify.js (classifyDialogueWithOnlineModel), ./extract.js (harvestWithOnlineModel), ./offline-scan.js (isTestMode), ../../tools.js, ../../scrub.js, src/core/state.js, ../../semantic_dedup.js
  * 被依赖: src/services/harvest/index.js, src/services/harvest/hook-response.js, gateway_harvest.hooks.js, tools.js, tests
  */
 

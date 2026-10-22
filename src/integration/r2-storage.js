@@ -1,7 +1,7 @@
 /**
  * 模块职责：Cloudflare R2 对象存储代管实现（双模凭据分工 / 真实探针校验 / 桶名规范化 / 上传列举删除）
- * 依赖：../../ncb_mcp.js, ../../local_state.js, ../../online_models.js
- * 被依赖：../../r2.js, ../../db_tools.js, ../../mcp_client.js, src/index.js, page_actions.js, tests
+ * 依赖：../../ncb_mcp.js, src/core/state.js, ../../online_models.js
+ * 被依赖：../../r2.js, src/integration/db-tools.js, ../../mcp_client.js, src/index.js, page_actions.js, tests
  */
 
 import { NcbMcp } from "./ncb-client.js";

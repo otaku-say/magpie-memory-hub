@@ -1,7 +1,7 @@
 /**
  * 模块职责：NoCodeBackend MCP HTTP JSON-RPC 客户端实现（通信/序列化/DDL/R2封装）
  * 依赖：无
- * 被依赖：../../ncb_mcp.js, ../../db_tools.js, ../../r2.js, src/integration/mcp-client.js
+ * 被依赖：../../ncb_mcp.js, src/integration/db-tools.js, ../../r2.js, src/integration/mcp-client.js
  */
 
 export const MCP_ENDPOINT = "https://app.nocodebackend.com/api/mcp/http";
