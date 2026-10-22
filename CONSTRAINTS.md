@@ -1,6 +1,6 @@
 # Constraints
 
-Last reviewed: 2026-10-21
+Last reviewed: 2026-10-23
 
 本文件是 **magpie-memory-hub** 的质量底线契约。任何 Agent（人或模型）在改代码前必须先读本文件，
 **不得为了让某次改动通过而弱化本文件**。
@@ -15,6 +15,9 @@ Last reviewed: 2026-10-21
   - 删除 `tests/*.mjs` 文件
   - 从保留的测试中抽掉 `assert` 语句
   - 把强断言改为 `assert.ok(true)` 之类的空断言
+- **契约不得只活在实现里**：`src/tools/**` 读取的每个 `args.X`，必须在对应工具的 `inputSchema.args.properties`
+  里显式声明（含 `type` / `enum` / `description`），并由 `tests/test_v646_c_feedback_and_explain.mjs` 第 11 节
+  的契约断言锁定。只跑 `execute()` 不算验证——schema 漏声明时实现照样跑通、调用方却永远传不进参数（终审 QA-B2 假绿）。
 - **不得弱化计数断言**。`tests/test_meta.mjs` 里的测试文件总数是精确锁定值，**只能由主控在合并后统一调整**，
   任何单个分支不得自行修改。
 - **不得新增错误抑制**：新增 `eslint-disable`、`@ts-ignore`、`/* istanbul ignore */` 需在 PR 说明理由。
@@ -32,7 +35,7 @@ Last reviewed: 2026-10-21
 | 根目录只有 3 个宿主入口门面（`tools.js` / `memory.middleware.js` / `gateway_harvest.hooks.js`） | `tests/test_structure.mjs` | 门面里藏实现会重新变成巨石文件 |
 | 门面只做 re-export，去掉注释与 import/export 后**残留代码为 0** | `tests/test_structure.mjs` | — |
 | 无循环依赖 | `tests/check_cycles.mjs` | ESM 循环依赖会在某条调用链上变成 `undefined` |
-| 导出面不变 | `tests/test_exports.mjs` | 84 套测试全部依赖导出面 |
+| 导出面不变 | `tests/test_exports.mjs` | 91 套测试全部依赖导出面 |
 | 每个模块顶部有中文注释（职责 / 依赖 / 被依赖） | `tests/test_structure.mjs` | — |
 | **不按行数硬拆** | 人工评审 | 强行把单一职责函数切成碎片，耦合反而更高 |
 

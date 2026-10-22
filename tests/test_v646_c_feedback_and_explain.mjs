@@ -18,8 +18,11 @@
  *   5. 【反证】explain 缺省（false）时零侵入：顶层键集合与旧格式逐字节一致，绝不出现 score_details / timings。
  *   6. 【契约级】对外 MCP inputSchema 必须显式声明 explain / feedback：
  *      memory_search.explain / pitfall_search.explain（boolean）
- *      memory_forget.feedback（enum not_helpful|stale|wrong）、memory_get.feedback（enum helpful）。
+ *      memory_forget.feedback（enum not_helpful|stale|wrong）、memory_get.feedback（enum helpful）、
+ *      memory_save.feedback（enum helpful，提权 +10 分并累加复发度）。
  *      只调 execute() 无法发现「漏声明」，故此处直接断言 args.properties（终审 QA-F1）。
+ *      并额外做「声明面精确覆盖」扫描 + 按 schema 严格投喂的真实提权反证（终审 QA-B2：
+ *      memory_save 曾只有实现没有契约，execute() 能过、调用方却永远传不进 feedback）。
  *   7. 【配置驱动】设置页 explain_debug 全链路：readOptions 透真布尔 → 工具层 explain 判定
  *      必须 `args.explain === true || cfg.explain_debug === true`，只勾开关也真实产出明细；
  *      开关关闭时必须精确回退到精简格式（终审 QA-F2）。
@@ -77,6 +80,7 @@ console.log("隔离命名空间 project:", P);
 console.log("=================================================================\n");
 
 const forget = hub.tool.memory_forget;
+const save = hub.tool.memory_save;
 const get = hub.tool.memory_get;
 const search = hub.tool.memory_search;
 const pitSearch = hub.tool.pitfall_search;
@@ -342,6 +346,108 @@ for (const fb of ["stale", "wrong"]) {
   assert.deepStrictEqual(gProp.enum, ["helpful"], "memory_get.feedback 必须用 enum 锁死为 helpful（不得混入降权档位）");
   assert.ok(/recurrence|复发/.test(gProp.description), "memory_get.feedback 描述必须说明累加复发度");
 
+  /* --- B2 补强（终审 QA-B2：memory_save 的 helpful 提权只有实现、没有对外契约） ---
+   * 门禁此前只断言了 search / pitfall_search / get / forget 四个工具，memory_save 的
+   * feedback 分支虽在 src/tools/memory-save.js 里真实生效，却从未被契约断言覆盖——
+   * 这就是「实现跑通即算绿」的假闭环出口：schema 漏声明时 execute() 照样能过，
+   * 而调用方（LLM/宿主）按 inputSchema 拼参数永远传不进 feedback。
+   * 下面三件事必须同时成立，缺一即契约不成立：
+   *   ① 声明面（args.properties.feedback）存在且 enum 锁死 helpful；
+   *   ② 声明面「精确覆盖」——用全工具扫描反证没有第 4 个工具偷偷漏声明或乱加档位；
+   *   ③ 声明面与真实行为同源——只按 schema 声明、逐字段校验类型/enum 后投喂，
+   *      必须真的把既有记忆 confidence 抬 10 分并累加复发度（严格投喂 = 反证门禁盲区）。 */
+  const svProp = assertProp("memory_save", save, "feedback", "string", ["置信度"]);
+  assert.deepStrictEqual(svProp.enum, ["helpful"],
+    "memory_save.feedback 必须用 enum 锁死为 helpful（提权档位，不得混入 not_helpful/stale/wrong 降权失效档位）");
+  assert.ok(/helpful/.test(svProp.description), "memory_save.feedback 描述必须点名 helpful 档位");
+  assert.ok(/复发|recurrence/.test(svProp.description), "memory_save.feedback 描述必须说明累加复发度");
+  assert.ok(/10/.test(svProp.description), "memory_save.feedback 描述必须写明提权幅度 +10 分（调用方据此判断是否值得用）");
+  assert.ok(!(save.args.required || []).includes("feedback"), "反证：memory_save.feedback 是可选参数，绝不能进 required");
+  assert.ok(save.args.required.includes("title") && save.args.required.includes("content"),
+    "反证：补 feedback 后 memory_save 的 title/content 必填契约必须原样保留");
+  assert.ok(save.args.properties.title && save.args.properties.content && save.args.properties.project,
+    "反证：补 feedback 后 memory_save 的 title/content/project 必须全部仍在");
+
+  // ② 声明面精确覆盖：扫全工具树，声明了 feedback 的工具集合必须精确等于这 3 个
+  const FEEDBACK_TOOLS = ["memory_save", "memory_get", "memory_forget"];
+  const FEEDBACK_DOMAIN = ["helpful", "not_helpful", "stale", "wrong"];
+  const feedbackTools = Object.keys(hub.tool)
+    .filter((n) => hub.tool[n] && hub.tool[n].args && hub.tool[n].args.properties && "feedback" in hub.tool[n].args.properties)
+    .sort();
+  assert.deepStrictEqual(feedbackTools, [...FEEDBACK_TOOLS].sort(),
+    `feedback 契约声明面必须精确等于 ${FEEDBACK_TOOLS.join("/")}，漏一个就是调用方看不见的假闭环，多一个则说明有未登记的第二套反馈语义`);
+  for (const n of feedbackTools) {
+    const p = hub.tool[n].args.properties.feedback;
+    assert.ok(Array.isArray(p.enum) && p.enum.length > 0, `${n}.feedback 必须声明非空 enum（杜绝自由文本被当成合法反馈）`);
+    for (const v of p.enum) {
+      assert.ok(FEEDBACK_DOMAIN.includes(v), `${n}.feedback 的 enum 值 ${v} 必须落在 {helpful,not_helpful,stale,wrong} 内`);
+    }
+  }
+
+  // ③ 严格按 schema 投喂的反证：任何未声明字段、类型不符、enum 越界一律在投喂前炸掉
+  const TYPE_OK = {
+    string: (v) => typeof v === "string",
+    number: (v) => typeof v === "number" && Number.isFinite(v),
+    integer: (v) => Number.isInteger(v),
+    boolean: (v) => typeof v === "boolean",
+    array: (v) => Array.isArray(v),
+    object: (v) => !!v && typeof v === "object" && !Array.isArray(v),
+  };
+  const feedBySchema = (toolName, tool, args) => {
+    const props = tool.args.properties || {};
+    for (const [k, v] of Object.entries(args)) {
+      const p = props[k];
+      assert.ok(p, `严格投喂：${toolName}.${k} 未在 inputSchema 声明，调用方按契约永远传不进来（这正是 B2 的盲区形态）`);
+      assert.ok(TYPE_OK[p.type], `严格投喂：${toolName}.${k} 的 type=${p.type} 无法校验`);
+      assert.ok(TYPE_OK[p.type](v), `严格投喂：${toolName}.${k} 必须为 ${p.type}，实际 ${typeof v}`);
+      if (p.enum) assert.ok(p.enum.includes(v), `严格投喂：${toolName}.${k}=${JSON.stringify(v)} 不在 enum ${JSON.stringify(p.enum)} 内`);
+    }
+    for (const r of tool.args.required || []) assert.ok(r in args, `严格投喂：${toolName} 缺少必填 ${r}`);
+    return JSON.parse(JSON.stringify(args));
+  };
+  const strictSave = async (args) => parseOut(await save.execute(feedBySchema("memory_save", save, args)));
+
+  // 严格投喂的否定面：未声明字段 / 越界 enum 必须在触达 execute 之前就被拦下
+  assert.throws(() => feedBySchema("memory_save", save, { title: "t", content: "c", bounce_hidden: 1 }),
+    /未在 inputSchema 声明/, "反证：未声明字段必须被严格投喂拒绝（否则「能跑」永远掩盖「没声明」）");
+  assert.throws(() => feedBySchema("memory_save", save, { title: "t", content: "c", feedback: "not_helpful" }),
+    /不在 enum/, "反证：memory_save.feedback 必须拒绝降权档位 not_helpful（那是 memory_forget 的语义）");
+
+  // 真实反证：同一标题两条 → 第二条命中既有行，helpful 必须把库内 confidence 抬高 10 分
+  const saveTitle = "B2 提权契约样本";
+  const created = await strictSave({ project: P, category: "fact", title: saveTitle, content: `${saveTitle} 正文：严格投喂`, confidence: 0.8 });
+  assert.strictEqual(created.action, "ADD", `严格投喂的 memory_save 首次写入必须新建（实际 action=${created.action}）`);
+  assert.ok(!("feedback_applied" in created), "反证：首次写入未带 feedback，回包不得出现 feedback_applied（零侵入）");
+  assert.ok(Number(created.id) > 0, "首次写入必须回显真实 id（提权要靠它定位行）");
+  const beforeRow = await rowOf("memories", created.id);
+  const beforeConfidence = Number(beforeRow.confidence_score);
+  const beforeRecurrence = Number(beforeRow.recurrence) || 1;
+  const beforeHits = Number(beforeRow.retrieval_count) || 0;
+
+  const boosted = await strictSave({ project: P, category: "fact", title: saveTitle, content: `${saveTitle} 正文：严格投喂`, confidence: 0.8, feedback: "helpful" });
+  assert.strictEqual(boosted.action, "NOOP", `同一标题同内容必须走去重命中（实际 action=${boosted.action}）`);
+  assert.strictEqual(boosted.feedback_applied, "helpful",
+    "反证：schema 声明了 memory_save.feedback=helpful，经严格投喂就必须回显 feedback_applied=helpful（声明了却不生效=假契约）");
+  assert.strictEqual(boosted.confidence_score, Math.min(100, beforeConfidence + 10),
+    `helpful 必须把 confidence 精确抬高 10 分（${beforeConfidence} → ${beforeConfidence + 10}）`);
+  assert.ok(boosted.recurrence > beforeRecurrence,
+    `helpful 必须累加复发度（${beforeRecurrence} → ${boosted.recurrence}）`);
+
+  const afterRow = await rowOf("memories", created.id);
+  assert.strictEqual(Number(afterRow.confidence_score), Math.min(100, beforeConfidence + 10),
+    "helpful 提权必须真实落库，而不只是回包好看");
+  assert.ok(Number(afterRow.recurrence) > beforeRecurrence, "helpful 提权必须真实累加库内 recurrence");
+  assert.strictEqual(Number(afterRow.retrieval_count), beforeHits + 1, "helpful 提权必须把访问热度 +1（与 memory_get 同一约定）");
+  assert.ok(!afterRow.invalid_at, "helpful 提权绝不允许写 invalid_at");
+  assert.strictEqual(afterRow.lifecycle_status, "active", "helpful 提权后记录必须保持 active");
+
+  // 反证：不带 feedback 时输出必须零侵入——绝不凭空出现 feedback_applied / feedback_note
+  const plainSave = await strictSave({ project: P, category: "fact", title: saveTitle, content: `${saveTitle} 正文：严格投喂`, confidence: 0.8 });
+  assert.ok(!("feedback_applied" in plainSave), "反证：不带 feedback 时不得出现 feedback_applied 字段（零侵入）");
+  assert.ok(!("feedback_note" in plainSave), "反证：不带 feedback 时不得出现 feedback_note 字段（零侵入）");
+  assert.strictEqual(Number((await rowOf("memories", created.id)).confidence_score), Math.min(100, beforeConfidence + 10),
+    "反证：不带 feedback 的重复保存绝不再提权（否则每次重复写都会白涨分）");
+
   // 反证 a：新增参数只能是「追加」，不得顺手删掉任何既有契约字段
   assert.ok(search.args.properties.query, "反证：补 explain 后 memory_search.query 必须仍在");
   assert.ok(search.args.properties.search_rerank, "反证：补 explain 后 memory_search.search_rerank 必须仍在");
@@ -363,7 +469,7 @@ for (const fb of ["stale", "wrong"]) {
     "反证：schema 声明了 explain 就必须真的产出 timings / score_details");
   const forgetViaSchema = parseOut(await forget.execute({ id: mem.id, feedback: "not_helpful", project: P }));
   assert.strictEqual(forgetViaSchema.action, "FEEDBACK_DOWNVOTE", "反证：schema 声明了 feedback 就必须真的生效");
-  console.log("  ✓ 契约：4 个工具的 explain/feedback 显式声明齐全，enum 锁死，既有字段零回退");
+  console.log("  ✓ 契约：5 个工具的 explain/feedback 显式声明齐全（含 memory_save 提权），enum 锁死，严格投喂真实生效，既有字段零回退");
 }
 
 /* -----------------------------------------------------------------
