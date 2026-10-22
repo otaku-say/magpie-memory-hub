@@ -67,7 +67,7 @@ export async function resolveRealDatabase(cfg, name) {
         const m = line.match(/^-\s*([A-Za-z0-9_]+)/);
         if (m) candidates.push(m[1]);
       }
-      const hit = candidates.find((c) => norm(c) === target) || (candidates.length === 1 ? candidates[0] : "");
+      const hit = candidates.find((c) => norm(c) === target) || "";
       if (hit && /^\d+_/.test(hit)) {
         try { rememberDatabase(hit); } catch (_) {}
         return hit;

@@ -63,7 +63,7 @@ export async function fetchPublicSchema(database, opts) {
   }
   try {
     const res = await fetch(url, { signal: ctrl ? ctrl.signal : undefined });
-    if (timer) clearTimeout(timer);
+    if (timer) clearTimeout(timer); if (externalSignal && typeof abortListener === "function") externalSignal.removeEventListener("abort", abortListener);
     if (externalSignal && abortListener) externalSignal.removeEventListener("abort", abortListener);
     const text = await res.text();
     let body = null;
@@ -73,7 +73,7 @@ export async function fetchPublicSchema(database, opts) {
     }
     return { ok: true, schema: body, via: "public-schema" };
   } catch (e) {
-    if (timer) clearTimeout(timer);
+    if (timer) clearTimeout(timer); if (externalSignal && typeof abortListener === "function") externalSignal.removeEventListener("abort", abortListener);
     if (externalSignal && abortListener) externalSignal.removeEventListener("abort", abortListener);
     const isAbort = externalSignal && externalSignal.aborted;
     return { ok: false, error: isAbort ? "操作已被取消 (aborted)" : String(e && e.message || e) };
@@ -341,14 +341,17 @@ export function logicalName(name, account) {
  * ------------------------------------------------------------------ */
 export async function dbProvision(cfg, args) {
   const mcp = mcpOf(cfg);
-  const want = String((args && args.database) || (cfg && cfg.instance) || "").trim();
+  const want = String((args && args.database) || (cfg && (cfg.instance || cfg.ncb_instance)) || "").trim();
   if (!want) {
     const err = new Error("未指定数据库名（数据库名称是必填的）");
     err.code = "NO_DATABASE";
     throw err;
   }
   // 重名策略：reuse（默认，复用不新建）/ auto_rename（允许新建带后缀的库）/ fail（报错让用户改名）
-  const onExist = String((args && args.on_exist) || "reuse");
+  const onExist = String((args && args.on_exist) || "reuse").toLowerCase().trim();
+  if (!["reuse", "fail", "auto_rename"].includes(onExist)) {
+    return { ok: false, action: "ABORT", reason: `未知 on_exist 策略 "${args && args.on_exist}"（只允许 reuse / fail / auto_rename）` };
+  }
   const withR2 = Boolean(args && args.with_r2 === true);
 
   // 1) 先列出现有库（账号内命名空间；跨账号不会冲突，因为 NCB 会强制加账号前缀）
@@ -760,7 +763,7 @@ export async function secretCheck(cfg, args) {
       headers: { Authorization: "Bearer " + secretToUse },
       signal: ctrl ? ctrl.signal : undefined,
     });
-    if (timer) clearTimeout(timer);
+    if (timer) clearTimeout(timer); if (externalSignal && typeof abortListener === "function") externalSignal.removeEventListener("abort", abortListener);
 
     if (res.status < 400) {
       return {
@@ -911,7 +914,7 @@ export async function secretCheck(cfg, args) {
       ],
     };
   } catch (err) {
-    if (timer) clearTimeout(timer);
+    if (timer) clearTimeout(timer); if (externalSignal && typeof abortListener === "function") externalSignal.removeEventListener("abort", abortListener);
     const errMsg = String((err && err.message) || err);
     const retObj = {
       ok: false,

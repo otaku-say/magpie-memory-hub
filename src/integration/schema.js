@@ -387,6 +387,7 @@ export function buildDropStatements() {
 /** 初始化完成后的版本记录语句。 */
 export function versionUpsertSQL(version) {
   var v = String(version);
+  if (!/^\d+$/.test(v)) throw new Error("非法版本号: 必须为纯数字");
   /* 时间戳必须显式写：实测 NCB 不生效 DEFAULT CURRENT_TIMESTAMP，
    * 省略 updated_at 会让它恒为 NULL（用户实测发现）。 */
   return "INSERT INTO " + META_TABLE + " (k, v, updated_at) VALUES ('" + VERSION_KEY + "', '" + v +

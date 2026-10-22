@@ -258,7 +258,8 @@ export function makeMcpClient(cfg, signal) {
         try {
           let backQuery;
           if (data.content_fingerprint) {
-            backQuery = { project: data.project, content_fingerprint: data.content_fingerprint, order_by: "id DESC", limit: 1 };
+            const proj = data.project || "global";
+          backQuery = { project: proj, content_fingerprint: data.content_fingerprint, order_by: "id DESC", limit: 1 };
           } else if (table === "pitfalls") {
             backQuery = { project: data.project, symptom: data.symptom, order_by: "id DESC", limit: 1 };
           } else {

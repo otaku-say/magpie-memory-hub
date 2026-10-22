@@ -740,7 +740,7 @@
         '<li>可点下方「重新查询」，或与 agent 对话一次触发宿主加载后再查。</li>' +
       '</ul>' +
       '<div class="btn-row" style="margin-top:10px;">' +
-        '<button type="button" class="tiny" data-retry="' + cardKey + '">重新查询</button>' +
+        '<button type="button" class="tiny" data-retry="' + escapeHtml(cardKey) + '">重新查询</button>' +
       '</div>';
   }
 
@@ -925,6 +925,12 @@
 
   /* ---------------- 提交信标 ---------------- */
   function submitAction(op, extra) {
+  var ALLOWED_OPS = ["provision","ncb_check","secret_check","storage_setup","r2_check","clean_probe","model_check","memory_audit","harvest_gateway","sync_snapshot","status","reset"];
+  if (ALLOWED_OPS.indexOf(op) === -1) {
+    say("未知操作: " + op, "bad");
+    setActionButtonsDisabled(false);
+    return;
+  }
     var targetCard = cardOfOp(op);
     var currentContainerId = containerOfOp(op);
 
