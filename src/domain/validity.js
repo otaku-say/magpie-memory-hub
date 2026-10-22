@@ -1,6 +1,6 @@
 /**
  * 模块职责：记忆有效性校验（未软失效且未过期）与标签交集检查
- * 依赖：../../semantic_dedup.js
+ * 依赖：src/domain/semantic-dedup.js
  * 被依赖：src/tools/**, src/services/**
  */
 

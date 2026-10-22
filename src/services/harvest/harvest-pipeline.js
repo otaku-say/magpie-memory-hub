@@ -1,10 +1,11 @@
 /**
  * 模块职责: 对话提炼与记忆入库流水线 (processDialogueAndHarvest 主体、双轨门禁、指纹去重与后台队列消费)
- * 依赖: ./scaffolding.js (_diag), ./dialog-extract.js (isExplicitUserMemory), ./classify.js (classifyDialogueWithOnlineModel), ./extract.js (harvestWithOnlineModel), ./offline-scan.js (isTestMode), ../../tools.js, ../../scrub.js, src/core/state.js, ../../semantic_dedup.js
+ * 依赖: ./scaffolding.js (_diag), ./dialog-extract.js (isExplicitUserMemory), ./classify.js (classifyDialogueWithOnlineModel), ./extract.js (harvestWithOnlineModel), ./offline-scan.js (isTestMode), tools.js, src/core/sanitize.js, src/core/state.js, src/domain/semantic-dedup.js
  * 被依赖: src/services/harvest/index.js, src/services/harvest/hook-response.js, gateway_harvest.hooks.js, tools.js, tests
  */
 
 import crypto from "node:crypto";
+import { markRecent, justWritten } from "../../core/state-recent.js";
 import { scrubSecrets } from "../../core/sanitize.js";
 import { _diag } from "./scaffolding.js";
 import { isExplicitUserMemory } from "./dialog-extract.js";
@@ -43,6 +44,7 @@ const recentFingerprints = new Map();
 
 function markRecentTurn(fp) {
   if (!fp) return;
+  markRecent(fp);
   if (recentFingerprints.size >= RECENT_CAP) {
     const oldestKey = recentFingerprints.keys().next().value;
     if (oldestKey) recentFingerprints.delete(oldestKey);
@@ -52,6 +54,7 @@ function markRecentTurn(fp) {
 
 function isRecentTurn(fp) {
   if (!fp) return false;
+  if (justWritten(fp)) return true;
   const at = recentFingerprints.get(fp);
   if (!at) return false;
   if (Date.now() - at > 300000) {
@@ -251,7 +254,8 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       source_turn: sourceTurn,
     };
     safeEnqueueHarvestItems([{ id: queueId, table: "memories", data: memoryPayload, project, fp }]);
-    markRecentTurn(memKey);
+    if (recentFingerprints.size >= RECENT_CAP) { o = recentFingerprints.keys().next().value; if (o) recentFingerprints.delete(o); }
+    recentFingerprints.set(memKey, Date.now());
     memoriesSaved++;
   }
 
@@ -307,7 +311,8 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       source_turn: sourceTurn,
     };
     safeEnqueueHarvestItems([{ id: queueId, table: "pitfalls", data: pitfallPayload, project, fp }]);
-    markRecentTurn(pitKey);
+    if (recentFingerprints.size >= RECENT_CAP) { o = recentFingerprints.keys().next().value; if (o) recentFingerprints.delete(o); }
+    recentFingerprints.set(pitKey, Date.now());
     pitfallsSaved++;
   }
 

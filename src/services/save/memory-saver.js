@@ -63,7 +63,7 @@ export async function saveMemory(client, cfg, m, ctx) {
   const fp = (m.content_fingerprint && String(m.content_fingerprint).trim()) || semanticFingerprint(project, category, title, content, tags);
 
   // 0) 进程内近期写入 → 挡掉写后读延迟窗口里的重复
-  if (justWritten("m:" + fp)) {
+  if (justWritten("m:" + project + ":" + fp) || justWritten("m:" + fp)) {
     return { action: "NOOP", id: null, note: "刚刚写入过（写后读延迟窗口内），已忽略重复" };
   }
 
@@ -412,7 +412,7 @@ export async function saveMemory(client, cfg, m, ctx) {
     created = await client.create("memories", payload);
   } catch (e) {
     if (/duplicate entry/i.test(String(e.message))) {
-      markRecent("m:" + fp);
+      markRecent("m:" + project + ":" + fp); markRecent("m:" + fp);
       const dupRow = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT })).filter(
         (r) => r.content_fingerprint === fp
       )[0];
@@ -456,7 +456,7 @@ export async function saveMemory(client, cfg, m, ctx) {
     throw e;
   }
   const newId = created && (created.id || created.insertId);
-  markRecent("m:" + fp);
+  markRecent("m:" + project + ":" + fp); markRecent("m:" + fp);
 
   // EVO-9a: 处理显式 supersede_id 与旧版 supersede 版本链
   const allSupersedeIds = new Set();

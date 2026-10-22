@@ -1,6 +1,6 @@
 /**
  * 模块职责：NoCodeBackend 客户端构建（MCP/REST双模）、参数形状嗅探与基础结果集工具
- * 依赖：../core/config.js, ../../mcp_client.js
+ * 依赖：../core/config.js, src/integration/mcp-client.js
  * 被依赖：src/services/**, src/tools/**, src/index.js, tools.js
  */
 

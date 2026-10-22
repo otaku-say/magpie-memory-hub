@@ -1,6 +1,6 @@
 /**
  * 模块职责：相关性打分、新鲜度衰减、综合排序与分词辅助
- * 依赖：../../semantic_dedup.js
+ * 依赖：src/domain/semantic-dedup.js
  * 被依赖：src/tools/**, src/services/**, tools.js
  */
 

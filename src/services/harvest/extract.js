@@ -1,6 +1,6 @@
 /**
  * 模块职责: 在线提炼模型调用 (extract_model)、结构化提炼、JSON 解析与字段归一化，以及模型连通性检测
- * 依赖: ./scaffolding.js (_diag), ./dialog-extract.js (parseExtractionJson), ./classify.js (testClassificationModel), ../../model_budget.js
+ * 依赖: ./scaffolding.js (_diag), ./dialog-extract.js (parseExtractionJson), ./classify.js (testClassificationModel), src/domain/token-budget.js
  * 被依赖: src/services/harvest/harvest-pipeline.js, src/services/harvest/offline-scan.js, gateway_harvest.hooks.js, gateway_harvest.js
  */
 

@@ -1,6 +1,6 @@
 /**
  * 模块职责: 网关请求前置钩子 onRequest 主体（自激防护、auto_harvest 门禁、origin 隐私守卫、cwd/query 上下文注入、诊断上报）
- * 依赖: ./scaffolding.js (_diag), ../../model_budget.js (isInternalHarvestRequest)
+ * 依赖: ./scaffolding.js (_diag), src/domain/token-budget.js (isInternalHarvestRequest)
  * 被依赖: src/services/harvest/index.js, src/services/harvest/hook-response.js, gateway_harvest.hooks.js
  */
 

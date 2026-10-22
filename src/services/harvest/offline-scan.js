@@ -1,6 +1,6 @@
 /**
  * 模块职责: 离线录制目录扫描与增量提炼 (GatewayConversations 读盘、路径安全守卫、文件收集与离线提炼入库)
- * 依赖: ./scaffolding.js (_diag, stripScaffolding), ./dialog-extract.js (isExplicitUserMemory), ./classify.js, ./extract.js, src/core/state.js, ../../page_actions.js, ../../semantic_dedup.js
+ * 依赖: ./scaffolding.js (_diag, stripScaffolding), ./dialog-extract.js (isExplicitUserMemory), ./classify.js, ./extract.js, src/core/state.js, ../../page_actions.js, src/domain/semantic-dedup.js
  * 被依赖: src/services/harvest/index.js, src/services/harvest/harvest-pipeline.js, gateway_harvest.js
  */
 
@@ -132,6 +132,15 @@ export function isHomeOrRootAllowed(p, customHome = null) {
 
   // 2. 是当前用户 home 下的 .config/magpie（含子路径）
   if (rel === ".config/magpie" || rel.startsWith(".config/magpie/")) {
+    return true;
+  }
+
+  // 3. 兼容当前用户主目录下非隐藏/非敏感子路径中的 Magpie 便携模式目录 (.../data/gateway-conversations)
+  const segs = rel.split("/");
+  const hasHiddenOrSensitive = segs.some(
+    (s) => s.startsWith(".") || /^(?:private_secrets|secrets|credentials)$/i.test(s)
+  );
+  if (!hasHiddenOrSensitive && /(?:^|\/)data\/gateway[-_]?conversations(?:\/|$)/i.test(rel)) {
     return true;
   }
 
