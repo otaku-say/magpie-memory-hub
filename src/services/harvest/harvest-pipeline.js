@@ -4,7 +4,6 @@
  * 被依赖: src/services/harvest/index.js, src/services/harvest/hook-response.js, gateway_harvest.hooks.js, tools.js, tests
  */
 
-import { ensureAuditScheduler } from "../audit/scheduler.js";
 import crypto from "node:crypto";
 import { scrubSecrets } from "../../core/sanitize.js";
 import { _diag } from "./scaffolding.js";

@@ -236,7 +236,7 @@ async function execute(action, cfg, fs, sp, state, options) {
     else if (action.op === "r2_check") result = await r2Check(cfg, args);
     else if (action.op === "clean_probe") result = await cleanProbes(cfg, args);
     else if (action.op === "model_check") {
-      const { testModelConnectivity } = await import("../../gateway_harvest.hooks.js");
+      const { testModelConnectivity } = await import("../services/harvest/extract.js");
       const { getModelBudgetState } = await import("../domain/token-budget.js");
       const modelOpts = Object.assign({}, cfg, options || {});
       const conn = await testModelConnectivity("all", modelOpts);
