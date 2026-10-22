@@ -44,17 +44,21 @@ async function _idByFingerprint(client, args) {
 }
 
 /**
- * SPEC §2 helpful 提权：confidence +10（封顶 100）、recurrence 累加、访问热度 +1。
- * 写入侧已把本次复发计入时（result.recurrence 有值）只需再 +1 表达「老经验再次被验证有用」；
- * 被写后读窗口短路掉时本次复发没被计入，因此补 +2。基数取库内现值与接口回显的较大者，
- * 避免 NCB 读延迟把计数写回去。与 memory_get 同一约定：不改 updated_at，不把老记忆伪装成新记忆。
+ * SPEC §2 helpful 提权：confidence +10（封顶 100）、recurrence +1、访问热度 +1。
+ * 复发度账本只有一条规则：提权后 recurrence = max(库内现值, 写入侧上报值) + 1。
+ *   - 写入侧已把本次复发计入（result.recurrence 有值）时两者一致，+1 即「老经验再次被验证有用」；
+ *   - 被写后读窗口短路（NOOP + id:null）时写入侧已明确「忽略重复」、库内并未计数，
+ *     反馈路径不得反过来替它补记这次复现，否则同一 feedback 会出现 +1 / +2 两种增量。
+ * 基数取两者较大者是为了避免 NCB 读延迟把计数写回去。
+ * 与 memory_get 同一约定：不改 updated_at，不把老记忆伪装成新记忆。
  * 读写失败一律降级为「不提权」且不抛错：反馈是附赠信号，不能反过来吃掉已成功的保存。
  */
 async function _escalateHelpful(client, id, result) {
   let row;
   try {
-    const rows = rowsOf(await client.list("memories", { id, limit: 1 }));
-    row = rows.find((r) => r && Number(r.id) === id) || rows[0];
+    // 后端可能无视 id 过滤 / 副本读滞后，rows[0] 未必是 id 那条：逐行验 id，绝不退化成「取第一条」
+    // （对齐 memory-get.js:210 的同款防御）。验不到就放弃提权，宁可少加一次分，也不能加到别人身上。
+    row = rowsOf(await client.list("memories", { id, limit: 1 })).filter((r) => r && Number(r.id) === id)[0];
   } catch (_) {
     return null;
   }
@@ -64,7 +68,7 @@ async function _escalateHelpful(client, id, result) {
   const cur = Number(row.confidence_score);
   const patch = {
     confidence_score: Math.min(100, (isNaN(cur) ? 100 : cur) + 10),
-    recurrence: Math.max(Number(row.recurrence) || 1, reported) + (reported ? 1 : 2),
+    recurrence: Math.max(Number(row.recurrence) || 1, reported) + 1, // 唯一语义：helpful 恒 +1
     retrieval_count: (Number(row.retrieval_count) || 0) + 1,
     last_used_at: nowSql(),
   };
