@@ -53,7 +53,8 @@ async function _idByFingerprint(client, args) {
 async function _escalateHelpful(client, id, result) {
   let row;
   try {
-    row = rowsOf(await client.list("memories", { id, limit: 1 }))[0];
+    const rows = rowsOf(await client.list("memories", { id, limit: 1 }));
+    row = rows.find((r) => r && Number(r.id) === id) || rows[0];
   } catch (_) {
     return null;
   }

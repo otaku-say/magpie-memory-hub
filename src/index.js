@@ -52,6 +52,7 @@ const TOOLS = {
         recurrence: { type: "integer", description: "观察与复发次数，默认 1" },
         supersede_id: { type: "number", description: "要取代的旧记录 ID（显式取代走 UPDATE）" },
         supersede: { type: "boolean", description: "强制以新内容扩充/覆盖同标题记录" },
+        feedback: { type: "string", enum: ["helpful"], description: "记忆质量正向反馈：helpful 命中既有记忆（去重 NOOP / 演进 ENRICHED）时置信度 +10（封顶 100）并累加复发度（默认不传，零侵入）" },
       },
       required: ["title", "content"],
     },
