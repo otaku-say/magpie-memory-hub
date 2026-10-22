@@ -84,6 +84,9 @@ const targetFiles = [
   { path: "memory.middleware.js", url: new URL("../memory.middleware.js", import.meta.url) },
   { path: "tools.js", url: new URL("../tools.js", import.meta.url) },
   { path: "settings.html", url: new URL("../settings.html", import.meta.url) },
+  { path: "src/middleware/inject-builder.js", url: new URL("../src/middleware/inject-builder.js", import.meta.url) },
+  { path: "src/middleware/request-inject.js", url: new URL("../src/middleware/request-inject.js", import.meta.url) },
+  { path: "src/index.js", url: new URL("../src/index.js", import.meta.url) },
 ];
 
 let totalErrors = 0;

@@ -234,7 +234,6 @@ export async function processDialogueAndHarvest(dialogueText, meta = {}, client 
       tags: item.tags || "auto-harvest",
       related_entities: item.related_entities ? String(item.related_entities).trim() : "",
       content_fingerprint: fp,
-      confidence: typeof item.confidence === "number" ? (item.confidence > 1 ? item.confidence / 100 : item.confidence) : 0.8,
       confidence_score: Math.round(((typeof item.confidence === "number" ? (item.confidence > 1 ? item.confidence / 100 : item.confidence) : 0.8)) * 100),
       lifecycle_status: "active",
       superseded_by_id: null,

@@ -91,6 +91,7 @@ export const TABLES = {
       { name: "severity", type: "VARCHAR", length: 16, default: "'medium'" },
       { name: "error_type", type: "VARCHAR", length: 64, default: "''" },
       { name: "tags", type: "VARCHAR", length: 512, default: "''" },
+      { name: "related_entities", type: "VARCHAR", length: 500, nullable: true },
       { name: "content_fingerprint", type: "VARCHAR", length: 64, notNull: true },
       { name: "recurrence", type: "INT", default: "1" },
       { name: "invalid_at", type: "DATETIME", nullable: true },

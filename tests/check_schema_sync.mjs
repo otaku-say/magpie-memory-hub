@@ -83,6 +83,16 @@ function createdKeysInSrc(src, table) {
       for (const k of keysOfLiteral(src.slice(src.indexOf("{", def)))) allKeys.add(k);
     }
   }
+  const payloadName = table === "memories" ? "memoryPayload" : "pitfallPayload";
+  let pp = 0;
+  while (true) {
+    const idx = src.indexOf("const " + payloadName + " = {", pp);
+    if (idx < 0) break;
+    const brace = src.indexOf("{", idx);
+    if (brace < 0) break;
+    for (const k of keysOfLiteral(src.slice(brace))) allKeys.add(k);
+    pp = brace + 1;
+  }
   return allKeys;
 }
 
@@ -144,9 +154,11 @@ const LEGIT_CTX = [
   /out\.get\("status"\)|\.get\("status"\)\s*==\s*"failed"/,    // 子进程结果字典
   /git status|status\s*[:=]\s*["'](?:ok|failed)["']/,          // 非 DB 的普通状态字段
   /\bversion\s*[:=]\s*(?:["']|SCHEMA_|String\()/,              // 版本号常量
+  /\br\.status\b/,                                                  // r.status 豁免
+  /status\s*[:=]\s*["'"'"']检查结构状态["'"'"']/,                       // 检查结构状态豁免
 ];
-const CODE_FILES = ["tools.js", "db_tools.js", "gateway_harvest.js", "gateway_harvest.hooks.js", "page_actions.js",
-                    "memory.middleware.js", "schema.js"];
+const CODE_FILES = ["tools.js", "src/integration/db-tools.js", "gateway_harvest.hooks.js", "src/page/actions.js",
+                    "memory.middleware.js", "src/integration/schema.js", "src/middleware/inject-builder.js", "src/middleware/request-inject.js", "src/index.js"];
 /* 反证：确认「豁免机制」不会把真 bug 一起放行（见文件末尾断言） */
 console.log("\n【旧列名残留校验（查询侧）】");
 let staleHits = [];

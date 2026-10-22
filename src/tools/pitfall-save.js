@@ -368,7 +368,7 @@ export async function pitfallSave(client, cfg, rawArgs, ctx) {
   try {
     created = await client.create("pitfalls", {
       project, client: clientVal, component, symptom, root_cause: rootCause, solution,
-      severity, error_type: errorType, tags, content_fingerprint: fp,
+      severity, error_type: errorType, tags, related_entities: args.related_entities ? scrubSecrets(String(args.related_entities).trim()).slice(0, 500) : "", content_fingerprint: fp,
       recurrence: initialRecurrence, last_occurred_at: now,
       source_session: sourceSession,
       source_turn: sourceTurn,
