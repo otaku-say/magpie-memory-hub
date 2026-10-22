@@ -67,9 +67,10 @@ export function makeRestClient(cfg, signal) {
   const instance = (cfg && (cfg.instance || cfg.ncb_instance)) || "";
   const secret = (cfg && (cfg.secret || cfg.ncb_secret)) || "";
   async function call(method, action, table, { data, params, id, signal: callSignal } = {}) {
+    if (!/^[A-Za-z0-9_]+$/.test(table)) throw new Error("未知表名: " + table);
     const qs = new URLSearchParams(Object.assign({ Instance: instance }, params || {}));
     const suffix = id === undefined || id === null ? "" : "/" + encodeURIComponent(id);
-    const url = `${NCB_BASE}/${action}/${table}${suffix}?${qs.toString()}`;
+    const url = `${NCB_BASE}/${action}/${encodeURIComponent(table)}${suffix}?${qs.toString()}`;
 
     const headers = { "Content-Type": "application/json" };
     if (secret) headers.Authorization = "Bearer " + secret;

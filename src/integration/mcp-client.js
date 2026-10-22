@@ -256,14 +256,14 @@ export function makeMcpClient(cfg, signal) {
       if (!id) {
         // 拿不到 insertId 时回查一次，保证调用方拿得到 id
         try {
+          const proj = data.project || "global";
           let backQuery;
           if (data.content_fingerprint) {
-            const proj = data.project || "global";
-          backQuery = { project: proj, content_fingerprint: data.content_fingerprint, order_by: "id DESC", limit: 1 };
+            backQuery = { project: proj, content_fingerprint: data.content_fingerprint, order_by: "id DESC", limit: 1 };
           } else if (table === "pitfalls") {
-            backQuery = { project: data.project, symptom: data.symptom, order_by: "id DESC", limit: 1 };
+            backQuery = { project: proj, symptom: data.symptom, order_by: "id DESC", limit: 1 };
           } else {
-            backQuery = { project: data.project, title: data.title, order_by: "id DESC", limit: 1 };
+            backQuery = { project: proj, title: data.title, order_by: "id DESC", limit: 1 };
           }
           const back = await run(buildSelect(table, backQuery));
           const row = (back.rows || [])[0];

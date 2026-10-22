@@ -752,9 +752,10 @@ export async function secretCheck(cfg, args) {
   const url = "https://api.nocodebackend.com/files?Instance=" + encodeURIComponent(db || rawDb);
   const externalSignal = (cfg && cfg.signal) || null;
   const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer = ctrl ? setTimeout(() => ctrl.abort(), 15000) : null;
+  const abortListener = () => ctrl.abort();
+  const timer = ctrl ? setTimeout(() => { if (externalSignal) externalSignal.removeEventListener("abort", abortListener); ctrl.abort(); }, 15000) : null;
   if (ctrl && externalSignal) {
-    externalSignal.addEventListener("abort", () => ctrl.abort(), { once: true });
+    externalSignal.addEventListener("abort", abortListener, { once: true });
   }
 
   try {

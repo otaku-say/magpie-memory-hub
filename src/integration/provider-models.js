@@ -275,7 +275,7 @@ export function attachAiDiagnosis(res, aiDiag) {
  * 核心设计：
  * 1. 成本可控：默认开启，可通过 options.search_rewrite === false 显式关闭；
  * 2. 未配置 extract_model 时直接返回 null（0 网络请求，0 额外成本）；
- * 3. 严格 fail-open：模型不可用或超时（3.5s）时返回 null，调用方回落为原词检索。
+ * 3. 严格 fail-open：模型不可用或超时（12s）时返回 null，调用方回落为原词检索。
  */
 export async function rewriteSearchQuery({
   query,
@@ -546,7 +546,7 @@ export const RERANK_SYSTEM_PROMPT = `你是一个专业的记忆中枢检索增�
  * 核心设计：
  * 1. 成本可控：默认开启，可通过 options.search_rerank === false 显式关闭；
  * 2. 模型解析：优先使用 options.rerank_model，若留空回退到 extract_model / audit_model；
- * 3. 严格 fail-open：模型不可用、超时（4.5s）或预算超限时返回 null，调用方原样回落为纯词面粗排排序；
+ * 3. 严格 fail-open：模型不可用、超时（15s）或预算超限时返回 null，调用方原样回落为纯词面粗排排序；
  * 4. 统一 headers：使用 Memory 客户端标识，网关清晰可辨。
  */
 export async function rerankSearchResultsWithModel({
