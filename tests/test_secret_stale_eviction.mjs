@@ -28,19 +28,19 @@
  */
 
 import fs from "node:fs";
-import { statePath } from "../local_state.js";
+import { statePath } from "../src/core/state.js";
 import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
 
 const { lookupSecret, rememberSecret, forgetSecret, rememberR2Mount, readState } = await import(
-  new URL("../local_state.js", import.meta.url).href
+  new URL("../src/core/state.js", import.meta.url).href
 );
-const { secretCheck } = await import(new URL("../db_tools.js", import.meta.url).href);
+const { secretCheck } = await import(new URL("../src/integration/db-tools.js", import.meta.url).href);
 const { r2List, r2Delete, cleanProbes, r2Upload } = await import(
-  new URL("../r2.js", import.meta.url).href
+  new URL("../src/integration/r2-storage.js", import.meta.url).href
 );
-const { NcbMcp } = await import(new URL("../ncb_mcp.js", import.meta.url).href);
+const { NcbMcp } = await import(new URL("../src/integration/ncb-client.js", import.meta.url).href);
 
 const candidate = statePath();
 

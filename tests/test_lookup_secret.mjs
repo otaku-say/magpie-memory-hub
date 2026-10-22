@@ -12,14 +12,14 @@
  * 【反证】末尾构造「多条记录 + 未知库名」，断言不会被兜底误取（防串库）。
  */
 import fs from "node:fs";
-import { statePath } from "../local_state.js";
+import { statePath } from "../src/core/state.js";
 import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
 
-const { lookupSecret, lookupRealDatabase, lookupR2Mount, rememberR2Mount, forgetR2Mount } = await import(new URL("../local_state.js", import.meta.url).href);
-const { resolveRealDatabase, deriveLegalBucketName, isR2Mounted, r2Check } = await import(new URL("../r2.js", import.meta.url).href);
-const { secretCheck } = await import(new URL("../db_tools.js", import.meta.url).href);
+const { lookupSecret, lookupRealDatabase, lookupR2Mount, rememberR2Mount, forgetR2Mount } = await import(new URL("../src/core/state.js", import.meta.url).href);
+const { resolveRealDatabase, deriveLegalBucketName, isR2Mounted, r2Check } = await import(new URL("../src/integration/r2-storage.js", import.meta.url).href);
+const { secretCheck } = await import(new URL("../src/integration/db-tools.js", import.meta.url).href);
 
 // 找到实际使用的 state 文件路径（local_state.js 自己算的）
 const candidate = statePath();

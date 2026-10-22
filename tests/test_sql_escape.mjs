@@ -10,7 +10,7 @@
  * 3. 增强强断言与反证测试门
  */
 import assert from "node:assert";
-import { makeMcpClient, sqlValue, buildSelect, buildInsert, buildUpdate, buildDelete, safeIdent } from "../mcp_client.js";
+import { makeMcpClient, sqlValue, buildSelect, buildInsert, buildUpdate, buildDelete, safeIdent } from "../src/integration/mcp-client.js";
 import { createTestEnv } from "./lib/testenv.mjs";
 
 const env = await createTestEnv({ instance: "41694_agent_memory", requireMcp: true });

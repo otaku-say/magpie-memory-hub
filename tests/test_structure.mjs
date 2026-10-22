@@ -18,18 +18,6 @@ const GATES = {
   "tools.js": 35,
   "memory.middleware.js": 35,
   "gateway_harvest.hooks.js": 40,
-  "gateway_harvest.js": 40,
-  "local_state.js": 20,
-  "scrub.js": 20,
-  "model_budget.js": 20,
-  "semantic_dedup.js": 20,
-  "ncb_mcp.js": 20,
-  "mcp_client.js": 20,
-  "schema.js": 20,
-  "online_models.js": 20,
-  "db_tools.js": 20,
-  "r2.js": 20,
-  "page_actions.js": 20,
 };
 
 // 根目录允许存在的非门面 JS（运行时状态、测试辅助）

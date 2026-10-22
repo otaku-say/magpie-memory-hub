@@ -44,7 +44,7 @@ import {
   isVarSubdomainAllowed,
   harvestGateway,
   GATEWAY_CONV_DIRNAME,
-} from "../gateway_harvest.js";
+} from "../src/services/harvest/index.js";
 import { MagpieMemoryHub } from "../tools.js";
 import { scanTestFile } from "./test_meta.mjs";
 

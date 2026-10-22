@@ -426,8 +426,8 @@ async function run() {
 
     // 7.1 验证 tools.js 内部已删除本地 scrubSecrets，完全从 scrub.js 导入
     assert.ok(
-      toolsSrc.includes('import { scrubSecrets } from "./scrub.js";'),
-      "tools.js 必须显式 import { scrubSecrets } from './scrub.js';"
+      toolsSrc.includes('import { scrubSecrets } from "./src/core/sanitize.js";'),
+      "tools.js 必须显式 import { scrubSecrets } from '../src/core/sanitize.js';"
     );
     assert.ok(
       !toolsSrc.includes("function scrubSecrets(text)"),

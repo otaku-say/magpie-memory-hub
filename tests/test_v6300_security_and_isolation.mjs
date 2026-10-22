@@ -59,7 +59,7 @@ console.log("▶ [Test 1] scrubSecrets 正则脱敏库全量扩充测试");
 // -----------------------------------------------------------------
 console.log("\n▶ [Test 2] local_state.js 损坏自愈与防抹平保护测试");
 {
-  const localStateMod = await import("../local_state.js");
+  const localStateMod = await import("../src/core/state.js");
   const { readState, writeState, statePath, _resetStateCacheForTests } = localStateMod;
 
   const sp = statePath();
@@ -113,7 +113,7 @@ console.log("\n▶ [Test 2] local_state.js 损坏自愈与防抹平保护测试"
 // -----------------------------------------------------------------
 console.log("\n▶ [Test 3] db_tools.js: db_reset 目标数据库强制保护测试");
 {
-  const { dbReset } = await import("../db_tools.js");
+  const { dbReset } = await import("../src/integration/db-tools.js");
 
   const cfg = {
     instance: "my_allowed_app_db",
@@ -155,7 +155,7 @@ console.log("\n▶ [Test 3] db_tools.js: db_reset 目标数据库强制保护测
 // -----------------------------------------------------------------
 console.log("\n▶ [Test 4] gateway_harvest.js: 路径穿越、深度限制与大文件防护测试");
 {
-  const { validateGatewayDir, resolveGatewayDir, harvestGateway } = await import("../gateway_harvest.js");
+  const { validateGatewayDir, resolveGatewayDir, harvestGateway } = await import("../src/services/harvest/index.js");
 
   // 4.1 根路径与敏感系统路径拦截
   const dangerousPaths = ["/", "/root", "/etc", "/proc", "/sys", "/dev", "/root/..", "../../../"];
@@ -275,8 +275,8 @@ console.log("\n▶ [Test 5] memorySave: confidence_score 为 0 修复短路 Bug 
 // -----------------------------------------------------------------
 console.log("\n▶ [Test 6] mcp_client.js: makeMcpClient 冷启动自动库名前缀解析缓存测试");
 {
-  const { makeMcpClient } = await import("../mcp_client.js");
-  const { rememberSecret } = await import("../local_state.js");
+  const { makeMcpClient } = await import("../src/integration/mcp-client.js");
+  const { rememberSecret } = await import("../src/core/state.js");
 
   // 准备：本地记录带账号前缀的库名
   rememberSecret("41694_my_demo_db", "test_secret_123");
@@ -299,7 +299,7 @@ console.log("\n▶ [Test 6] mcp_client.js: makeMcpClient 冷启动自动库名�
 // -----------------------------------------------------------------
 console.log("\n▶ [Test 7] page_actions.js: sync_snapshot 按 project + global 过滤隔离测试");
 {
-  const { runPendingAction } = await import("../page_actions.js");
+  const { runPendingAction } = await import("../src/page/actions.js");
 
   const mockDbMemories = [
     { id: 1, project: "alpha_proj", title: "Alpha 架构原则", updated_at: "2026-10-19 12:00:00" },

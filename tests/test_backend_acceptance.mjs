@@ -14,9 +14,9 @@ import { join } from "node:path";
 import vm from "node:vm";
 import assert from "node:assert";
 import { MagpieMemoryHub } from "../tools.js";
-import { ncbCheck } from "../db_tools.js";
-import { r2Check } from "../r2.js";
-import { runPendingAction, writeCardStatus, STATUS_JS_PATH, STATUS_JSON_PATH, ACTION_KEY } from "../page_actions.js";
+import { ncbCheck } from "../src/integration/db-tools.js";
+import { r2Check } from "../src/integration/r2-storage.js";
+import { runPendingAction, writeCardStatus, STATUS_JS_PATH, STATUS_JSON_PATH, ACTION_KEY } from "../src/page/actions.js";
 import { createTestEnv } from "./lib/testenv.mjs";
 
 const env = await createTestEnv({ instance: "41694_agent_memory", requireMcp: true });

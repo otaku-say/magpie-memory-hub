@@ -14,9 +14,9 @@ import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { r2Check, r2Probe, r2Setup, cleanProbes, isR2Mounted, notMountedResponse } from "../r2.js";
-import { NcbMcp } from "../ncb_mcp.js";
-import { rememberR2Mount, forgetR2Mount, statePath } from "../local_state.js";
+import { r2Check, r2Probe, r2Setup, cleanProbes, isR2Mounted, notMountedResponse } from "../src/integration/r2-storage.js";
+import { NcbMcp } from "../src/integration/ncb-client.js";
+import { rememberR2Mount, forgetR2Mount, statePath } from "../src/core/state.js";
 
 const DB = "41694_agent_memory";
 

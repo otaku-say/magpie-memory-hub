@@ -37,9 +37,9 @@
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { dbInit, dbReset, dbStatus, dbProvision, storageSetup, ncbCheck, secretCheck, RESET_CONFIRM } from "../../db_tools.js";
-import { r2Setup, r2Check, cleanProbes } from "../../r2.js";
-import { lookupRealDatabase, lookupActionState, rememberActionState } from "../../local_state.js";
+import { dbInit, dbReset, dbStatus, dbProvision, storageSetup, ncbCheck, secretCheck, RESET_CONFIRM } from "../integration/db-tools.js";
+import { r2Setup, r2Check, cleanProbes } from "../integration/r2-storage.js";
+import { lookupRealDatabase, lookupActionState, rememberActionState } from "../core/state.js";
 import { harvestGateway } from "../services/harvest/index.js";
 
 /** 插件目录下的状态文件路径（供 iframe 内设置页通过 script 标签加载）。 */
@@ -237,7 +237,7 @@ async function execute(action, cfg, fs, sp, state, options) {
     else if (action.op === "clean_probe") result = await cleanProbes(cfg, args);
     else if (action.op === "model_check") {
       const { testModelConnectivity } = await import("../../gateway_harvest.hooks.js");
-      const { getModelBudgetState } = await import("../../model_budget.js");
+      const { getModelBudgetState } = await import("../domain/token-budget.js");
       const modelOpts = Object.assign({}, cfg, options || {});
       const conn = await testModelConnectivity("all", modelOpts);
       const ok = conn.ok;

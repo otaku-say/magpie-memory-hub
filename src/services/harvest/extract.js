@@ -11,7 +11,7 @@ import {
   modelBudgetCheck,
   modelBudgetRecord,
   getInternalModelHeaders,
-} from "../../../model_budget.js";
+} from "../../domain/token-budget.js";
 
 export const HARVEST_SYSTEM_PROMPT = `你是一个专业的长期记忆与踩坑经验提炼助手。从对话中严格提炼出值得跨会话持久化的重要信息。
 

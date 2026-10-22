@@ -3,16 +3,16 @@
  * 信标机制验收：幂等、确认门、状态文件丢失时的 fail-closed、反证测试与测试隔离
  */
 import assert from "node:assert";
-import { statePath } from "../local_state.js";
+import { statePath } from "../src/core/state.js";
 import { readFileSync, existsSync, rmSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { runPendingAction, readAction, ACTION_KEY } from "../page_actions.js";
+import { runPendingAction, readAction, ACTION_KEY } from "../src/page/actions.js";
 import { MagpieMemoryHub } from "../tools.js";
-import { NcbMcp } from "../ncb_mcp.js";
+import { NcbMcp } from "../src/integration/ncb-client.js";
 
 // 纯内存沙箱表状态模拟（严禁往任何真实数据库写入，完全纯内存运行）
-import { TABLES } from "../schema.js";
+import { TABLES } from "../src/integration/schema.js";
 const testTables = new Set(["memories", "pitfalls", "schema_meta"]);
 const origCallTool = NcbMcp.prototype.callTool;
 NcbMcp.prototype.callTool = async function (name, args, parseJson) {

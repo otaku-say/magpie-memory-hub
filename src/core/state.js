@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isSemanticallySimilar } from "../../semantic_dedup.js";
+import { isSemanticallySimilar } from "../domain/semantic-dedup.js";
 
 export const STATE_DIRNAME = ".magpie-memory-hub";
 export const STATE_FILENAME = "state.json";

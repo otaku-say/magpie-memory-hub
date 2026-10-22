@@ -19,13 +19,13 @@ import { fileURLToPath } from "node:url";
 
 import { createTestEnv } from "./lib/testenv.mjs";
 import { scanTestFile } from "./test_meta.mjs";
-import { NcbMcp } from "../ncb_mcp.js";
-import { validateGatewayDir, collectConversationFiles, FORBIDDEN_PREFIXES } from "../gateway_harvest.js";
-import { isSameDatabaseTarget, dbReset } from "../db_tools.js";
+import { NcbMcp } from "../src/integration/ncb-client.js";
+import { validateGatewayDir, collectConversationFiles, FORBIDDEN_PREFIXES } from "../src/services/harvest/index.js";
+import { isSameDatabaseTarget, dbReset } from "../src/integration/db-tools.js";
 import { testModelConnectivity, testClassificationModel, scrubSecrets } from "../gateway_harvest.hooks.js";
-import { scrubSecrets as canonicalScrubSecrets } from "../scrub.js";
+import { scrubSecrets as canonicalScrubSecrets } from "../src/core/sanitize.js";
 import { onRequest } from "../memory.middleware.js";
-import { runPendingAction, ACTION_KEY } from "../page_actions.js";
+import { runPendingAction, ACTION_KEY } from "../src/page/actions.js";
 import {
   readState,
   writeState,
@@ -35,7 +35,7 @@ import {
   readHarvestQueue,
   recordPendingEvidence,
   getPendingEvidence,
-} from "../local_state.js";
+} from "../src/core/state.js";
 
 console.log("=================================================================");
 console.log("【Agent B 验收测试】采集与中间件 7 项整改与反证门禁全面验证");
@@ -263,7 +263,7 @@ console.log("▶ [Test 3] harvest_gateway 信标补全参数与提炼入库闭�
     assert.strictEqual(memories[0].project, env.project);
 
     // 反证测试：若缺少 saveMemory 回调，扫描结果的 memories_saved 必为 0
-    const { harvestGateway } = await import("../gateway_harvest.js");
+    const { harvestGateway } = await import("../src/services/harvest/index.js");
     const noSaveRes = await harvestGateway(
       { dir: harvestDir, project: env.project, force_rescan: true },
       { _cfg: cfg, _client: env.client, saveMemory: null, pitfallSave: null }

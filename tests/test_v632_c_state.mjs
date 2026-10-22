@@ -27,18 +27,18 @@ import {
   writeState,
   recordPendingEvidence,
   _resetStateCacheForTests,
-} from "../local_state.js";
+} from "../src/core/state.js";
 import {
   hasConflictingNumbers,
   isSemanticallySimilar,
-} from "../semantic_dedup.js";
-import { makeMcpClient } from "../mcp_client.js";
-import { NcbMcp } from "../ncb_mcp.js";
+} from "../src/domain/semantic-dedup.js";
+import { makeMcpClient } from "../src/integration/mcp-client.js";
+import { NcbMcp } from "../src/integration/ncb-client.js";
 import {
   isInternalHarvestRequest,
   MAGPIE_INTERNAL_HEADER,
   MAGPIE_INTERNAL_VALUE,
-} from "../model_budget.js";
+} from "../src/domain/token-budget.js";
 
 console.log("=================================================================");
 console.log("【测试开始】Track C (v6.32 State/Dedup/MCP/Budget) 综合验证与反证门");

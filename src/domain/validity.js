@@ -4,7 +4,7 @@
  * 被依赖：src/tools/**, src/services/**
  */
 
-import { normalizeSemanticText } from "../../semantic_dedup.js";
+import { normalizeSemanticText } from "./semantic-dedup.js";
 
 /** 检查记忆是否有效（未标记 invalid_at 且未超过 expires_at） */
 export function isMemoryValid(row, nowMs = Date.now()) {

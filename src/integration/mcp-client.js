@@ -3,10 +3,10 @@
  * 依赖：../../schema.js, ../../ncb_mcp.js, ../../local_state.js, ../../r2.js
  * 被依赖：../../mcp_client.js, src/integration/ncb.js
  */
-import { TABLES } from "../../schema.js";
-import { NcbMcp } from "../../ncb_mcp.js";
-import { lookupRealDatabase } from "../../local_state.js";
-import { resolveRealDatabase } from "../../r2.js";
+import { TABLES } from "./schema.js";
+import { NcbMcp } from "./ncb-client.js";
+import { lookupRealDatabase } from "../core/state.js";
+import { resolveRealDatabase } from "./r2-storage.js";
 
 /** 表名白名单 */
 const ALLOWED_TABLES = Object.keys(TABLES);

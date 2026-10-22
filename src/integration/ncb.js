@@ -5,7 +5,7 @@
  */
 
 import { NCB_BASE, FETCH_LIMIT, readOptions } from "../core/config.js";
-import { makeMcpClient } from "../../mcp_client.js";
+import { makeMcpClient } from "./mcp-client.js";
 
 const NO_CRED_ERR_MSG = "NO_CREDENTIALS: 未配置有效的 NoCodeBackend 凭据";
 const ALLOWED_NO_CRED_PROPS = new Set(["list", "create", "update", "remove", "raw"]);

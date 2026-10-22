@@ -7,8 +7,8 @@
  * 3. 包含反证与异常覆盖：TLS 握手拒绝、Secret Key 失效、权限不足与未知错误分类。
  */
 
-import { r2Setup, explainProbeFailure } from "../r2.js";
-import { NcbMcp } from "../ncb_mcp.js";
+import { r2Setup, explainProbeFailure } from "../src/integration/r2-storage.js";
+import { NcbMcp } from "../src/integration/ncb-client.js";
 
 let fail = 0;
 const ok = (m) => console.log(`  ✓ ${m}`);

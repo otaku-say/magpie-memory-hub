@@ -4,7 +4,7 @@
  * 被依赖：src/tools/**, src/services/**, tools.js
  */
 
-import { termsOf, CJK_STOP_BIGRAMS } from "../../semantic_dedup.js";
+import { termsOf, CJK_STOP_BIGRAMS } from "./semantic-dedup.js";
 export { termsOf, CJK_STOP_BIGRAMS };
 
 /** 记忆：标题(5) 标签(3) 实体(3) 正文(1) —— EVO-3 修复实体检索失明与独立打分 */

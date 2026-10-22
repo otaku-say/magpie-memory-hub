@@ -20,7 +20,7 @@ import {
   MagpieMemoryHub,
   memoryAudit,
 } from "../tools.js";
-import { getAuditCursor, clearAuditCursor } from "../local_state.js";
+import { getAuditCursor, clearAuditCursor } from "../src/core/state.js";
 import { scanTestFile } from "./test_meta.mjs";
 import { createTestEnv } from "./lib/testenv.mjs";
 

@@ -43,8 +43,8 @@ import path from "node:path";
 import os from "node:os";
 import { MagpieMemoryHub, memoryAuditUndo } from "../tools.js";
 import { createTestEnv } from "./lib/testenv.mjs";
-import { dbReset } from "../db_tools.js";
-import { harvestGateway, stripScaffolding } from "../gateway_harvest.js";
+import { dbReset } from "../src/integration/db-tools.js";
+import { harvestGateway, stripScaffolding } from "../src/services/harvest/index.js";
 import { scrubSecrets, harvestWithOnlineModel } from "../gateway_harvest.hooks.js";
 import {
   readState,
@@ -53,7 +53,7 @@ import {
   _resetStateCacheForTests,
   STATE_DIRNAME,
   STATE_FILENAME,
-} from "../local_state.js";
+} from "../src/core/state.js";
 
 function parseOut(res) {
   if (typeof res === "string") {

@@ -10,7 +10,7 @@ import { deriveProjectFromCwd } from "./project-resolve.js";
 import { processDialogueAndHarvest } from "./harvest-pipeline.js";
 import { isTestMode } from "./offline-scan.js";
 import { _hookProbe } from "./hook-request.js";
-import { isInternalHarvestRequest } from "../../../model_budget.js";
+import { isInternalHarvestRequest } from "../../domain/token-budget.js";
 import { makeClient } from "../../integration/ncb.js";
 
 export function computeHookBudgetMs(opts = {}) {

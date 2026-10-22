@@ -28,8 +28,8 @@ import {
   testModelConnectivity,
   triggerBackgroundDrain,
 } from "../gateway_harvest.hooks.js";
-import { harvestGateway } from "../gateway_harvest.js";
-import { clearHarvestQueue, readHarvestQueue } from "../local_state.js";
+import { harvestGateway } from "../src/services/harvest/index.js";
+import { clearHarvestQueue, readHarvestQueue } from "../src/core/state.js";
 
 console.log("=================================================================");
 console.log("【测试开始】模型配置化、端点自适应与移除启发式回退 (test_configurable_models.mjs)");

@@ -14,7 +14,7 @@ import {
   memoryAudit,
 } from "../tools.js";
 import { createTestEnv } from "./lib/testenv.mjs";
-import { stripScaffolding, SCAFFOLDING_PATTERNS } from "../gateway_harvest.js";
+import { stripScaffolding, SCAFFOLDING_PATTERNS } from "../src/services/harvest/index.js";
 import { harvestWithOnlineModel, classifyDialogueWithOnlineModel } from "../gateway_harvest.hooks.js";
 
 const parseOut = (raw) => (typeof raw === "string" ? JSON.parse(raw) : raw);

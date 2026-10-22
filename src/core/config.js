@@ -4,7 +4,7 @@
  * 被依赖：src/core/**, src/domain/**, src/integration/**, src/services/**, src/tools/**, src/index.js
  */
 
-import { lookupSecret, lookupDatabase, lookupRealDatabase } from "../../local_state.js";
+import { lookupSecret, lookupDatabase, lookupRealDatabase } from "./state.js";
 
 export const NCB_BASE = "https://api.nocodebackend.com";
 

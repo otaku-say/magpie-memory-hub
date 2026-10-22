@@ -6,8 +6,8 @@
  */
 import assert from "node:assert";
 import { onRequest } from "../memory.middleware.js";
-import { lookupR2Mount, rememberR2Mount, forgetR2Mount } from "../local_state.js";
-import { OPS, executeAction, readAction } from "../page_actions.js";
+import { lookupR2Mount, rememberR2Mount, forgetR2Mount } from "../src/core/state.js";
+import { OPS, executeAction, readAction } from "../src/page/actions.js";
 import { createTestEnv } from "./lib/testenv.mjs";
 
 console.log("=================================================================");
@@ -57,9 +57,9 @@ console.log("▶ [P0 - #2] 验证不传 compress 时历史消息逐字节未改 
 // -------------------------------------------------------------
 console.log("\n▶ [P0 - #3] 验证 lookupR2Mount 跨库查询不再抛 ReferenceError 且不串扰...");
 {
-  const stBackup = (await import("../local_state.js")).readState();
+  const stBackup = (await import("../src/core/state.js")).readState();
   const origMounts = stBackup.r2_mounts || {};
-  const writeState = (await import("../local_state.js")).writeState;
+  const writeState = (await import("../src/core/state.js")).writeState;
   writeState({ ...stBackup, r2_mounts: {} });
 
   rememberR2Mount("41694_db_alpha", {
@@ -88,7 +88,7 @@ console.log("\n▶ [P0 - #3] 验证 lookupR2Mount 跨库查询不再抛 Referenc
     console.log("  ✓ 作用域与跨库隔离验证通过：不抛 ReferenceError，跨库安全隔离");
   } finally {
     forgetR2Mount("41694_db_alpha");
-    writeState({ ...(await import("../local_state.js")).readState(), r2_mounts: origMounts });
+    writeState({ ...(await import("../src/core/state.js")).readState(), r2_mounts: origMounts });
   }
 }
 
@@ -225,7 +225,7 @@ console.log("\n▶ [P0 - 1] 验证 Mock Client 严格字段裁剪下列投影补
 console.log("\n▶ [P0 - 2] 验证 memoryAudit 游标双表独立拆分与零跨表漏检...");
 {
   const { memoryAudit } = await import("../tools.js");
-  const { saveAuditCursor, getAuditCursor, clearAuditCursor } = await import("../local_state.js");
+  const { saveAuditCursor, getAuditCursor, clearAuditCursor } = await import("../src/core/state.js");
   const testProject = "audit_cursor_split_test";
   clearAuditCursor(testProject);
 
@@ -248,8 +248,8 @@ console.log("\n▶ [P0 - 2] 验证 memoryAudit 游标双表独立拆分与零跨
 // -------------------------------------------------------------
 console.log("\n▶ [P0 - 3] 验证 recordPendingEvidence 接入 isSemanticallySimilar 语义模糊去重...");
 {
-  const { recordPendingEvidence } = await import("../local_state.js");
-  const { semanticFingerprint } = await import("../semantic_dedup.js");
+  const { recordPendingEvidence } = await import("../src/core/state.js");
+  const { semanticFingerprint } = await import("../src/domain/semantic-dedup.js");
 
   const fp1 = semanticFingerprint("test_p03", "pitfall", "mysql_pool", "MySQL 连接池耗尽报 Too many connections");
   const fp2 = semanticFingerprint("test_p03", "pitfall", "mysql_pool", "数据库连接池满报错 Too many connections");

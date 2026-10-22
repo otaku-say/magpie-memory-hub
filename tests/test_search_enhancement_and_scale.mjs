@@ -32,10 +32,10 @@
 import assert from "node:assert";
 import { createTestEnv } from "./lib/testenv.mjs";
 import { MagpieMemoryHub } from "../tools.js";
-import { buildSelect, safeIdent } from "../mcp_client.js";
-import { SCHEMA_VERSION, TABLES } from "../schema.js";
-import { getAuditCursor, saveAuditCursor, clearAuditCursor } from "../local_state.js";
-import { rerankSearchResultsWithModel } from "../online_models.js";
+import { buildSelect, safeIdent } from "../src/integration/mcp-client.js";
+import { SCHEMA_VERSION, TABLES } from "../src/integration/schema.js";
+import { getAuditCursor, saveAuditCursor, clearAuditCursor } from "../src/core/state.js";
+import { rerankSearchResultsWithModel } from "../src/integration/provider-models.js";
 
 const parseOut = (raw) => (typeof raw === "string" ? JSON.parse(raw) : raw);
 const rowsOf = (res) => Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []);

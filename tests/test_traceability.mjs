@@ -13,12 +13,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SCHEMA_VERSION, TABLES } from "../schema.js";
+import { SCHEMA_VERSION, TABLES } from "../src/integration/schema.js";
 import {
   countTurnsFromMessages,
   processDialogueAndHarvest,
 } from "../gateway_harvest.hooks.js";
-import { harvestGateway } from "../gateway_harvest.js";
+import { harvestGateway } from "../src/services/harvest/index.js";
 import { MagpieMemoryHub } from "../tools.js";
 
 let testsRun = 0;

@@ -15,7 +15,7 @@ import {
   enqueueHarvestItems,
   readHarvestQueue,
   clearHarvestQueue,
-} from "../local_state.js";
+} from "../src/core/state.js";
 import { triggerBackgroundDrain } from "../gateway_harvest.hooks.js";
 
 function parseOut(res) {

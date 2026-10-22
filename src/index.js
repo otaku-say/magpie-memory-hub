@@ -6,8 +6,8 @@
 
 import {
   dbStatus, dbInit, dbProvision, dbReset, storageSetup, storageUpload, storageGuide, ncbCheck, RESET_CONFIRM,
-} from "../db_tools.js";
-import { r2List, r2Delete, r2Check } from "../r2.js";
+} from "./integration/db-tools.js";
+import { r2List, r2Delete, r2Check } from "./integration/r2-storage.js";
 import { runPendingAction, readAction, writeCardStatus, parseDbInfo } from "./page/actions.js";
 import { harvestGateway, isTestMode, triggerBackgroundDrain } from "./services/harvest/index.js";
 

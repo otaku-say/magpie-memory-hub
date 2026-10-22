@@ -7,7 +7,7 @@
 import { normalizeToolArgs } from "./args.js";
 import { fetchAll } from "../integration/ncb.js";
 import { scorePitfall, jsonOut, termsOf } from "../domain/scoring.js";
-import { rewriteSearchQuery, rerankSearchResultsWithModel } from "../../online_models.js";
+import { rewriteSearchQuery, rerankSearchResultsWithModel } from "../integration/provider-models.js";
 
 export async function pitfallSearch(client, cfg, rawArgs) {
   const args = normalizeToolArgs(rawArgs, cfg);

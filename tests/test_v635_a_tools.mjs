@@ -30,7 +30,7 @@ import {
   saveAuditCursor,
   getAuditCursor,
   clearAuditCursor,
-} from "../local_state.js";
+} from "../src/core/state.js";
 import { scanTestFile } from "./test_meta.mjs";
 import { createTestEnv } from "./lib/testenv.mjs";
 

@@ -4,14 +4,14 @@
  * 被依赖：../../db_tools.js, src/index.js, page_actions.js, tests
  */
 
-import { NcbMcp, extractSecret, extractInstance } from "../../ncb_mcp.js";
+import { NcbMcp, extractSecret, extractInstance } from "./ncb-client.js";
 import {
   detectDrift, buildStatements, buildDropStatements, describePlan,
   versionUpsertSQL, SCHEMA_VERSION, TABLES, META_TABLE, VERSION_KEY, toNcbTables,
-} from "../../schema.js";
-import { rememberSecret, lookupSecret, forgetSecret, rememberDatabase, knownDatabases, lookupRealDatabase, clearAuditCursor, clearHarvestQueue, readState, writeState } from "../../local_state.js";
-import { r2Setup, r2Upload, r2Guide, resolveRealDatabase } from "../../r2.js";
-import { explainUnknownErrorWithModel, attachAiDiagnosis } from "../../online_models.js";
+} from "./schema.js";
+import { rememberSecret, lookupSecret, forgetSecret, rememberDatabase, knownDatabases, lookupRealDatabase, clearAuditCursor, clearHarvestQueue, readState, writeState } from "../core/state.js";
+import { r2Setup, r2Upload, r2Guide, resolveRealDatabase } from "./r2-storage.js";
+import { explainUnknownErrorWithModel, attachAiDiagnosis } from "./provider-models.js";
 
 /** 清库需要显式确认串，避免 agent 误触。 */
 export const RESET_CONFIRM = "RESET";
@@ -628,7 +628,7 @@ export async function ncbCheck(cfg, args) {
 
   // 目标库存在：获取结构并检测 drift
   try {
-    const { rememberDatabase } = await import("../../local_state.js");
+    const { rememberDatabase } = await import("../core/state.js");
     rememberDatabase(found);
   } catch (_) {}
   let schemaRes = null;

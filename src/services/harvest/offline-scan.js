@@ -13,11 +13,11 @@ import {
   rememberGatewayHarvest,
   recordPendingEvidence,
   DEFAULT_MIN_EVIDENCE,
-} from "../../../local_state.js";
+} from "../../core/state.js";
 import { writeCardStatus } from "../../core/status-writer.js";
 import { harvestWithOnlineModel } from "./extract.js";
 import { classifyDialogueWithOnlineModel } from "./classify.js";
-import { semanticFingerprint } from "../../../semantic_dedup.js";
+import { semanticFingerprint } from "../../domain/semantic-dedup.js";
 import { _diag, stripScaffolding } from "./scaffolding.js";
 import { isExplicitUserMemory } from "./dialog-extract.js";
 

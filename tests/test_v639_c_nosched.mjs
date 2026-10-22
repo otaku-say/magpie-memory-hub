@@ -34,7 +34,7 @@ import { triggerBackgroundDrain } from "../gateway_harvest.hooks.js";
 import {
   clearHarvestQueue,
   enqueueHarvestItems,
-} from "../local_state.js";
+} from "../src/core/state.js";
 import { scanTestFile } from "./test_meta.mjs";
 
 console.log("=================================================================");

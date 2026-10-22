@@ -10,7 +10,7 @@
 
 import assert from "node:assert";
 import { MagpieMemoryHub } from "../tools.js";
-import { NcbMcp } from "../ncb_mcp.js";
+import { NcbMcp } from "../src/integration/ncb-client.js";
 import { createTestEnv } from "./lib/testenv.mjs";
 
 const REAL_INSTANCE = "41694_agent_memory";
@@ -95,7 +95,7 @@ async function run() {
       assert.ok(Array.isArray(safeCheck.will_drop), "will_drop must be list of tables");
 
       // 4b. 传 confirm="RESET" 时绝对不许在真实库跑：使用 mock 客户端验证 DROP 行为
-      const { dbReset } = await import("../db_tools.js");
+      const { dbReset } = await import("../src/integration/db-tools.js");
       const mockCfg = { instance: "mock_test_db", mcpKey: "mock_key" };
       const origProto = NcbMcp.prototype.executeSqlBatch;
       NcbMcp.prototype.executeSqlBatch = async function(db, stmts) {

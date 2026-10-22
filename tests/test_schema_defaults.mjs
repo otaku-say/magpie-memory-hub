@@ -30,8 +30,8 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (f) => readFileSync(join(ROOT, f), "utf8");
 
-const FILES = ["tools.js", "gateway_harvest.js", "schema.js", "db_tools.js", "gateway_harvest.hooks.js"];
-const SRC = Object.fromEntries(FILES.map((f) => {
+const FILES = ["tools.js", "src/services/harvest/index.js", "src/integration/schema.js", "src/integration/db-tools.js", "gateway_harvest.hooks.js"];
+const SRC = Object.fromEntries(FILES.flatMap((f) => {
   let text = read(f);
   if (f === "tools.js") {
     try {
@@ -39,7 +39,7 @@ const SRC = Object.fromEntries(FILES.map((f) => {
       text += "\n" + read("src/tools/pitfall-save.js");
     } catch (_) { /* fail-open：读不到文件就用空文本 */ }
   }
-  return [f, text];
+  return [[f, text], [f.split("/").pop(), text]];
 }));
 
 let failed = 0;

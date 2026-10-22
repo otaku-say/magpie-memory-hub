@@ -18,7 +18,7 @@
 
 ```
 ┌─────────────────────────────────────────────────┐
-│ 根目录门面层（~6 行 re-export，保持外部引用稳定）    │
+│ 根目录宿主契约层（tools.js · memory.middleware.js · gateway_*.js）    │
 │ tools.js · memory.middleware.js · gateway_*.js    │
 │ local_state.js · scrub.js · ncb_mcp.js · ...     │
 ├─────────────────────────────────────────────────┤

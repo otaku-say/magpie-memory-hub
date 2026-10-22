@@ -23,7 +23,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { MagpieMemoryHub } from "../tools.js";
-import { STATUS_JS_PATH } from "../page_actions.js";
+import { STATUS_JS_PATH } from "../src/page/actions.js";
 import { scanTestFile } from "./test_meta.mjs";
 
 console.log("=================================================================");

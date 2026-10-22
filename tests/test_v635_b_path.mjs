@@ -31,7 +31,7 @@ import {
   isWhitelistedGatewayDir,
   validateGatewayDir,
   resolveGatewayDir,
-} from "../gateway_harvest.js";
+} from "../src/services/harvest/index.js";
 import { scanTestFile } from "./test_meta.mjs";
 
 console.log("=================================================================");

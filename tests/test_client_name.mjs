@@ -26,7 +26,7 @@ import {
   MEMHUB_INTERNAL_HEADER,
   MEMHUB_INTERNAL_VALUE,
   _resetUserAgentCacheForTesting,
-} from "../model_budget.js";
+} from "../src/domain/token-budget.js";
 
 import {
   classifyDialogueWithOnlineModel,
@@ -37,7 +37,7 @@ import {
 import {
   explainUnknownErrorWithModel,
   rewriteSearchQuery,
-} from "../online_models.js";
+} from "../src/integration/provider-models.js";
 
 console.log("=================================================================");
 console.log("【内部模型调用自定义客户端名 Memory 与动态版本测试】");

@@ -1,6 +1,6 @@
 import assert from "node:assert";
-import { makeMcpClient } from "../mcp_client.js";
-import { buildSelect } from "../mcp_client.js";
+import { makeMcpClient } from "../src/integration/mcp-client.js";
+import { buildSelect } from "../src/integration/mcp-client.js";
 
 console.log("=================================================================");
 console.log("【对抗性自审反证测试】");

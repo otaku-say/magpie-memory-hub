@@ -11,9 +11,9 @@ import {
   normalizeTags,
   semanticFingerprint,
   normalizeSemanticText,
-} from "../semantic_dedup.js";
-import { auditMemoriesWithModel } from "../online_models.js";
-import { lookupAuditState, rememberAuditState } from "../local_state.js";
+} from "../src/domain/semantic-dedup.js";
+import { auditMemoriesWithModel } from "../src/integration/provider-models.js";
+import { lookupAuditState, rememberAuditState } from "../src/core/state.js";
 import { createTestEnv } from "./lib/testenv.mjs";
 
 function parseOut(res) {

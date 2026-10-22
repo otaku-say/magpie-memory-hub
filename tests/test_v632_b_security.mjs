@@ -19,25 +19,25 @@ import { fileURLToPath } from "node:url";
 
 import { createTestEnv } from "./lib/testenv.mjs";
 import { scanTestFile } from "./test_meta.mjs";
-import { NcbMcp } from "../ncb_mcp.js";
+import { NcbMcp } from "../src/integration/ncb-client.js";
 import {
   isSameDatabaseTarget,
   dbReset,
-} from "../db_tools.js";
+} from "../src/integration/db-tools.js";
 import {
   validateGatewayDir,
   isWhitelistedGatewayDir,
   checkSensitiveSubpaths,
   HARD_FORBIDDEN_PREFIXES,
   FORBIDDEN_PREFIXES,
-} from "../gateway_harvest.js";
+} from "../src/services/harvest/index.js";
 import {
   hasConflictingNumbers,
   normalizeSemanticText,
   tokenize,
   overlapCoefficient,
   jaccardSimilarity,
-} from "../semantic_dedup.js";
+} from "../src/domain/semantic-dedup.js";
 import {
   readState,
   writeState,
@@ -49,7 +49,7 @@ import {
   enqueueHarvestItems,
   readHarvestQueue,
   recordPendingEvidence,
-} from "../local_state.js";
+} from "../src/core/state.js";
 
 console.log("=================================================================");
 console.log("【Agent B 验收测试】v6.32 安全与状态 6 项整改及反证门禁全面验证");

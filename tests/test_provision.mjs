@@ -8,9 +8,9 @@
  * 4. 端到端真实建库流程设立显式安全门禁（默认 SKIP），杜绝消耗用户 25 库限额。
  */
 
-import { parseDatabases, inferAccount, logicalName, dbProvision } from "../db_tools.js";
-import { NcbMcp } from "../ncb_mcp.js";
-import { TABLES } from "../schema.js";
+import { parseDatabases, inferAccount, logicalName, dbProvision } from "../src/integration/db-tools.js";
+import { NcbMcp } from "../src/integration/ncb-client.js";
+import { TABLES } from "../src/integration/schema.js";
 
 const KEY = process.env.NOCODEBACKEND_API_KEY || process.env.NOCODEBACKEND_MCP_KEY || "";
 let fail = 0;

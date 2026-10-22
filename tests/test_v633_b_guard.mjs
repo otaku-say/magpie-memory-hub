@@ -14,9 +14,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { isInternalHarvestRequest, INTERNAL_PROMPT_MARKERS } from "../model_budget.js";
-import { validateGatewayDir } from "../gateway_harvest.js";
-import { statePath } from "../local_state.js";
+import { isInternalHarvestRequest, INTERNAL_PROMPT_MARKERS } from "../src/domain/token-budget.js";
+import { validateGatewayDir } from "../src/services/harvest/index.js";
+import { statePath } from "../src/core/state.js";
 import { scanTestFile } from "./test_meta.mjs";
 
 console.log("=================================================================");

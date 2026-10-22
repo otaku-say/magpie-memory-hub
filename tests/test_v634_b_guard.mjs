@@ -17,13 +17,13 @@ import { fileURLToPath } from "node:url";
 import {
   isInternalHarvestRequest,
   INTERNAL_PROMPT_MARKERS,
-} from "../model_budget.js";
+} from "../src/domain/token-budget.js";
 import {
   validateGatewayDir,
   isWhitelistedGatewayDir,
   isVarSubdomainAllowed,
   isTestMode,
-} from "../gateway_harvest.js";
+} from "../src/services/harvest/index.js";
 import {
   AUDIT_SYSTEM_PROMPT,
   AUDIT_SYSTEM_PROMPT_LEAD,
@@ -33,7 +33,7 @@ import {
   ERROR_DIAGNOSE_SYSTEM_PROMPT_LEAD,
   RERANK_SYSTEM_PROMPT,
   RERANK_SYSTEM_PROMPT_LEAD,
-} from "../online_models.js";
+} from "../src/integration/provider-models.js";
 import { HARVEST_SYSTEM_PROMPT } from "../gateway_harvest.hooks.js";
 import { scanTestFile } from "./test_meta.mjs";
 

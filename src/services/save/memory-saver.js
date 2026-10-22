@@ -8,7 +8,7 @@ import { CATEGORIES, SCOPES, FETCH_LIMIT, nowSql, expiresAtFor } from "../../cor
 import { markRecent, justWritten } from "../../core/state-recent.js";
 import { rowsOf } from "../../integration/ncb.js";
 import { freshness } from "../../domain/scoring.js";
-import { scrubSecrets } from "../../../scrub.js";
+import { scrubSecrets } from "../../core/sanitize.js";
 import {
   normalizeSemanticText,
   semanticFingerprint,
@@ -18,7 +18,7 @@ import {
   overlapCoefficient,
   jaccardSimilarity,
   hasConflictingNumbers,
-} from "../../../semantic_dedup.js";
+} from "../../domain/semantic-dedup.js";
 
 export async function saveMemory(client, cfg, m, ctx) {
   const project = String(m.project || "global").trim();

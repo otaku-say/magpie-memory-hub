@@ -36,23 +36,23 @@ import {
   rememberR2Mount,
   recordPendingEvidence,
   rememberSecret,
-} from "../local_state.js";
+} from "../src/core/state.js";
 
 import {
   levenshteinDistance,
   levSimilarity,
   isAlphaTokenMatch,
   isSemanticallySimilar,
-} from "../semantic_dedup.js";
+} from "../src/domain/semantic-dedup.js";
 
 import {
   buildSelect,
   makeMcpClient,
-} from "../mcp_client.js";
+} from "../src/integration/mcp-client.js";
 
-import { NcbMcp } from "../ncb_mcp.js";
-import { r2Upload } from "../r2.js";
-import { rerankSearchResultsWithModel } from "../online_models.js";
+import { NcbMcp } from "../src/integration/ncb-client.js";
+import { r2Upload } from "../src/integration/r2-storage.js";
+import { rerankSearchResultsWithModel } from "../src/integration/provider-models.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 

@@ -26,7 +26,7 @@ import { MagpieMemoryHub } from "../tools.js";
 import {
   hasConflictingNumbers,
   isSemanticallySimilar,
-} from "../semantic_dedup.js";
+} from "../src/domain/semantic-dedup.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");

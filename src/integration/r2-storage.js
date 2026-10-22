@@ -4,12 +4,12 @@
  * 被依赖：../../r2.js, ../../db_tools.js, ../../mcp_client.js, src/index.js, page_actions.js, tests
  */
 
-import { NcbMcp } from "../../ncb_mcp.js";
+import { NcbMcp } from "./ncb-client.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { lookupSecret, forgetSecret, lookupRealDatabase, rememberDatabase, rememberR2Mount, lookupR2Mount, forgetR2Mount } from "../../local_state.js";
-import { explainUnknownErrorWithModel, attachAiDiagnosis } from "../../online_models.js";
+import { lookupSecret, forgetSecret, lookupRealDatabase, rememberDatabase, rememberR2Mount, lookupR2Mount, forgetR2Mount } from "../core/state.js";
+import { explainUnknownErrorWithModel, attachAiDiagnosis } from "./provider-models.js";
 
 const REST_BASE = "https://api.nocodebackend.com";
 

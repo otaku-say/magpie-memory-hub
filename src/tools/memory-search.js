@@ -9,7 +9,7 @@ import { fetchAll } from "../integration/ncb.js";
 import { scoreMemory, rankMemory, jsonOut, termsOf } from "../domain/scoring.js";
 import { isMemoryValid } from "../domain/validity.js";
 import { trackMemoryRetrievals } from "../services/audit/scheduler.js";
-import { rewriteSearchQuery, rerankSearchResultsWithModel } from "../../online_models.js";
+import { rewriteSearchQuery, rerankSearchResultsWithModel } from "../integration/provider-models.js";
 
 export async function memorySearch(client, cfg, rawArgs) {
   const args = normalizeToolArgs(rawArgs, cfg);

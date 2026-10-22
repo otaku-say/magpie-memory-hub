@@ -8,7 +8,7 @@
  */
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { TABLES } from "../schema.js";
+import { TABLES } from "../src/integration/schema.js";
 
 const TOOLS_SRC = readFileSync(new URL("../tools.js", import.meta.url), "utf8");
 const HOOKS_SRC = readFileSync(new URL("../gateway_harvest.hooks.js", import.meta.url), "utf8");

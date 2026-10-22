@@ -28,9 +28,9 @@ import {
   rewriteSearchQuery,
   parseJsonObject,
   KNOWN_ERRORS_CHEAT_SHEET,
-} from "../online_models.js";
-import { ncbCheck, secretCheck } from "../db_tools.js";
-import { r2Check, r2Setup, explainProbeFailure } from "../r2.js";
+} from "../src/integration/provider-models.js";
+import { ncbCheck, secretCheck } from "../src/integration/db-tools.js";
+import { r2Check, r2Setup, explainProbeFailure } from "../src/integration/r2-storage.js";
 import { MagpieMemoryHub } from "../tools.js";
 import { createTestEnv } from "./lib/testenv.mjs";
 

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runPendingAction, ACTION_KEY } from "../page_actions.js";
+import { runPendingAction, ACTION_KEY } from "../src/page/actions.js";
 export { runPendingAction, ACTION_KEY };
 
 export async function executeActionForTest(actionObj) {

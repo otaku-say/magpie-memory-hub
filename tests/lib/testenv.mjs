@@ -19,10 +19,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { NcbMcp } from "../../ncb_mcp.js";
-import { makeMcpClient } from "../../mcp_client.js";
+import { NcbMcp } from "../../src/integration/ncb-client.js";
+import { makeMcpClient } from "../../src/integration/mcp-client.js";
 import { MagpieMemoryHub } from "../../tools.js";
-import { lookupSecret } from "../../local_state.js";
+import { lookupSecret } from "../../src/core/state.js";
 
 const activeEnvs = new Set();
 let processHooksRegistered = false;

@@ -17,7 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
-import { NcbMcp } from "../ncb_mcp.js";
+import { NcbMcp } from "../src/integration/ncb-client.js";
 
 const ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const TESTS_DIR = path.join(ROOT, "tests");

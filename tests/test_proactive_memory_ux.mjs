@@ -6,7 +6,7 @@ import assert from "node:assert";
 import { MagpieMemoryHub } from "../tools.js";
 import { onRequest as mwOnRequest } from "../memory.middleware.js";
 import { scrubSecrets } from "../gateway_harvest.hooks.js";
-import { NcbMcp } from "../ncb_mcp.js";
+import { NcbMcp } from "../src/integration/ncb-client.js";
 
 console.log("=================================================================");
 console.log("【测试开始】Agent 主动查存记忆专项增强与安全治理验收套件");

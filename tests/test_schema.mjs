@@ -2,7 +2,7 @@ import {
   TABLES, META_TABLE, SCHEMA_VERSION, VERSION_KEY,
   detectDrift, buildStatements, normalizeSchema, createTableSQL,
   buildDropStatements, isDestructive, describePlan, versionUpsertSQL,
-} from "../schema.js";
+} from "../src/integration/schema.js";
 
 let fail = 0;
 const ok = (m) => console.log(`  ✓ ${m}`);

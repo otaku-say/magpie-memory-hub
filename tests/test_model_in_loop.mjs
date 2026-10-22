@@ -23,7 +23,7 @@ import {
 import {
   clearHarvestQueue,
   readHarvestQueue,
-} from "../local_state.js";
+} from "../src/core/state.js";
 
 console.log("=================================================================");
 console.log("【测试开始】在线模型提炼与分类判定 (test_model_in_loop.mjs)");

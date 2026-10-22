@@ -104,7 +104,7 @@ import {
   modelBudgetCheck,
   modelBudgetRecord,
   getInternalModelHeaders,
-} from "../../model_budget.js";
+} from "../domain/token-budget.js";
 
 /**
  * 健壮解析 JSON 对象

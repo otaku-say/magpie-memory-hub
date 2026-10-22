@@ -35,8 +35,8 @@
 
 import assert from "node:assert";
 import { MagpieMemoryHub } from "../tools.js";
-import { recordPendingEvidence, readState, writeState } from "../local_state.js";
-import { runPendingAction, ACTION_KEY } from "../page_actions.js";
+import { recordPendingEvidence, readState, writeState } from "../src/core/state.js";
+import { runPendingAction, ACTION_KEY } from "../src/page/actions.js";
 import { createTestEnv } from "./lib/testenv.mjs";
 
 function parseOut(res) {

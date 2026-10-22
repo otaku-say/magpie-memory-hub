@@ -747,7 +747,7 @@ async function runTests() {
   // 测试 16: runPendingAction 异步非阻塞去重测试
   // ==========================================
   console.log("\n--- 测试 16: 验证全量去重任务在 runPendingAction 中立即返回不超时 ---");
-  const { runPendingAction } = await import("../page_actions.js");
+  const { runPendingAction } = await import("../src/page/actions.js");
   const startAuditTime = Date.now();
   const asyncAuditActionRes = await runPendingAction({
     _action: { op: "memory_audit", id: "audit-nonblock-" + Date.now(), at: Date.now(), args: { full: true } }

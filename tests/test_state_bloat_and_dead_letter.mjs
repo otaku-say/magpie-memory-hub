@@ -30,7 +30,7 @@ import {
   removeHarvestItems,
   clearHarvestQueue,
   updateHarvestItemRetries,
-} from "../local_state.js";
+} from "../src/core/state.js";
 import { triggerBackgroundDrain } from "../gateway_harvest.hooks.js";
 
 console.log("=================================================================");

@@ -25,7 +25,7 @@ import {
 import {
   readHarvestQueue,
   clearHarvestQueue,
-} from "../local_state.js";
+} from "../src/core/state.js";
 
 function makeMockHarvestOptions(memories = [], pitfalls = [], extra = {}) {
   const items = [

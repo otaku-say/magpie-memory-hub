@@ -17,13 +17,13 @@ import {
   getAuditCursor,
   saveAuditCursor,
   clearAuditCursor,
-} from "../../../local_state.js";
-import { auditMemoriesWithModel } from "../../../online_models.js";
+} from "../../core/state.js";
+import { auditMemoriesWithModel } from "../../integration/provider-models.js";
 import {
   normalizeSemanticText,
   isSemanticallySimilar,
   hasConflictingNumbers,
-} from "../../../semantic_dedup.js";
+} from "../../domain/semantic-dedup.js";
 
 let _isAuditing = false;
 

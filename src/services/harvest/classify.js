@@ -9,7 +9,7 @@ import {
   modelBudgetCheck,
   modelBudgetRecord,
   getInternalModelHeaders,
-} from "../../../model_budget.js";
+} from "../../domain/token-budget.js";
 
 /** 判定模型端点自适应缓存：model -> "systemone" | "chat" */
 export const classifyEndpointCache = new Map();

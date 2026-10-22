@@ -3,7 +3,7 @@
  * 依赖：src/index.js, src/integration/ncb.js, src/domain/scoring.js, src/core/time.js, src/services/audit/**
  * 被依赖：Magpie 插件宿主网关、84套测试套件
  * // 2 次模型调用 × 15s = 30s < 55s（MCP 客户端硬超时），安全余量 25s。
- * // import { scrubSecrets } from "./scrub.js";
+ * // import { scrubSecrets } from "./src/core/sanitize.js";
  */
 
 export { MagpieMemoryHub } from "./src/index.js";

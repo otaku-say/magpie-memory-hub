@@ -143,7 +143,7 @@ node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 │   └── page/           设置页面
 ├── tests/              测试套件（88 套）
 ├── docs/               架构文档与决策记录
-└── *.js                薄门面（re-export，保持外部引用稳定）
+└── tools.js 等         仅保留宿主契约入口（tools / middleware / hooks）与运行时状态
 ```
 
 详见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。

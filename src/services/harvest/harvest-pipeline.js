@@ -6,7 +6,7 @@
 
 import { ensureAuditScheduler } from "../audit/scheduler.js";
 import crypto from "node:crypto";
-import { scrubSecrets } from "../../../scrub.js";
+import { scrubSecrets } from "../../core/sanitize.js";
 import { _diag } from "./scaffolding.js";
 import { isExplicitUserMemory } from "./dialog-extract.js";
 import { isTestMode } from "./offline-scan.js";
@@ -19,8 +19,8 @@ import {
   readHarvestQueue,
   removeHarvestItems,
   updateHarvestItemRetries,
-} from "../../../local_state.js";
-import { semanticFingerprint } from "../../../semantic_dedup.js";
+} from "../../core/state.js";
+import { semanticFingerprint } from "../../domain/semantic-dedup.js";
 import { saveMemory } from "../save/memory-saver.js";
 import { pitfallSave } from "../../tools/pitfall-save.js";
 

@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { MagpieMemoryHub } from "../tools.js";
-import { resolveGatewayDir, harvestGateway, NO_CONVERSATIONS_MSG } from "../gateway_harvest.js";
+import { resolveGatewayDir, harvestGateway, NO_CONVERSATIONS_MSG } from "../src/services/harvest/index.js";
 import { createTestEnv } from "./lib/testenv.mjs";
 
 const env = await createTestEnv({ instance: "41694_agent_memory", requireMcp: true });

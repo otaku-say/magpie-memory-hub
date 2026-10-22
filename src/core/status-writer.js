@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { lookupRealDatabase } from "../../local_state.js";
+import { lookupRealDatabase } from "./state.js";
 
 const STATUS_JS_PATH = fileURLToPath(new URL("../../_status.js", import.meta.url));
 const STATUS_JSON_PATH = fileURLToPath(new URL("../../_status.json", import.meta.url));

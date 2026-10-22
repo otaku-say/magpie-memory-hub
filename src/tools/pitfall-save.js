@@ -12,7 +12,7 @@ import { fingerprint } from "../domain/fingerprint.js";
 import { jsonOut } from "../domain/scoring.js";
 import { rowsOf } from "../integration/ncb.js";
 import { saveMemory } from "../services/save/memory-saver.js";
-import { scrubSecrets } from "../../scrub.js";
+import { scrubSecrets } from "../core/sanitize.js";
 import {
   normalizeSemanticText,
   semanticFingerprint,
@@ -21,7 +21,7 @@ import {
   overlapCoefficient,
   jaccardSimilarity,
   hasConflictingNumbers,
-} from "../../semantic_dedup.js";
+} from "../domain/semantic-dedup.js";
 
 export async function pitfallSave(client, cfg, rawArgs, ctx) {
   const args = normalizeToolArgs(rawArgs, cfg);

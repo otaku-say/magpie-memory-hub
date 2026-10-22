@@ -29,10 +29,10 @@ import {
   clearPendingEvidence,
   cleanExpiredPending,
   listPendingEvidence,
-} from "../local_state.js";
+} from "../src/core/state.js";
 import {
   isExplicitUserMemory,
-} from "../gateway_harvest.js";
+} from "../src/services/harvest/index.js";
 import {
   processDialogueAndHarvest,
   buildDialogueText,
@@ -282,10 +282,10 @@ IndexError: list index out of range in job_${unverifiedNonce}
   console.log("【测试 10】脏条目与损坏时间戳自愈清理验证");
   console.log("=================================================================");
   const zombieFp = `zombie_${Date.now()}`;
-  const st = (await import("../local_state.js")).readState();
+  const st = (await import("../src/core/state.js")).readState();
   st.pending_patterns = st.pending_patterns || {};
   st.pending_patterns[zombieFp] = { count: 1, last_seen: 0 }; // 故意损坏为 0 时间戳
-  (await import("../local_state.js")).writeState(st);
+  (await import("../src/core/state.js")).writeState(st);
   cleanExpiredPending(21 * 24 * 3600 * 1000, Date.now());
   assert.strictEqual(getPendingEvidence(zombieFp), null, "时间戳为 0 或缺失的损坏脏数据必须被自动清理");
   console.log("  ✓ 脏数据自愈清理验证通过：无时间戳条目绝无可能成为永生僵尸！\n");

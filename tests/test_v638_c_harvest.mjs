@@ -32,12 +32,12 @@ import {
   triggerBackgroundDrain,
   processDialogueAndHarvest,
 } from "../gateway_harvest.hooks.js";
-import { harvestGateway } from "../gateway_harvest.js";
+import { harvestGateway } from "../src/services/harvest/index.js";
 import {
   clearHarvestQueue,
   enqueueHarvestItems,
   readHarvestQueue,
-} from "../local_state.js";
+} from "../src/core/state.js";
 import { scanTestFile } from "./test_meta.mjs";
 
 console.log("=================================================================");

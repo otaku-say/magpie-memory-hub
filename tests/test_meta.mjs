@@ -174,7 +174,7 @@ export function runMetaCheck(options = {}) {
 
   // 反证测试 2：构造「假装隔离」（写了 project 但其实是真实 client，未引用 createTestEnv / 明确 mock 桩）的样本文件
   const fakePretendIsolationSample = `
-    import { makeMcpClient } from "../mcp_client.js";
+    import { makeMcpClient } from "../src/integration/mcp-client.js";
     const client = makeMcpClient({ instance: "41694_agent_memory", mcpKey: "real_token" });
     const project = "my_custom_project";
     await client.create("memories", { project, title: "pretend" });

@@ -17,7 +17,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { runPendingAction } from "../page_actions.js";
+import { runPendingAction } from "../src/page/actions.js";
 import { onRequest } from "../memory.middleware.js";
 import { scanTestFile } from "./test_meta.mjs";
 

@@ -44,8 +44,8 @@ import {
   resetModelBudget,
   shouldRunLiveTests,
   MEMHUB_INTERNAL_VALUE,
-} from "../model_budget.js";
-import { clearHarvestQueue } from "../local_state.js";
+} from "../src/domain/token-budget.js";
+import { clearHarvestQueue } from "../src/core/state.js";
 
 console.log("=================================================================");
 console.log("【测试开始】调用失控放大修复验证 (test_call_storm_fix.mjs)");

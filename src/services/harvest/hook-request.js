@@ -4,7 +4,7 @@
  * 被依赖: src/services/harvest/index.js, src/services/harvest/hook-response.js, gateway_harvest.hooks.js
  */
 
-import { isInternalHarvestRequest } from "../../../model_budget.js";
+import { isInternalHarvestRequest } from "../../domain/token-budget.js";
 
 var _hookProbeLogged = 0;
 export function _hookProbe(which, opts) {
