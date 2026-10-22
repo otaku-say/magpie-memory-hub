@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- 主体科技青蓝渐变 -->
+    <linearGradient id="hubGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00F2FE" />
+      <stop offset="50%" stop-color="#00A8FF" />
+      <stop offset="100%" stop-color="#0066FF" />
+    </linearGradient>
+
+    <!-- 核心能量光晕径向渐变 -->
+    <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#E0F7FF" stop-opacity="1" />
+      <stop offset="60%" stop-color="#00D2FF" stop-opacity="0.6" />
+      <stop offset="100%" stop-color="#0066FF" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- 轻微投影，增强立体感与悬浮质感 -->
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#00A8FF" flood-opacity="0.35" />
+    </filter>
+  </defs>
+
+  <g filter="url(#softGlow)">
+    <!-- 1. 大脑外轮廓：分层对称流线结构，代表思维与记忆载体 -->
+    <path d="M 256, 75
+         C 195, 75 165, 105 165, 165
+         C 165, 195 125, 205 125, 265
+         C 125, 325 155, 345 155, 375
+         C 155, 415 205, 435 256, 435
+         C 307, 435 357, 415 357, 375
+         C 357, 345 387, 325 387, 265
+         C 387, 205 347, 195 347, 165
+         C 347, 105 317, 75 256, 75 Z" fill="none" stroke="url(#hubGradient)" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" />
+
+    <!-- 2. 中枢中轴总线：贯通大脑核心并向外延伸连接接口 -->
+    <line x1="256" y1="50" x2="256" y2="465" stroke="url(#hubGradient)" stroke-width="24" stroke-linecap="round" />
+
+    <!-- 3. 横向数据传输总线：连接左脑与右脑的记忆分区 -->
+    <!-- 上层逻辑思维总线 -->
+    <line x1="165" y1="165" x2="347" y2="165" stroke="url(#hubGradient)" stroke-width="20" stroke-linecap="round" />
+    <!-- 中层核心交互总线 -->
+    <line x1="125" y1="265" x2="387" y2="265" stroke="url(#hubGradient)" stroke-width="22" stroke-linecap="round" />
+    <!-- 底层深度存储总线 -->
+    <line x1="155" y1="375" x2="357" y2="375" stroke="url(#hubGradient)" stroke-width="20" stroke-linecap="round" />
+
+    <!-- 4. 突触与记忆存储外围节点 -->
+    <circle cx="165" cy="165" r="9" fill="#E0F7FF" />
+    <circle cx="347" cy="165" r="9" fill="#E0F7FF" />
+    <circle cx="125" cy="265" r="9" fill="#E0F7FF" />
+    <circle cx="387" cy="265" r="9" fill="#E0F7FF" />
+    <circle cx="155" cy="375" r="9" fill="#E0F7FF" />
+    <circle cx="357" cy="375" r="9" fill="#E0F7FF" />
+
+    <!-- 中轴端点节点：顶部信号感应端与底部中枢输出接口 -->
+    <circle cx="256" cy="50" r="7" fill="#E0F7FF" />
+    <circle cx="256" cy="465" r="10" fill="#00F2FE" />
+
+    <!-- 5. 记忆中枢核心（Center Hub）：中央能量核与交点节点 -->
+    <circle cx="256" cy="165" r="12" fill="url(#hubGradient)" />
+    <circle cx="256" cy="375" r="12" fill="url(#hubGradient)" />
+
+    <!-- 中枢主核发光环与内核 -->
+    <circle cx="256" cy="265" r="34" fill="url(#coreGlow)" />
+    <circle cx="256" cy="265" r="20" fill="url(#hubGradient)" />
+    <circle cx="256" cy="265" r="10" fill="#FFFFFF" />
+  </g>
+</svg>
