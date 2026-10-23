@@ -593,8 +593,37 @@ console.log("\n=== 15. 协作快照真实产出（actions.js mailbox 未读计�
     const detailObj = (res && res.result && res.result.detail) || null;
     check(!!detailObj && !!(detailObj.mailbox || detailObj.collab),
       "快照 structure 可供设置页 renderCollabBlocks 直读");
+
+    // 【BUG-460-5a 回归】刷新记忆快照必须顺带回传协作快照：
+    // 否则 inject 卡被写成无 detail 的空态，设置页协作三区块会被冲成「暂无」。
+    const syncRes = await executeAction(
+      { op: "sync_snapshot", id: "sync-snapshot-" + Date.now(), at: Date.now(), project: "proj-x" },
+      { options: { dir: "/tmp" }, client: fakeClient }
+    );
+    const syncResult = (syncRes && syncRes.result) || {};
+    check(syncRes && syncRes.ran === true && syncResult.op === "sync_snapshot", "executeAction 真实执行 sync_snapshot 信标");
+    check(Array.isArray(syncResult.memories), "刷新快照仍返回 memories 数组（快照本体未被破坏）");
+    const syncCollab = syncResult.detail && syncResult.detail.collab;
+    check(!!syncCollab && !!syncCollab.mailbox, "刷新快照返回 detail.collab（协作卡片数据源不为空）");
+    if (syncCollab && syncCollab.mailbox) {
+      check(syncCollab.mailbox.unread === 2, `刷新快照的协作快照未读计数仍为 2（实际 ${syncCollab.mailbox.unread}）`);
+      check(syncCollab.handoff && syncCollab.handoff.open === false, "刷新快照如实回传交接态（无 handoff:open）");
+      check(syncCollab.health && syncCollab.health.active > 0, "刷新快照的协作健康度带回活跃记忆数");
+    }
   } catch (e) {
     no("协作快照调用失败：" + String((e && e.message) || e));
+  } finally {
+    // 【BUG-460-5b】清理运行态产物：executeAction 会在插件根目录写 _status.js / _status.json，
+    // 测试结束必须带走，绝不在仓库留下宿主运行态文件（git 忽略≠可以残留）。
+    try {
+      const { existsSync, unlinkSync } = await import("node:fs");
+      for (const f of ["../_status.js", "../_status.json"]) {
+        const p = new URL(f, import.meta.url);
+        if (existsSync(p)) unlinkSync(p);
+      }
+    } catch (_) {
+      // fail-open：清理失败（只读目录 / 文件已不存在）不阻断测试结论，但绝不能留残留
+    }
   }
 }
 
