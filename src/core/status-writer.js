@@ -118,6 +118,7 @@ export function formatCardStatus(key, rawResult, opHint) {
     };
     if (res.progress) card.progress = res.progress;
     if (Array.isArray(res.memories)) card.memories = res.memories;
+    if (res.detail && typeof res.detail === "object") card.detail = res.detail;
     return card;
   }
 
@@ -313,6 +314,7 @@ export function formatCardStatus(key, rawResult, opHint) {
   if (res.progress) outCard.progress = res.progress;
   if (Array.isArray(res.logs)) outCard.logs = res.logs;
   if (Array.isArray(res.memories)) outCard.memories = res.memories;
+  if (res.detail && typeof res.detail === "object") outCard.detail = res.detail;
   return outCard;
 }
 
