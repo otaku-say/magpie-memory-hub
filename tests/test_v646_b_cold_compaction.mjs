@@ -158,6 +158,8 @@ console.log("\n▶ [2] compactColdMemories 冷记忆抽取压缩：原文留存 
   assert.ok(cold.content.includes("3306"), "浓缩正文必须保住端口等关键 Token");
   assert.ok(String(cold.tags).split(",").includes("compacted"), "tags 必须追加 compacted 标记");
   assert.ok(String(cold.tags).includes("mysql"), "原有 tags 必须保留，不得清空");
+  // 【变异 M2 反证】冷压缩是后台瘦身维护，updated_at 必须与压缩前逐字节完全相等，严禁篡改时间戳导致冷记忆满血复活霸榜
+  assert.strictEqual(cold.updated_at, oldStamp(120), "【变异 M2 反证】压缩写库 payload 绝不得改写 updated_at，时间戳必须逐字节等于压缩前");
 
   assert.strictEqual(memoryStore.get(idPrinciple).content, longColdContent, "principle 类记忆绝不允许被压缩");
   assert.strictEqual(memoryStore.get(idFresh).content, longColdContent, "60 天内更新过的记忆绝不允许被压缩");
