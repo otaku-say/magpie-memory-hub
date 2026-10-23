@@ -269,6 +269,30 @@ try {
   console.log("  ✓ 门6 通过：信箱单次消费，已读不重复。\n");
 
   // =================================================================
+  // 门8：槽位防饿死反证门（终审 QA BLK-1R 阻断项防线）
+  // =================================================================
+  console.log("▶ [门8] 【槽位防饿死反证门】3 principle + 2 踩坑在默认 max_items=5 时，目标记忆绝不得被饿死...");
+  for (let pi = 1; pi <= 3; pi++) {
+    await saveA({ category: "principle", title: `防饿死准则 ${pi}`, content: `准则正文 ${pi}` });
+  }
+  const targetTitle = "Kafka重平衡调优实战记录";
+  await saveA({ category: "context", title: targetTitle, content: "分区分配策略改为 CooperativeStickyAssignor 避免 stop-the-world" });
+  for (let ki = 1; ki <= 3; ki++) {
+    await hubA.tool.pitfall_save.execute({
+      project: env.project,
+      component: "kafka",
+      recurrence: 5,
+      symptom: `Kafka重平衡 报错症状 ${ki}`,
+      solution: `Kafka重平衡 解决方案 ${ki}`,
+    }, {});
+  }
+  // 默认 max_items=5（不传即 5）
+  const ctxHungry = parseOut(await ctxA.execute({ query: "Kafka重平衡", project: env.project }, {}));
+  assert.ok(String(ctxHungry.block || "").includes(targetTitle), "【变异 BLK-1R 反证】当存在 3 条准则与 2 条踩坑时，用户 query 命中的目标记忆必须成功注入，绝不得被饿死");
+  assert.ok(ctxHungry.injected >= 1, "必须有记忆被成功注入");
+  console.log("  ✓ 门8 通过：槽位防饿死反证门拦截生效，目标记忆必被注入。\n");
+
+  // =================================================================
   // 门7：元规范自检
   // =================================================================
   console.log("▶ [门7] 【元规范自检】test_meta 静态扫描 0 违规...");

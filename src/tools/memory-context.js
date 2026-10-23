@@ -252,7 +252,7 @@ export async function memoryContext(client, cfg, rawArgs, ctx) {
 
   let pitCount = 0;
   for (const pit of topPitfalls) {
-    if (n >= maxItems || (quota.hasHits && (n >= maxItems - quota.reserved && pitCount >= quota.maxPit))) break;
+    if (n >= maxItems || (quota.hasHits && n >= maxItems - quota.reserved)) break;
     const comp = pit.component || "general";
     const idTag = pit.id != null ? `#${pit.id}` : "";
     const rec = Number(pit.recurrence) || 1;

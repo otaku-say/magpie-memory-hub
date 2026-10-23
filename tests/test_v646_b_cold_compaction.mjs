@@ -142,7 +142,8 @@ console.log("▶ [1] compactColdContent 纯正则抽取：首句摘要 + 关键 
 // -----------------------------------------------------------------
 console.log("\n▶ [2] compactColdMemories 冷记忆抽取压缩：原文留存 full_text、tags 追加 compacted");
 {
-  const idCold = seed({ project: testProject, category: "context", title: "MySQL 连接池事故归档", tags: "mysql,deploy", content: longColdContent, updated_at: oldStamp(120) });
+  const expectedColdStamp = oldStamp(120);
+  const idCold = seed({ project: testProject, category: "context", title: "MySQL 连接池事故归档", tags: "mysql,deploy", content: longColdContent, updated_at: expectedColdStamp });
   const idPrinciple = seed({ project: testProject, category: "principle", title: "连接池铁律", tags: "mysql", content: longColdContent, updated_at: oldStamp(120) });
   const idFresh = seed({ project: testProject, category: "context", title: "最新排查", tags: "mysql", content: longColdContent, updated_at: oldStamp(3) });
   const idShort = seed({ project: testProject, category: "context", title: "短记录", tags: "mysql", content: "短记忆不足 240 字，不参与冷压缩。", updated_at: oldStamp(200) });
@@ -159,7 +160,7 @@ console.log("\n▶ [2] compactColdMemories 冷记忆抽取压缩：原文留存 
   assert.ok(String(cold.tags).split(",").includes("compacted"), "tags 必须追加 compacted 标记");
   assert.ok(String(cold.tags).includes("mysql"), "原有 tags 必须保留，不得清空");
   // 【变异 M2 反证】冷压缩是后台瘦身维护，updated_at 必须与压缩前逐字节完全相等，严禁篡改时间戳导致冷记忆满血复活霸榜
-  assert.strictEqual(cold.updated_at, oldStamp(120), "【变异 M2 反证】压缩写库 payload 绝不得改写 updated_at，时间戳必须逐字节等于压缩前");
+  assert.strictEqual(cold.updated_at, expectedColdStamp, "【变异 M2 反证】压缩写库 payload 绝不得改写 updated_at，时间戳必须逐字节等于压缩前");
 
   assert.strictEqual(memoryStore.get(idPrinciple).content, longColdContent, "principle 类记忆绝不允许被压缩");
   assert.strictEqual(memoryStore.get(idFresh).content, longColdContent, "60 天内更新过的记忆绝不允许被压缩");
