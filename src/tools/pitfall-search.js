@@ -77,21 +77,16 @@ export async function pitfallSearch(client, cfg, rawArgs) {
   let rewrittenTerms = [];
   if (rawQuery) {
     try {
-      rewrittenInfo = await rewriteSearchQuery({
-        query: rawQuery,
-        options: cfg,
-      });
-      if (rewrittenInfo && rewrittenInfo.rewrittenQuery) {
-        rewrittenTerms = termsOf(rewrittenInfo.rewrittenQuery);
-      }
+      rewrittenInfo = await rewriteSearchQuery({ query: rawQuery, options: cfg });
+      if (rewrittenInfo && rewrittenInfo.rewrittenQuery) rewrittenTerms = termsOf(rewrittenInfo.rewrittenQuery);
     } catch (_) {
-      rewrittenInfo = null;
+      rewrittenInfo = null; // fail-open：在线改写失败仅回退纯词面检索，不影响命中与排序
       rewrittenTerms = [];
     }
   }
+  tm.mark("rewrite"); // 【BUG-460-4a】改写在 fetch 之后、打分之前，缺此打点会让 rewrite_ms 恒为 0
 
   const hasOrig = origTerms.length > 0;
-  tm.mark("rewrite");
   const hasRewrite = rewrittenTerms.length > 0;
 
   const scored = pool
