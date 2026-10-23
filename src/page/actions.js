@@ -503,6 +503,10 @@ async function execute(action, cfg, fs, sp, state, options) {
           }));
 
         memories = activeMemories.concat(activePitfallSnapshots).slice(0, 500);
+        let collabSnap = null;
+        try {
+          collabSnap = await collectCollabSnapshot(client, prj);
+        } catch (_) {}
         result = {
           ok: true,
           at: Date.now(),
@@ -510,6 +514,7 @@ async function execute(action, cfg, fs, sp, state, options) {
           title: "记忆快照拉取就绪",
           lines: [`成功拉取 ${memories.length} 条活跃记忆快照供前端同步`],
           memories,
+          ...(collabSnap ? { detail: { collab: collabSnap } } : {}),
         };
       } catch (err) {
         result = {

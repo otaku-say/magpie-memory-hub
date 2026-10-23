@@ -143,7 +143,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
     memLastId = rawRows[rawRows.length - 1].id;
     totalScannedMemories += rows.length;
 
-    Object.assign(coldStats, await compactColdBatch(client, rows, now, batchTs, rollingLogs));
+    _accumulateColdStats(coldStats, await compactColdBatch(client, rows, now, batchTs, rollingLogs));
     contradictions.push(...lintContradictions(rows));
     // b) 内存中全量规则级查重（指纹相同 / 归一化标题相同 / tags 交集）覆盖整批记录
     const batchDupIds = new Set();
@@ -973,6 +973,13 @@ async function compactColdRow(client, row, now) {
 }
 
 /** 批量压缩（memoryAudit 主循环与手动信标共用）：内部 fail-open，绝不向上抛错 */
+function _accumulateColdStats(target, src) {
+  if (!src) return;
+  target.scanned += (src.scanned || 0);
+  target.compacted += (src.compacted || 0);
+  target.saved_chars += (src.saved_chars || 0);
+  if (Array.isArray(src.ids)) target.ids.push(...src.ids);
+}
 async function compactColdBatch(client, rows, now, ts, rollingLogs) {
   const stats = { scanned: Array.isArray(rows) ? rows.length : 0, compacted: 0, saved_chars: 0, ids: [] };
   if (!Array.isArray(rows) || !client || typeof client.update !== "function") return stats;
