@@ -118,6 +118,9 @@ try {
   assert.ok(String(ctx1.block || "").startsWith("- [Pending Cross-Agent Handoff"), "门1 正向：context 首行必须置顶交接棒");
   assert.strictEqual(ctx1.active_handoff && ctx1.active_handoff.id, h1.id, "门1 正向：active_handoff 必须精确指向交接棒 id");
   assert.ok(String(ctx1.block || "").indexOf("构建脚本使用 Node 24") > 0, "门1 反证：普通记录只能出现在正文，绝不占据首行置顶位");
+  // 【变异 M1 反证】：常规正文中绝不得出现控制行条目，杜绝重复注入与预算浪费
+  const contextBody = (ctx1.block || "").split("[Persistent Memory Context]")[1] || "";
+  assert.ok(!contextBody.includes(`[context#${h1.id}]`), "【变异 M1 反证】交接棒绝不得在常规正文中二次重复打印");
   console.log("  ✓ 门1 通过：接力棒置顶且普通记录未冒充置顶。\n");
 
   // =================================================================
@@ -128,13 +131,14 @@ try {
   assert.strictEqual(rowBeforeClaim.invalid_at, null, "门2 反证：未显式 claim 时接力棒绝不可被消费");
   assert.ok(/handoff:open/i.test(String(rowBeforeClaim.tags)), "门2 反证：未 claim 时 tags 必须保持 handoff:open");
 
-  const ctxClaim = parseOut(await ctxA.execute({ project: env.project, claim_handoff: true }, {}));
+  const ctxClaim = parseOut(await ctxA.execute({ project: env.project, claim_handoff: true }, { agent: "test-agent-x" }));
   assert.strictEqual(ctxClaim.active_handoff && ctxClaim.active_handoff.id, h1.id, "门2 正向：认领当次仍必须把接力棒返还给新 Agent");
 
   const rowAfterClaim = rowsOf(await env.client.list("memories", { project: env.project, id: h1.id }))[0];
   assert.ok(/handoff:claimed/i.test(String(rowAfterClaim.tags)), "门2 正向：claim 后 tags 必须改写为 handoff:claimed");
   assert.ok(rowAfterClaim.invalid_at != null, "门2 正向：claim 后必须软失效，杜绝重复消费");
-  assert.ok(String(rowAfterClaim.invalid_reason || "").startsWith("handoff_claimed_by:"), "门2 正向：必须记录认领来源");
+  assert.strictEqual(rowAfterClaim.lifecycle_status, "invalid", "门2 正向：claim 后 lifecycle_status 必须置为 invalid");
+  assert.strictEqual(rowAfterClaim.invalid_reason, "handoff_claimed_by:test-agent-x", "【变异 M10 反证】认领原因必须包含真实调用方 agent 身份，绝不可为 unknown");
   assert.strictEqual(rowAfterClaim.content, "【当前进展】私有 helper 已抽出；【未决】待推 origin", "门2 正向：核销不得篡改交接内容");
 
   const ctxSecond = parseOut(await ctxA.execute({ project: env.project, claim_handoff: true }, {}));
@@ -182,6 +186,20 @@ try {
   const bRow = rowsOf(await envB.client.list("memories", { project: envB.project, id: bHandoff.id }))[0];
   assert.strictEqual(bRow.lifecycle_status, "active", "门3 反证：A 项目保存动作绝不得核销 B 项目的 open 接力棒");
   assert.strictEqual(bRow.invalid_at, null, "门3 反证：B 项目接力棒必须保持可接力状态");
+
+  // 【变异 M5 反证】：同标题的新交接棒写入，也必须以独立新记录 ADD 落库，绝不可被 dup 吞没为 NOOP 或 UPDATE
+  const hSameTitle = parseOut(await saveA({
+    category: "context", scope_level: "session", client: "agentA",
+    tags: "handoff, handoff:open",
+    title: "【任务交接】v647 信箱与画像收敛", // 与 h2 标题完全相同！
+    content: "【最新进展】补齐了变异反证断言",
+  }));
+  assert.strictEqual(hSameTitle.action, "ADD", "【变异 M5 反证】同标题新交接棒必须为 ADD 落库，绝不可被 dup 吞没为 NOOP 或 UPDATE");
+  assert.notStrictEqual(hSameTitle.id, h2.id, "【变异 M5 反证】新交接棒必须生成全新的独立 ID");
+  const h2Stale = rowsOf(await env.client.list("memories", { project: env.project, id: h2.id }))[0];
+  assert.strictEqual(h2Stale.lifecycle_status, "superseded", "【变异 M5 反证】旧同名棒必须被标记 superseded");
+  assert.strictEqual(Number(h2Stale.superseded_by_id), Number(hSameTitle.id), "【变异 M5 反证】旧同名棒必须精准指向新棒 ID");
+
   console.log("  ✓ 门3 通过：接力棒单开，跨项目互不误伤。\n");
 
   // =================================================================
@@ -201,6 +219,15 @@ try {
   assert.strictEqual(promoted[0].category, "preference", "门4 正向：画像必须继承偏好分类");
   assert.ok(/profile:converged/i.test(String(promoted[0].tags)), "门4 正向：画像必须带 profile:converged 标签");
   assert.strictEqual(Number(promoted[0].recurrence), 2, "门4 正向：画像 recurrence 必须反映 2 个项目印证");
+
+  // 【变异 M8 反证】：同标题但数字/端口/版本冲突的跨项目记录，绝不得被合成进 global 画像
+  const conflict1 = await savePref(`${env.project}_c1`, "服务监听端口配置", "生产服务固定监听端口 8080");
+  const conflict2 = await savePref(`${env.project}_c2`, "服务监听端口配置", "生产服务固定监听端口 9090");
+  assert.strictEqual(conflict1.action, "ADD");
+  assert.strictEqual(conflict2.action, "ADD");
+  const globalPortRows = globalRows().filter(r => r.title && r.title.includes("服务监听端口配置"));
+  assert.strictEqual(globalPortRows.length, 0, "【变异 M8 反证】存在数字/端口冲突的跨项目偏好绝不得被合成进全局画像");
+
   console.log("  ✓ 门4 通过：跨项目偏好收敛为全局画像，单项目不误升维。\n");
 
   // =================================================================
