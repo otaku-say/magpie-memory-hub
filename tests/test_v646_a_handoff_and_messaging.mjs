@@ -277,12 +277,14 @@ try {
   }
   const targetTitle = "Kafka重平衡调优实战记录";
   await saveA({ category: "context", title: targetTitle, content: "分区分配策略改为 CooperativeStickyAssignor 避免 stop-the-world" });
+  // 门8 基础踩坑
   for (let ki = 1; ki <= 3; ki++) {
     await hubA.tool.pitfall_save.execute({
       project: env.project,
       component: "kafka",
       recurrence: 5,
       symptom: `Kafka重平衡 报错症状 ${ki}`,
+      root_cause: `分区分配线程心跳超时 ${ki}`,
       solution: `Kafka重平衡 解决方案 ${ki}`,
     }, {});
   }
@@ -291,6 +293,31 @@ try {
   assert.ok(String(ctxHungry.block || "").includes(targetTitle), "【变异 BLK-1R 反证】当存在 3 条准则与 2 条踩坑时，用户 query 命中的目标记忆必须成功注入，绝不得被饿死");
   assert.ok(ctxHungry.injected >= 1, "必须有记忆被成功注入");
   console.log("  ✓ 门8 通过：槽位防饿死反证门拦截生效，目标记忆必被注入。\n");
+
+  // -----------------------------------------------------------------
+  // 门8.2：结晶铁律准则溢出防饿死反证门（终审 QA BLK-2R 阻断项防线）
+  // -----------------------------------------------------------------
+  console.log("▶ [门8.2] 【准则溢出防饿死反证门】多条 principle(≥4) + 结晶铁律竞争下，目标记忆绝不得被溢出的准则降维饿死...");
+  // 构造 3 条老准则，热度极高（retrieval_count: 50），占满 principles 席位
+  for (let pi = 1; pi <= 3; pi++) {
+    const pOld = parseOut(await saveA({ category: "principle", title: `老军规准则 ${pi}`, content: `核心铁律遵守 ${pi}` }));
+    await env.client.update("memories", pOld.id, { retrieval_count: 50, project: env.project });
+  }
+  // 再写入 3 条高频结晶踩坑铁律（它们词面 hit 极高，但不能进 principles 前3）
+  for (let ki = 1; ki <= 3; ki++) {
+    await hubA.tool.pitfall_save.execute({
+      project: env.project,
+      component: "kafka",
+      recurrence: 9,
+      symptom: `Kafka重平衡 致命故障排查 ${ki}`,
+      root_cause: `消费者网络分区或长时间GC停顿 ${ki}`,
+      solution: `Kafka重平衡 彻底解决步骤 ${ki}`,
+    }, {});
+  }
+  const ctxHungry2 = parseOut(await ctxA.execute({ query: "Kafka重平衡", project: env.project }, {}));
+  assert.ok(String(ctxHungry2.block || "").includes(targetTitle), "【变异 BLK-2R 反证】当准则总数 >= 4 且存在结晶铁律时，未入选的准则绝不得降级回流挤占普通记忆席位导致目标记忆饿死");
+  assert.ok(ctxHungry2.injected >= 1, "必须有记忆被成功注入");
+  console.log("  ✓ 门8.2 通过：准则严格限制在准则配额内，未入选准则不降级回流。\n");
 
   // =================================================================
   // 门7：元规范自检

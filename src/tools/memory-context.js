@@ -116,6 +116,7 @@ export async function memoryContext(client, cfg, rawArgs, ctx) {
     && !pool.some((r) => String(r.project || "") === projectArg);
   const scored = pool
     .filter((r) => !principleIds.has(r.id))
+    .filter((r) => String(r.category || "").toLowerCase() !== "principle")
     .map((r) => {
       if (!hasOrig && !hasRewrite) {
         return { row: r, hit: 1, origHit: 1, rewriteHit: 0 };
