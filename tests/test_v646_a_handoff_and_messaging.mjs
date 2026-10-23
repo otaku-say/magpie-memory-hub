@@ -16,6 +16,15 @@
  *  门6 异步信箱：投递到目标项目的 mail:unread 记录必须在 context 置顶提示并单次消费，
  *      反证：消费后同一封邮件绝不再重复占预算。
  *  门7 元规范与零残留：本文件经 test_meta 静态扫描 0 违规，清理后残余数严格为 0。
+ *
+ *  咬死门（专治终审 QA 指出的 B2 假绿盲区，每条都做过「注入变异必转红」验证）：
+ *      M1  控制行（handoff:open / mail:unread）只允许在顶层置顶区块出现一次，
+ *          剥离置顶行后的常规正文里绝不得再出现该条目（否则一份控制信息吃两份预算）；
+ *      M5  「同标题」新交接棒必须 ADD，绝不得被 dup 吞成 NOOP/UPDATE，
+ *          旧棒 superseded_by_id 必须精准指向新棒 ID；
+ *      M8  同标题但端口/版本冲突的跨项目记忆绝不得合成 global 画像
+ *          （正向对照：数字一致的跨项目偏好仍必须照常收敛，防「整段关掉也变绿」）；
+ *      M10 claim 核销的 invalid_reason 必须记录真实 agent 身份，绝不得退化为 unknown。
  * =================================================================
  */
 
@@ -47,6 +56,15 @@ const rowsOf = (res) => {
 };
 
 const GLOBAL_SCOPE = "global";
+
+// 顶层置顶区块（交接棒 / 未读信箱）的行前缀：M1 咬死门只剥离置顶行，剩下的才是「常规正文」。
+// 用行前缀剥离而不是字符串替换，是为了在置顶行被截断/换行时也不误伤正文。
+const PINNED_BLOCK_LINE = /^- \[(?:Pending Cross-Agent Handoff|Unread Agent Mail)/;
+const bodyOnly = (block) =>
+  String(block || "")
+    .split("\n")
+    .filter((line) => !PINNED_BLOCK_LINE.test(line))
+    .join("\n");
 
 console.log("=================================================================");
 console.log("【v6.46-a Handoff 接力 / 跨项目画像收敛 / 异步信箱 七门专项测试】");
@@ -118,6 +136,25 @@ try {
   assert.ok(String(ctx1.block || "").startsWith("- [Pending Cross-Agent Handoff"), "门1 正向：context 首行必须置顶交接棒");
   assert.strictEqual(ctx1.active_handoff && ctx1.active_handoff.id, h1.id, "门1 正向：active_handoff 必须精确指向交接棒 id");
   assert.ok(String(ctx1.block || "").indexOf("构建脚本使用 Node 24") > 0, "门1 反证：普通记录只能出现在正文，绝不占据首行置顶位");
+
+  // ---- 【M1 咬死门】控制行只允许在顶层置顶区块出现一次，绝不得在常规正文被二次打印 ----
+  // 变异 M1：把 memory_context 里剔除 handoff:open / mail:unread 的那一行删掉 → 下面四条必须转红。
+  const ctx1Body = bodyOnly(ctx1.block);
+  assert.ok(String(ctx1Body).includes("构建脚本使用 Node 24"), "M1 前置：剥离置顶行后常规正文仍必须含普通记忆（证明不是把正文清空冒充通过）");
+  assert.ok(
+    !String(ctx1Body).includes("【任务交接】v646 拆分等价收尾"),
+    "M1 咬死：handoff:open 条目绝不得在常规正文二次出现（顶层置顶区块之外一律禁止）"
+  );
+  assert.ok(
+    !String(ctx1Body).includes(`[context#${h1.id}]`),
+    `M1 咬死：交接棒 #${h1.id} 绝不得以普通记忆身份在正文重复打印（重复注入 + 白占预算）`
+  );
+  assert.ok(!/\bhandoff:open\b/i.test(String(ctx1Body)), "M1 咬死：常规正文绝不得出现 handoff:open 控制标记");
+  assert.strictEqual(
+    (String(ctx1.block || "").match(/Pending Cross-Agent Handoff/g) || []).length,
+    1,
+    "M1 咬死：同一根交接棒在全量上下文里只允许出现 1 次（置顶），绝不能出现「置顶 + 正文」双份"
+  );
   console.log("  ✓ 门1 通过：接力棒置顶且普通记录未冒充置顶。\n");
 
   // =================================================================
@@ -128,13 +165,25 @@ try {
   assert.strictEqual(rowBeforeClaim.invalid_at, null, "门2 反证：未显式 claim 时接力棒绝不可被消费");
   assert.ok(/handoff:open/i.test(String(rowBeforeClaim.tags)), "门2 反证：未 claim 时 tags 必须保持 handoff:open");
 
-  const ctxClaim = parseOut(await ctxA.execute({ project: env.project, claim_handoff: true }, {}));
+  const ctxClaim = parseOut(await ctxA.execute({ project: env.project, claim_handoff: true }, { agent: "test-agent-x" }));
   assert.strictEqual(ctxClaim.active_handoff && ctxClaim.active_handoff.id, h1.id, "门2 正向：认领当次仍必须把接力棒返还给新 Agent");
 
   const rowAfterClaim = rowsOf(await env.client.list("memories", { project: env.project, id: h1.id }))[0];
   assert.ok(/handoff:claimed/i.test(String(rowAfterClaim.tags)), "门2 正向：claim 后 tags 必须改写为 handoff:claimed");
   assert.ok(rowAfterClaim.invalid_at != null, "门2 正向：claim 后必须软失效，杜绝重复消费");
   assert.ok(String(rowAfterClaim.invalid_reason || "").startsWith("handoff_claimed_by:"), "门2 正向：必须记录认领来源");
+
+  // ---- 【M10 咬死门】认领核销必须落真实 Agent 身份，绝不允许退化成 unknown 兜底值 ----
+  // 变异 M10：claimedBy 取成常量 "unknown"（或 ctx.agent 读错层级）→ 下面两条必须转红。
+  assert.strictEqual(
+    String(rowAfterClaim.invalid_reason),
+    "handoff_claimed_by:test-agent-x",
+    `M10 咬死：invalid_reason 必须精确记录真实认领者身份，实际 ${rowAfterClaim.invalid_reason}`
+  );
+  assert.ok(
+    !/unknown/i.test(String(rowAfterClaim.invalid_reason)),
+    "M10 咬死：invalid_reason 绝不得是 unknown 兜底值——那等于没记录是谁接的棒，事后无法追责"
+  );
   assert.strictEqual(rowAfterClaim.content, "【当前进展】私有 helper 已抽出；【未决】待推 origin", "门2 正向：核销不得篡改交接内容");
 
   const ctxSecond = parseOut(await ctxA.execute({ project: env.project, claim_handoff: true }, {}));
@@ -179,6 +228,46 @@ try {
   assert.strictEqual(ctx3.active_handoff && ctx3.active_handoff.id, h2.id, "门3 正向：置顶的必须是最新一棒");
   assert.strictEqual((String(ctx3.block || "").match(/Pending Cross-Agent Handoff/g) || []).length, 1, "门3 正向：同一时刻只允许一条有效接力棒置顶");
 
+  // ---- 【M5 咬死门】「同标题」的新交接棒绝不得被常规 dup 吞成 NOOP/UPDATE ----
+  // 旧测试用的是「不同标题」，那走不到指纹/标题去重分支；变异 M5 正是把瞬时物件豁免摘掉后，
+  // 同标题新棒会被判为重复 → NOOP/UPDATE，接力方从此读到过期交接单。
+  const sameTitle = "【任务交接】同标题接力棒单开验证";
+  const hSameA = parseOut(await saveA({
+    category: "context", scope_level: "session", client: "agentA",
+    tags: "handoff, handoff:open",
+    title: sameTitle,
+    content: "【当前进展】第一棒：回归脚本待补；【未决】待推 origin",
+  }));
+  assert.strictEqual(hSameA.action, "ADD", `M5 前置：第一条交接棒必须入库，实际 ${hSameA.action}`);
+
+  const hSameB = parseOut(await saveA({
+    category: "context", scope_level: "session", client: "agentA",
+    tags: "handoff, handoff:open",
+    title: sameTitle,
+    content: "【当前进展】第二棒：变异反证已补齐；【未决】待全量回归",
+  }));
+  assert.notStrictEqual(hSameB.action, "NOOP", "M5 咬死：同标题新交接棒绝不得被 dup 吞成 NOOP（接力方会一直读到过期交接单）");
+  assert.notStrictEqual(hSameB.action, "UPDATE", "M5 咬死：同标题新交接棒绝不得被判定为重复而走 UPDATE 融合（旧棒内容会被顶掉）");
+  assert.strictEqual(hSameB.action, "ADD", `M5 咬死：同标题第二条交接棒必须独立成行 ADD，实际 ${hSameB.action}`);
+  assert.notStrictEqual(Number(hSameB.id), Number(hSameA.id), "M5 咬死：新棒必须拿到全新 ID，绝不得复用旧棒行");
+
+  const hSameARow = rowsOf(await env.client.list("memories", { project: env.project, id: hSameA.id }))[0];
+  assert.strictEqual(hSameARow.lifecycle_status, "superseded", "M5 咬死：旧棒必须被标记 superseded，绝不允许两根 open 棒并存");
+  assert.strictEqual(
+    Number(hSameARow.superseded_by_id),
+    Number(hSameB.id),
+    `M5 咬死：旧棒 superseded_by_id 必须精准指向新棒 ID（期望 ${hSameB.id}，实际 ${hSameARow.superseded_by_id}）`
+  );
+  assert.ok(/handoff:superseded/i.test(String(hSameARow.tags)), "M5 咬死：旧棒 tags 必须改写为 handoff:superseded");
+  assert.ok(!/handoff:open/i.test(String(hSameARow.tags)), "M5 咬死：旧棒绝不得残留 handoff:open（否则会被再次置顶）");
+  assert.strictEqual(String(hSameARow.invalid_reason), "handoff_superseded-by:" + hSameB.id, "M5 咬死：取代原因必须精确记录新棒 ID");
+  assert.strictEqual(hSameARow.content, "【当前进展】第一棒：回归脚本待补；【未决】待推 origin", "M5：取代不得篡改旧棒内容（留证）");
+
+  const ctxSame = parseOut(await ctxA.execute({ project: env.project }, {}));
+  assert.strictEqual(ctxSame.active_handoff && ctxSame.active_handoff.id, hSameB.id, "M5：置顶的必须是最新同标题棒");
+  assert.ok(!String(ctxSame.block || "").includes("第一棒：回归脚本待补"), "M5 咬死：已 superseded 的旧棒绝不得再被置顶注入");
+  assert.strictEqual((String(ctxSame.block || "").match(/Pending Cross-Agent Handoff/g) || []).length, 1, "M5：同标题接力后仍只允许 1 条置顶");
+
   const bRow = rowsOf(await envB.client.list("memories", { project: envB.project, id: bHandoff.id }))[0];
   assert.strictEqual(bRow.lifecycle_status, "active", "门3 反证：A 项目保存动作绝不得核销 B 项目的 open 接力棒");
   assert.strictEqual(bRow.invalid_at, null, "门3 反证：B 项目接力棒必须保持可接力状态");
@@ -215,6 +304,60 @@ try {
   console.log("  ✓ 门5 通过：画像收敛幂等。\n");
 
   // =================================================================
+  // 门5b：【M8 咬死门】同标题但端口/版本冲突的跨项目记忆，绝不得合成 global 画像
+  // =================================================================
+  console.log("▶ [门5b] 【M8 咬死】同标题但端口/版本不同的跨项目记忆，绝不得并进 global 画像...");
+  const globalCountBeforeProbe = globalRows().length;
+  assert.strictEqual(globalCountBeforeProbe, 1, "门5b 前置：此刻 global 只应有门4 合成的那 1 条画像");
+
+  // 反证一：端口冲突（3306 vs 3307）
+  const portTitle = "生产库连接池端口基线约定";
+  const portA = await savePref(`${env.project}_port_a`, portTitle, "生产库统一走端口 3306，超时保持默认值");
+  const portB = await savePref(`${env.project}_port_b`, portTitle, "生产库统一走端口 3307，超时保持默认值");
+  assert.strictEqual(portA.action, "ADD", "门5b 前置：端口 A 项目偏好必须入库");
+  assert.strictEqual(portB.action, "ADD", "门5b 前置：端口 B 项目偏好必须入库");
+  assert.strictEqual(
+    globalRows().filter((r) => String(r.title || "") === portTitle).length,
+    0,
+    `M8 咬死：同标题但端口冲突（3306 vs 3307）绝不得合成 global 画像，实际 ${JSON.stringify(globalRows().map((r) => r.title))}`
+  );
+
+  // 反证二：版本冲突（Node 18 vs Node 20）
+  const verTitle = "构建工具链版本基线约定";
+  await savePref(`${env.project}_ver_a`, verTitle, "全项目统一 Node 18 构建，禁止私自升级");
+  await savePref(`${env.project}_ver_b`, verTitle, "全项目统一 Node 20 构建，禁止私自升级");
+  assert.strictEqual(
+    globalRows().filter((r) => String(r.title || "") === verTitle).length,
+    0,
+    "M8 咬死：同标题但版本冲突（Node 18 vs Node 20）绝不得合成 global 画像"
+  );
+  assert.strictEqual(
+    globalRows().length,
+    globalCountBeforeProbe,
+    `M8 咬死：两组冲突项目都不得新增任何 global 画像行（实际 ${JSON.stringify(globalRows().map((r) => r.title))}）`
+  );
+
+  // 正向对照：守卫必须只挡「冲突」，数字一致的同标题跨项目偏好仍必须升维 ——
+  // 否则把 promote 整段关掉也能让上面两条「反证」变绿，那是假绿。
+  const okTitle = "缓存实例连接基线约定";
+  await savePref(`${env.project}_ok_a`, okTitle, "缓存统一走端口 6379，超时保持默认值");
+  await savePref(`${env.project}_ok_b`, okTitle, "缓存统一走端口 6379，超时保持默认值");
+  assert.strictEqual(
+    globalRows().filter((r) => String(r.title || "") === okTitle).length,
+    1,
+    "门5b 正向对照：数字一致的同标题跨项目偏好必须照常升维为 1 条 global 画像（证明守卫只挡冲突，不挡收敛）"
+  );
+  assert.strictEqual(globalRows().length, globalCountBeforeProbe + 1, "门5b：除合法对照画像外不得多出任何 global 行");
+  const okProfile = globalRows().filter((r) => String(r.title || "") === okTitle)[0];
+  assert.ok(/profile:converged/i.test(String(okProfile.tags)), "门5b 正向对照：合法收敛画像必须带 profile:converged 标签");
+  assert.strictEqual(String(okProfile.content).includes("6379"), true, "门5b 正向对照：合法画像内容必须原样保留一致的端口值");
+
+  // 收尾：删掉对照画像，恢复「只有门4 一条画像」的世界，避免污染后续门7 断言
+  memoryStore.delete(Number(okProfile.id));
+  assert.strictEqual(globalRows().length, globalCountBeforeProbe, "门5b 收尾：对照画像清理后 global 行数必须复原");
+  console.log("  ✓ 门5b 通过：端口/版本冲突不升维，数字一致仍照常收敛。\n");
+
+  // =================================================================
   // 门6：异步信箱
   // =================================================================
   console.log("▶ [门6] 【异步信箱】未读通知必须提示并单次消费，已读不得重复提示...");
@@ -231,6 +374,27 @@ try {
   assert.ok(/Unread Agent Mail/.test(String(ctx6.block || "")), "门6 正向：目标项目 context 必须提示未读邮件");
   assert.strictEqual(ctx6.mailbox && ctx6.mailbox.unread, 1, "门6 正向：mailbox.unread 必须精确计数");
   assert.deepStrictEqual(ctx6.mailbox.ids, [mail.id], "门6 正向：mailbox.ids 必须精确指向该封邮件");
+
+  // ---- 【M1 咬死门·信箱侧】mail:unread 同样只允许在顶层置顶区块出现一次 ----
+  const ctx6Body = bodyOnly(ctx6.block);
+  assert.ok(
+    !String(ctx6Body).includes("【变更通知】memories 表新增接力列"),
+    "M1 咬死：mail:unread 邮件绝不得在常规正文二次出现（置顶提示 + 正文打印＝一份通知吃两份预算）"
+  );
+  assert.ok(
+    !String(ctx6Body).includes(`[context#${mail.id}]`),
+    `M1 咬死：邮件 #${mail.id} 绝不得以普通记忆身份在正文重复打印`
+  );
+  assert.ok(!/\bmail:unread\b/i.test(String(ctx6Body)), "M1 咬死：常规正文绝不得出现 mail:unread 控制标记");
+  assert.ok(
+    !String(ctx6Body).includes("第二棒：变异反证已补齐"),
+    "M1 咬死：仍在 open 状态的交接棒同样不得在常规正文出现"
+  );
+  assert.strictEqual(
+    (String(ctx6.block || "").match(/Unread Agent Mail/g) || []).length,
+    1,
+    "M1 咬死：同一封未读邮件在全量上下文里只允许出现 1 次"
+  );
 
   const mailRow = rowsOf(await env.client.list("memories", { project: env.project, id: mail.id }))[0];
   assert.ok(/mail:read/i.test(String(mailRow.tags)), "门6 正向：消费后必须标记 mail:read");

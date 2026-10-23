@@ -29,6 +29,8 @@ const memoryStore = new Map();
 const pitfallStore = new Map();
 let nextId = 9000;
 let updateCalls = 0;
+// 全部写库 payload 逐条留痕：M2 咬死门要直接检查压缩写进去的字段，绝不只看内存对象
+const updateLog = [];
 
 const mockDbClient = {
   list: async (table, params = {}) => {
@@ -61,6 +63,7 @@ const mockDbClient = {
       throw err;
     }
     updateCalls++;
+    updateLog.push({ table, id: Number(id), keys: Object.keys(data || {}), data: { ...(data || {}) } });
     const updated = { ...existing, ...data };
     store.set(id, updated);
     return updated;
@@ -75,9 +78,16 @@ const mockDbClient = {
 function cleanup() {
   memoryStore.clear();
   pitfallStore.clear();
+  updateLog.length = 0;
 }
 function residueCount() {
   return memoryStore.size + pitfallStore.size;
+}
+/** 库内回查：重新 list 出该行，绝不复用内存里的旧引用（复用会让「写没写 updated_at」这件事失真） */
+async function rowOf(id) {
+  const res = await mockDbClient.list("memories", { id });
+  const rows = Array.isArray(res && res.data) ? res.data : Array.isArray(res) ? res : [];
+  return rows[0];
 }
 function oldStamp(days) {
   return new Date(Date.now() - days * DAY).toISOString().slice(0, 19).replace("T", " ");
@@ -142,7 +152,9 @@ console.log("▶ [1] compactColdContent 纯正则抽取：首句摘要 + 关键 
 // -----------------------------------------------------------------
 console.log("\n▶ [2] compactColdMemories 冷记忆抽取压缩：原文留存 full_text、tags 追加 compacted");
 {
-  const idCold = seed({ project: testProject, category: "context", title: "MySQL 连接池事故归档", tags: "mysql,deploy", content: longColdContent, updated_at: oldStamp(120) });
+  // 压缩前逐字节快照：M2 咬死门的比对基准（绝不在断言里重新 oldStamp()，跨秒会抖动成 flaky）
+  const coldStamp = oldStamp(120);
+  const idCold = seed({ project: testProject, category: "context", title: "MySQL 连接池事故归档", tags: "mysql,deploy", content: longColdContent, updated_at: coldStamp });
   const idPrinciple = seed({ project: testProject, category: "principle", title: "连接池铁律", tags: "mysql", content: longColdContent, updated_at: oldStamp(120) });
   const idFresh = seed({ project: testProject, category: "context", title: "最新排查", tags: "mysql", content: longColdContent, updated_at: oldStamp(3) });
   const idShort = seed({ project: testProject, category: "context", title: "短记录", tags: "mysql", content: "短记忆不足 240 字，不参与冷压缩。", updated_at: oldStamp(200) });
@@ -158,8 +170,42 @@ console.log("\n▶ [2] compactColdMemories 冷记忆抽取压缩：原文留存 
   assert.ok(cold.content.includes("3306"), "浓缩正文必须保住端口等关键 Token");
   assert.ok(String(cold.tags).split(",").includes("compacted"), "tags 必须追加 compacted 标记");
   assert.ok(String(cold.tags).includes("mysql"), "原有 tags 必须保留，不得清空");
-  // 【变异 M2 反证】冷压缩是后台瘦身维护，updated_at 必须与压缩前逐字节完全相等，严禁篡改时间戳导致冷记忆满血复活霸榜
-  assert.strictEqual(cold.updated_at, oldStamp(120), "【变异 M2 反证】压缩写库 payload 绝不得改写 updated_at，时间戳必须逐字节等于压缩前");
+
+  // ---- 【M2 咬死门】压缩是后台瘦身维护，绝不允许借机刷新 updated_at ----
+  // 变异 M2：在 compactColdRow 的写库 payload 里塞一个 updated_at —— 下面三条必须全部转红。
+  const coldUpdates = updateLog.filter((u) => u.table === "memories" && u.id === Number(idCold));
+  assert.strictEqual(coldUpdates.length, 1, `冷压缩必须且只能对冷记忆发起 1 次 update，实际 ${coldUpdates.length}`);
+  const coldPayload = coldUpdates[0].data;
+  assert.ok(
+    !Object.prototype.hasOwnProperty.call(coldPayload, "updated_at"),
+    `M2 咬死：压缩写库 payload 绝不得包含 updated_at（实际字段：${coldUpdates[0].keys.join(",")}）——`
+      + "一旦写入，120 天冷记忆的 freshness 会满血复活、重新霸占上下文预算"
+  );
+  assert.ok(
+    !Object.prototype.hasOwnProperty.call(coldPayload, "last_used_at"),
+    "M2 咬死：压缩同样绝不得写 last_used_at（freshness 取两者的最大值，写它等价于刷新时间戳）"
+  );
+  const coldReadBack = await rowOf(idCold);
+  assert.ok(coldReadBack, "压缩后必须能按 id 回查到该行");
+  assert.strictEqual(
+    coldReadBack.updated_at,
+    coldStamp,
+    `M2 咬死：压缩后库内 updated_at 必须与压缩前逐字节完全相等（期望 ${coldStamp}，实际 ${coldReadBack.updated_at}）`
+  );
+  assert.ok(
+    Buffer.from(String(coldReadBack.updated_at), "utf8").equals(Buffer.from(String(coldStamp), "utf8")),
+    "M2 咬死：updated_at 必须逐字节一致（杜绝时区/格式/舍入漂移冒充「没改」）"
+  );
+  assert.strictEqual(String(coldReadBack.tags), String(cold.tags), "内存对象与库内 tags 必须一致，否则紧随其后的去重合并会拿旧 tags 回写");
+  assert.strictEqual(
+    coldReadBack.content,
+    compactColdContent(longColdContent).text,
+    "压缩后库内 content 必须逐字等于新摘要（不得保留原文，也不得用裸截断冒充）"
+  );
+  assert.notStrictEqual(coldReadBack.content, longColdContent, "反证：压缩后 content 绝不得仍是原文");
+  const coldTagsInDb = String(coldReadBack.tags).split(",").map((t) => t.trim()).filter(Boolean);
+  assert.ok(coldTagsInDb.includes("compacted"), `压缩后库内 row.tags 必须包含 compacted，实际 ${coldReadBack.tags}`);
+  assert.ok(coldTagsInDb.includes("mysql") && coldTagsInDb.includes("deploy"), "压缩后库内 tags 必须保留原有 mysql/deploy，不得被 compacted 覆盖");
 
   assert.strictEqual(memoryStore.get(idPrinciple).content, longColdContent, "principle 类记忆绝不允许被压缩");
   assert.strictEqual(memoryStore.get(idFresh).content, longColdContent, "60 天内更新过的记忆绝不允许被压缩");
@@ -186,6 +232,88 @@ console.log("\n▶ [2] compactColdMemories 冷记忆抽取压缩：原文留存 
   console.log("  ✓ 冷压缩 + 幂等 + 反证全部通过");
 }
 
+// -----------------------------------------------------------------
+// 3b. 【M2/M3 咬死门】同批巡检内压缩→去重：compacted 绝不得被合并抹除
+// -----------------------------------------------------------------
+console.log("\n▶ [3b] 同批巡检（压缩→去重）：compacted 标签绝不得被合并回写抹除");
+{
+  memoryStore.clear();
+  pitfallStore.clear();
+  updateLog.length = 0;
+
+  // 纯中文无数字长文：与副本的数字集合同为空 → 不构成数字冲突，去重才可能正常成组。
+  // （若正文带数字，压缩摘要与原文的数字集合大小不同会被 hasConflictingNumbers 判为冲突而不成组，
+  //   下面的标签断言就会空转成假绿——这正是本次要堵的盲区。）
+  const opsLong = [
+    "值班交接时必须逐项核对连接池参数与超时配置，并把核对结论写回值班记录，避免下一班同学重复排查。",
+    "核对顺序是先看等待队列，再看慢查询，两者同时抬头才说明是池子被打满而不是下游变慢。",
+    "发现长事务未提交时，先确认业务代码的 finally 分支是否漏掉归还动作，再翻一遍批量写库路径。",
+    "服务端日志里大量出现超时与连接过多时，先对齐时间戳，再判断是突发流量还是连接泄漏。",
+    "抽样查看进程列表里长期占位的空闲连接，占比过高就要怀疑应用侧没有正确关闭连接。",
+    "归还超时下调之后仍不回落，再考虑扩容只读副本并限流，限流阈值按峰值留足余量。",
+    "所有判据都要写回运维手册，并在值班交接单里注明根因判据，避免下一班同学误判方向。",
+  ].join("\n");
+  assert.ok(opsLong.length > 240, `3b 前置：测试正文必须 >240 字才够冷压缩门槛，实际 ${opsLong.length}`);
+  assert.ok(!/\d/.test(opsLong), "3b 前置：测试正文绝不得含数字，否则去重会因数字集合不等而拒绝成组");
+
+  const idMergePrimary = seed({ project: testProject, category: "context", title: "值班交接核对清单", tags: "ops,archive", content: opsLong, recurrence: 5, updated_at: oldStamp(150) });
+  const idMergeDup = seed({ project: testProject, category: "context", title: "值班交接核对清单", tags: "ops", content: opsLong, recurrence: 1, updated_at: oldStamp(2) });
+
+  // 【关键】压缩与去重必须在「同一次巡检、同一批内存对象」内发生：
+  // memoryAudit 先 compactColdBatch(rows)，再对同一批 rows 做去重合并。
+  // 若压缩只把新 tags 写进库、没有同步回写内存 row.tags，紧随其后的合并会拿旧 tags 覆盖回去 —— 变异 M3。
+  const auditRes2 = JSON.parse(await memoryAudit(mockDbClient, { project: testProject, audit_model: "off" }, { project: testProject }, {}));
+  assert.strictEqual(auditRes2.action, "DEDUP_REPORT", "3b 前置：审计必须返回 DEDUP_REPORT");
+
+  const primaryPacks = updateLog.filter((u) => u.table === "memories" && u.id === Number(idMergePrimary));
+  const compressPack = primaryPacks.find((u) => u.keys.includes("full_text"));
+  assert.ok(compressPack, `3b 前置：本批巡检必须真的对冷记忆执行压缩写库，实际 payload 键：${JSON.stringify(primaryPacks.map((u) => u.keys))}`);
+  assert.ok(compressPack.keys.includes("content") && compressPack.keys.includes("tags"), "3b 前置：压缩 payload 必须同时写 content 与 tags");
+  assert.ok(
+    !compressPack.keys.includes("updated_at"),
+    "M2 咬死（周期巡检路径）：压缩 payload 同样绝不得包含 updated_at，否则每轮巡检都给冷记忆续命"
+  );
+
+  assert.ok(
+    Number(auditRes2.deduped && auditRes2.deduped.memories) >= 1,
+    `3b 前置：去重必须真的合并了那条副本（实际 ${JSON.stringify(auditRes2.deduped)}），否则下面的标签断言等于空转`
+  );
+
+  const dupAfter = await rowOf(idMergeDup);
+  assert.ok(dupAfter, "3b 前置：副本必须仍可按 id 回查到");
+  assert.strictEqual(dupAfter.lifecycle_status, "invalid", "3b 前置：副本必须被软失效并入主记录");
+  assert.ok(/dedup:/.test(String(dupAfter.invalid_reason)), `3b 前置：副本失效原因必须是去重合并，实际 ${dupAfter.invalid_reason}`);
+
+  const expectedOps = compactColdContent(opsLong).text;
+  const primaryAfter = await rowOf(idMergePrimary);
+  assert.strictEqual(primaryAfter.lifecycle_status, "active", "3b 前置：主记录必须存活（否则标签断言观测的是尸体）");
+  assert.strictEqual(
+    primaryAfter.content,
+    expectedOps,
+    "M3 咬死：同批「压缩→合并」后 content 必须逐字等于新摘要，合并绝不得把正文回滚成原文"
+  );
+  assert.notStrictEqual(primaryAfter.content, opsLong, "反证：合并后 content 绝不得仍是原文（否则压缩白做）");
+  assert.strictEqual(primaryAfter.full_text, opsLong, "M3 咬死：合并绝不得丢失 full_text 原文");
+
+  const mergedTags = String(primaryAfter.tags).split(",").map((t) => t.trim()).filter(Boolean);
+  assert.ok(
+    mergedTags.includes("compacted"),
+    `M3 咬死：去重合并回写 tags 绝不得抹除 compacted（实际 ${primaryAfter.tags}）——压缩时若不同步内存 row.tags，合并会拿旧 tags 把刚打的标冲掉`
+  );
+  assert.ok(mergedTags.includes("ops") && mergedTags.includes("archive"), "3b 正向：合并后原有 tags 必须全部保留");
+
+  // 同一断言的最锐位置：去重合并那一次 update 的 payload 本身就必须带 compacted
+  const tagPacks = primaryPacks.filter((u) => u.keys.includes("tags"));
+  const mergeTagPack = tagPacks[tagPacks.length - 1];
+  assert.ok(mergeTagPack && /compacted/.test(String(mergeTagPack.data.tags)),
+    `M3 咬死：最后一次（去重合并）回写的 tags payload 必须带 compacted，实际 ${mergeTagPack && mergeTagPack.data.tags}`);
+  assert.ok(
+    primaryPacks.indexOf(compressPack) < primaryPacks.indexOf(mergeTagPack),
+    "3b 前置：压缩写库必须先于去重合并回写，顺序颠倒说明没走「同一批」路径，断言就不成立"
+  );
+  assert.strictEqual(String(primaryAfter.updated_at), String(mergeTagPack.data.updated_at), "3b 前置：库里最终 updated_at 必须来自最后一次合并回写（证明合并确实落库）");
+  console.log("  ✓ 3b 通过：同批「压缩→合并」后 compacted 仍在，content 仍为摘要。");
+}
 // -----------------------------------------------------------------
 // 4. memoryAudit 主动矛盾检测巡检
 // -----------------------------------------------------------------
