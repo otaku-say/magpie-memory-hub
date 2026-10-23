@@ -503,6 +503,8 @@ async function execute(action, cfg, fs, sp, state, options) {
           }));
 
         memories = activeMemories.concat(activePitfallSnapshots).slice(0, 500);
+        // 刷新快照必须顺带刷新协作卡片：协作三区块与 inject 卡共用同一状态位，
+        // 不带 detail 地覆写会把已渲染的 handoff/profile/health 冲成空态。
         let collabSnap = null;
         try {
           collabSnap = await collectCollabSnapshot(client, prj);

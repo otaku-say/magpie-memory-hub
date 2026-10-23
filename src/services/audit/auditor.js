@@ -143,7 +143,7 @@ export async function memoryAudit(client, cfg, args, ctx) {
     memLastId = rawRows[rawRows.length - 1].id;
     totalScannedMemories += rows.length;
 
-    _accumulateColdStats(coldStats, await compactColdBatch(client, rows, now, batchTs, rollingLogs));
+    mergeColdStats(coldStats, await compactColdBatch(client, rows, now, batchTs, rollingLogs)); // 累加而非覆盖
     contradictions.push(...lintContradictions(rows));
     // b) 内存中全量规则级查重（指纹相同 / 归一化标题相同 / tags 交集）覆盖整批记录
     const batchDupIds = new Set();
@@ -957,29 +957,37 @@ function isColdCompactable(row, cutoff) {
   return ref > 0 && ref < cutoff;
 }
 
-/** 压缩单条记录：原文搬进 full_text（已有则原样保留）、content 换摘要、tags 追加 compacted */
-async function compactColdRow(client, row, now) {
+/** 压缩单条记录：原文搬进 full_text（已有则原样保留）、content 换摘要、tags 追加 compacted。
+ *  绝不改写 updated_at：压缩是后台瘦身维护，篡改时间戳会让 120 天冷记忆的 freshness 满血复活霸榜。 */
+async function compactColdRow(client, row) {
   const res = compactColdContent(row.content);
   if (!res.text || res.saved_ratio < 0.6) return null;
   const tags = tagsOf(row);
   if (!tags.includes("compacted")) tags.push("compacted");
+  const fullTextVal = String(row.full_text || row.content);
+  const newTagsStr = tags.join(",");
   await client.update("memories", row.id, {
     content: res.text,
-    full_text: String(row.full_text || row.content),
-    tags: tags.join(","),
-    updated_at: now,
+    full_text: fullTextVal,
+    tags: newTagsStr,
   });
+  // 同步回写内存对象：紧随其后的去重合并以 row.tags 为准，不同步会把刚写入的 compacted 标签冲掉
+  row.content = res.text;
+  row.full_text = fullTextVal;
+  row.tags = newTagsStr;
   return { id: row.id, saved_chars: res.original_length - res.saved_length, saved_ratio: res.saved_ratio };
 }
 
-/** 批量压缩（memoryAudit 主循环与手动信标共用）：内部 fail-open，绝不向上抛错 */
-function _accumulateColdStats(target, src) {
-  if (!src) return;
-  target.scanned += (src.scanned || 0);
-  target.compacted += (src.compacted || 0);
-  target.saved_chars += (src.saved_chars || 0);
-  if (Array.isArray(src.ids)) target.ids.push(...src.ids);
+/** 多批冷压缩统计合并：四个字段一律相加，绝不覆盖（覆盖会让前序批次的压缩量凭空消失） */
+function mergeColdStats(acc, batch) {
+  acc.scanned += batch.scanned;
+  acc.compacted += batch.compacted;
+  acc.saved_chars += batch.saved_chars;
+  acc.ids.push(...batch.ids);
+  return acc;
 }
+
+/** 批量压缩（memoryAudit 主循环与手动信标共用）：内部 fail-open，绝不向上抛错 */
 async function compactColdBatch(client, rows, now, ts, rollingLogs) {
   const stats = { scanned: Array.isArray(rows) ? rows.length : 0, compacted: 0, saved_chars: 0, ids: [] };
   if (!Array.isArray(rows) || !client || typeof client.update !== "function") return stats;
@@ -988,7 +996,7 @@ async function compactColdBatch(client, rows, now, ts, rollingLogs) {
     if (stats.compacted >= COLD_MAX_PER_RUN) break;
     if (!isColdCompactable(row, cutoff)) continue;
     try {
-      const r = await compactColdRow(client, row, now);
+      const r = await compactColdRow(client, row);
       if (!r) continue;
       stats.compacted++;
       stats.saved_chars += r.saved_chars;
