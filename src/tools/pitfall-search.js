@@ -91,6 +91,7 @@ export async function pitfallSearch(client, cfg, rawArgs) {
   }
 
   const hasOrig = origTerms.length > 0;
+  tm.mark("rewrite");
   const hasRewrite = rewrittenTerms.length > 0;
 
   const scored = pool
