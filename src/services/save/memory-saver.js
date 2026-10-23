@@ -153,7 +153,9 @@ export async function saveMemory(client, cfg, m, ctx) {
   }
 
   // 当 targetSupersedeId 有效时，跳过 dup 与 crossDup 的 NOOP 短路（显式取代是最高优先级意图）
-  if (!hasValidSupersede) {
+  const isTransientBatonOrMail = /\b(?:handoff:open|mail:unread)\b/i.test(tags);
+  // 当 targetSupersedeId 有效或为交接棒/信件时，跳过常规 dup 与 crossDup 检查
+  if (!hasValidSupersede && !isTransientBatonOrMail) {
     // 2) Layer ① 语义指纹查重 + Layer ② 局部滑动窗口语义相似度比对
     const dup = findSemanticDuplicate(categoryRows, title, content, fp);
   if (dup) {
