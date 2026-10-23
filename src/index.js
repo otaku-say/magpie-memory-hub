@@ -103,9 +103,10 @@ const TOOLS = {
         max_items: { type: "integer", description: "最多条数，默认取插件配置" },
         max_chars: { type: "integer", description: "字符预算，默认取插件配置" },
         max_principles: { type: "number", description: "置顶准则条数上限，默认 3（含最新准则保底席位）" },
+        claim_handoff: { type: "boolean", description: "是否单次核销认领当前项目的跨 Agent 待接力任务（默认 false 只提示不核销）" },
       },
     },
-    run: (args, ctx) => memoryContext(ctx._client, ctx._cfg, args),
+    run: (args, ctx) => memoryContext(ctx._client, ctx._cfg, args, ctx),
   },
 
   memory_get: {

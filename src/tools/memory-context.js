@@ -12,7 +12,7 @@ import { isMemoryValid } from "../domain/validity.js";
 import { trackMemoryRetrievals } from "../services/audit/scheduler.js";
 import { rewriteSearchQuery } from "../integration/provider-models.js";
 
-export async function memoryContext(client, cfg, rawArgs) {
+export async function memoryContext(client, cfg, rawArgs, ctx) {
   const args = normalizeToolArgs(rawArgs, cfg);
   const maxItems = Number(args.max_items) || cfg.maxInject || 5;
   const budget = Number(args.max_chars) || cfg.maxBudget || 2048;
@@ -51,30 +51,22 @@ export async function memoryContext(client, cfg, rawArgs) {
       fetchAll(client, "memories", Object.assign({}, fetchParams, { project: projectArg })),
       fetchAll(client, "memories", Object.assign({}, fetchParams, { project: "global" })),
     ]);
-    const seen = new Set();
-    const all = [];
-    for (const r of projRows) {
-      const uid = r.id != null ? r.id : `${r.project}:${r.title}`;
-      if (!seen.has(uid)) {
-        seen.add(uid);
-        all.push(r);
-      }
-    }
-    for (const r of globalRows) {
-      const uid = r.id != null ? r.id : `${r.project}:${r.title}`;
-      if (!seen.has(uid)) {
-        seen.add(uid);
-        all.push(r);
-      }
-    }
-    pool = all.filter((r) => r.lifecycle_status !== "superseded" && isMemoryValid(r));
-    pool = pool.filter((r) => String(r.project || "") === projectArg || String(r.project || "") === "global");
+    // 项目行优先合并 global 穿透行，按 id 去重后再统一做有效性与归属过滤
+    pool = _mergeRowsDedup(projRows, globalRows).filter((r) => {
+      if (r.lifecycle_status === "superseded" || !isMemoryValid(r)) return false;
+      const pj = String(r.project || "");
+      return pj === projectArg || pj === "global";
+    });
   } else {
     if (projectArg) fetchParams.project = projectArg;
     const all = await fetchAll(client, "memories", fetchParams);
     pool = all.filter((r) => r.lifecycle_status !== "superseded" && isMemoryValid(r));
     if (projectArg) pool = pool.filter((r) => String(r.project || "") === projectArg);
   }
+
+  // 【BUG-460-1b】handoff:open / mail:unread 属于控制行，已由末尾 _detectAndClaimHandoff 置顶单次输出；
+  // 这里必须从常规候选集剔除，否则同一控制行会以普通记忆身份在正文被二次打印（重复注入 + 白占预算）。
+  pool = pool.filter((r) => !HANDOFF_OPEN_TAG.test(String(r.tags || "")) && !MAIL_UNREAD_TAG.test(String(r.tags || "")));
 
   // 2. 自动合并当前 project 与 global 下的 principle 准则，当前项目优先，全局兜底，杜绝全局准则丢失
   const maxPrinciples = Number(args.max_principles ?? cfg.max_principles ?? 3) || 3;
@@ -131,6 +123,10 @@ export async function memoryContext(client, cfg, rawArgs) {
   const hasRewrite = rewrittenTerms.length > 0;
 
   const principleIds = new Set(principles.map((p) => p.id));
+  // 【BUG-460-1d】新仓库冷启动：当前项目专属记忆为 0 时，global 收敛画像在词面上必然 0 命中，
+  // 会被 hit>0 的过滤直接丢弃 → 给保底召回分并整层优先，保证用户个人习惯零配置生效。
+  const coldStart = Boolean(rawQuery) && Boolean(projectArg) && projectArg !== "global"
+    && !pool.some((r) => String(r.project || "") === projectArg);
   const scored = pool
     .filter((r) => !principleIds.has(r.id))
     .map((r) => {
@@ -149,7 +145,9 @@ export async function memoryContext(client, cfg, rawArgs) {
         combinedHit = rewriteHit;
       }
 
-      return { row: r, hit: combinedHit, origHit, rewriteHit };
+      // 冷启动保底：词面 0 命中的收敛画像补到「1 个词命中标题」的分值，避免被 hit>0 门槛筛掉
+      const floor = coldStart && _isConvergedProfile(r) ? COLD_START_PROFILE_FLOOR : 0;
+      return { row: r, hit: Math.max(combinedHit, floor), origHit, rewriteHit };
     })
     .filter((x) => x.hit > 0)
     .sort((a, b) => {
@@ -160,6 +158,8 @@ export async function memoryContext(client, cfg, rawArgs) {
       }
       return b.hit - a.hit || rankMemory(b.row) - rankMemory(a.row);
     });
+  // 保底分只保证入场；排序让收敛画像整层优先，避免被高词面分的老 global 记忆挤出 max_items 预算
+  if (coldStart) scored.sort((a, b) => (_isConvergedProfile(b.row) ? 1 : 0) - (_isConvergedProfile(a.row) ? 1 : 0));
 
   // 3. 同时拉取 pitfalls 表，支持跨项目穿透，匹配 Top 3 踩坑经验
   let pitfallPool = [];
@@ -384,7 +384,7 @@ export async function memoryContext(client, cfg, rawArgs) {
     dynamicAgentHint += ` 另有 ${nearCrystallization.length} 条偏好/决策再印证 1 次即可结晶为准则。`;
   }
 
-  const handoffDigest = await _detectAndClaimHandoff(client, projectArg, rawArgs, rawArgs); // 交接棒置顶 + 信箱未读（见文件末尾私有辅助）
+  const handoffDigest = await _detectAndClaimHandoff(client, projectArg, rawArgs, ctx); // 交接棒置顶 + 信箱未读（见文件末尾私有辅助）
   block = handoffDigest.lines + block; n += handoffDigest.count;
 
   const contextResult = {
@@ -416,6 +416,31 @@ export async function memoryContext(client, cfg, rawArgs) {
 
 const HANDOFF_OPEN_TAG = /\bhandoff:open\b/i;
 const MAIL_UNREAD_TAG = /\bmail:unread\b/i;
+
+// 冷启动保底分：等价于 1 个查询词命中标题的权重（scoreMemory 标题命中 5 分），
+// 取此值只保证画像「不被词面门槛筛掉」，真正的前排由 coldStart 分层排序负责。
+const COLD_START_PROFILE_FLOOR = 5;
+
+// 收敛画像判定：跨项目画像收敛（memory-saver 的 _promoteCrossProjectProfile）写入的
+// project=global / scope_level=user 个人习惯，tags 带 profile:converged，origin 为 profile-convergence
+function _isConvergedProfile(row) {
+  if (!row || String(row.project || "") !== "global") return false;
+  if (row.invalid_at) return false;
+  return /profile:converged/i.test(String(row.tags || "")) || String(row.origin || "") === "profile-convergence";
+}
+
+// 项目行 + 全局穿透行合并去重：项目行优先，按 id（无 id 回退 project:title）去重，保持首见顺序
+function _mergeRowsDedup(primary, secondary) {
+  const seen = new Set();
+  const out = [];
+  for (const r of (primary || []).concat(secondary || [])) {
+    const uid = r.id != null ? r.id : `${r.project}:${r.title}`;
+    if (seen.has(uid)) continue;
+    seen.add(uid);
+    out.push(r);
+  }
+  return out;
+}
 
 // 记录排序用的时间戳（NCB 返回 "YYYY-MM-DD HH:MM:SS"，需换成可 parse 的形态）
 function _tsOfRow(row) {
@@ -450,7 +475,7 @@ function _mailLine(row) {
  * @param {object} client NCB 客户端
  * @param {string} project 当前项目命名空间
  * @param {object} rawArgs 原始工具入参（claim_handoff 只认显式 true，避免归一化误判）
- * @param {object} ctx 调用上下文（仅用于记录认领者，可为空）
+ * @param {object} ctx 调用上下文：host 透传的 ctx 在 _ctx 上，故认领者按 ctx.agent → ctx._ctx.agent 取
  * @returns {Promise<{lines:string,count:number,active:object|null,mailbox:object|null}>}
  */
 async function _detectAndClaimHandoff(client, project, rawArgs, ctx) {
@@ -488,13 +513,16 @@ async function _detectAndClaimHandoff(client, project, rawArgs, ctx) {
     };
     const claim = Boolean(rawArgs && (rawArgs.claim_handoff === true || rawArgs.claim_handoff === "true"));
     if (claim) {
-      const claimedBy = String((ctx && (ctx.agent || ctx.client)) || "unknown");
+      const claimedBy = String((ctx && (ctx.agent || (ctx._ctx && ctx._ctx.agent) || ctx.client)) || "unknown");
       try {
         // Claim-Once：改写为 claimed 并软失效，后续 Agent 不再重复消费；
         // 写失败时保持 open（宁可下次重复看到，也不丢失接力信息）
         await client.update("memories", h.id, {
           tags: String(h.tags || "").replace(/\bhandoff:open\b/gi, "handoff:claimed"),
           invalid_at: nowSql(),
+          // 【BUG-460-1c】只写 invalid_at 会让 lifecycle_status 仍为 active：
+          // 任何按 lifecycle_status=active 的列表/穿透查询都会把它当成活行重新捞回来，故必须同步置 invalid。
+          lifecycle_status: "invalid",
           invalid_reason: "handoff_claimed_by:" + claimedBy,
           updated_at: nowSql(),
         });
@@ -522,6 +550,7 @@ async function _detectAndClaimHandoff(client, project, rawArgs, ctx) {
         await client.update("memories", mail.id, {
           tags: String(mail.tags || "").replace(/\bmail:unread\b/gi, "mail:read"),
           invalid_at: nowSql(),
+          lifecycle_status: "invalid", // 与 invalid_at 同步，避免 active 列表把它当活行重新捞回
           invalid_reason: "mail_consumed",
           updated_at: nowSql(),
         });
