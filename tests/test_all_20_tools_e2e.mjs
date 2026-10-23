@@ -350,7 +350,8 @@ async function run() {
     // -----------------------------------------------------------------
     console.log(`[21/21] Testing memory_audit...`);
     {
-      const res = await tools.memory_audit.execute({ project: env.project }, {});
+      const rawRes = await tools.memory_audit.execute({ project: env.project }, {});
+      const res = parseOut(rawRes);
       console.log("  memory_audit return:", JSON.stringify(res).slice(0, 160));
       assert.ok(res !== undefined, "memory_audit should return result object");
       assert.strictEqual(res.action, "DEDUP_REPORT", "memory_audit action should be DEDUP_REPORT");

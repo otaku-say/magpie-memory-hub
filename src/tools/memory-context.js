@@ -23,24 +23,11 @@ export async function memoryContext(client, cfg, rawArgs, ctx) {
   const fetchParams = {
     lifecycle_status: "active",
     columns: [
-      "id",
-      "project",
-      "category",
-      "scope_level",
-      "client",
-      "origin",
-      "title",
-      "content",
-      "tags",
-      "related_entities",
-      "confidence_score",
-      "recurrence",
-      "retrieval_count",
-      "last_used_at",
-      "updated_at",
-      "lifecycle_status",
-      "invalid_at",
-      "expires_at",
+      "id", "project", "category", "scope_level",
+      "client", "origin", "title", "content",
+      "tags", "related_entities", "confidence_score", "recurrence",
+      "retrieval_count", "last_used_at", "updated_at",
+      "lifecycle_status", "invalid_at", "expires_at",
     ],
   };
 
@@ -244,8 +231,10 @@ export async function memoryContext(client, cfg, rawArgs, ctx) {
   // 说明：曾用 process.argv 检测测试文件名来切换输出格式（省略 #id），
   // 这会让「测试通过」依赖文件名而生产行为不一致，已移除。格式在测试与生产完全统一。
 
+  const quota = _calcQuota(rawQuery, scored.length, maxItems, topPitfalls.length > 0);
+  let prCount = 0;
   for (const pr of principles) {
-    if (n >= maxItems) break;
+    if (n >= maxItems || prCount >= quota.maxPr) break;
     const idTag = pr.id != null ? `#${pr.id}` : "";
     const prEntStr = Array.isArray(pr.related_entities)
       ? pr.related_entities.join(",")
@@ -256,12 +245,14 @@ export async function memoryContext(client, cfg, rawArgs, ctx) {
     block += line;
     matchedMemories.push(pr);
     n++;
+    prCount++;
   }
 
   const pitfallThreshold = Number(args.pitfall_recurrence_threshold ?? cfg?.pitfall_recurrence_threshold ?? 3) || 3;
 
+  let pitCount = 0;
   for (const pit of topPitfalls) {
-    if (n >= maxItems) break;
+    if (n >= maxItems || (quota.hasHits && (n >= maxItems - quota.reserved && pitCount >= quota.maxPit))) break;
     const comp = pit.component || "general";
     const idTag = pit.id != null ? `#${pit.id}` : "";
     const rec = Number(pit.recurrence) || 1;
@@ -272,6 +263,7 @@ export async function memoryContext(client, cfg, rawArgs, ctx) {
     if (block.length + line.length > budget) break;
     block += line;
     n++;
+    pitCount++;
   }
 
   for (const x of scored) {
@@ -563,4 +555,20 @@ async function _detectAndClaimHandoff(client, project, rawArgs, ctx) {
   digest.lines = lines.join("");
   digest.count = count;
   return digest;
+}
+
+/**
+ * 槽位动态配额计算：当用户传入显式 query 且存在打分命中项时，必须为目标记忆预留席位，
+ * 杜绝通用准则与踩坑占满全部 maxItems 导致用户真正查询的记忆被 100% 饿死（终审阻断项）。
+ */
+function _calcQuota(rawQuery, scoredLen, maxItems, hasPitfalls) {
+  const hasHits = Boolean(rawQuery) && scoredLen > 0;
+  if (!hasHits) return { reserved: 0, maxPr: maxItems, maxPit: maxItems, hasHits: false };
+  const reserved = Math.min(scoredLen, Math.max(2, Math.floor(maxItems * 0.4)));
+  return {
+    reserved,
+    hasHits: true,
+    maxPr: Math.max(1, maxItems - reserved - (hasPitfalls ? 1 : 0)),
+    maxPit: Math.max(1, maxItems - reserved - 1),
+  };
 }
