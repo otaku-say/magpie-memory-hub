@@ -60,7 +60,9 @@ export async function saveMemory(client, cfg, m, ctx) {
     : (callerTurn && callerTurn >= 1 ? Math.floor(callerTurn) : null);
 
   const initialRecurrence = typeof m.recurrence === "number" && m.recurrence >= 1 ? Math.floor(m.recurrence) : 1;
-  const fp = (m.content_fingerprint && String(m.content_fingerprint).trim()) || semanticFingerprint(project, category, title, content, tags);
+  // BUG-460-2a：交接棒（handoff:open / m.handoff）/ 跨项目信件（mail:unread）是瞬时物件，永不参与内容去重
+  const isTransientBatonOrMail = _isTransientBatonOrMail(m, tags);
+  const fp = _resolveFingerprint(m, project, category, title, content, tags, isTransientBatonOrMail);
 
   // 0) 进程内近期写入 → 挡掉写后读延迟窗口里的重复
   if (justWritten("m:" + project + ":" + fp) || justWritten("m:" + fp)) {
@@ -74,9 +76,7 @@ export async function saveMemory(client, cfg, m, ctx) {
 
   // BUG-38-2 / BUG-39-2: 支持显式指定 supersede_id（严格校验项目归属与有效性，前置到踩坑优先拦截之前）
   const hasSupersedeParam = m.supersede_id !== undefined && m.supersede_id !== null && m.supersede_id !== "";
-  const targetSupersedeId = (hasSupersedeParam && !isNaN(Number(m.supersede_id)) && Number(m.supersede_id) > 0)
-    ? Number(m.supersede_id)
-    : null;
+  const targetSupersedeId = (hasSupersedeParam && !isNaN(Number(m.supersede_id)) && Number(m.supersede_id) > 0) ? Number(m.supersede_id) : null;
   let targetSupersedeRow = targetSupersedeId
     ? allActiveRows.find((r) =>
         r.id === targetSupersedeId &&
@@ -106,8 +106,8 @@ export async function saveMemory(client, cfg, m, ctx) {
   }
   const hasValidSupersede = Boolean(targetSupersedeId && targetSupersedeRow);
 
-  // 0.5) A③ 踩坑优先：检查 pitfalls 表中是否已存在该工程问题（principle 准则豁免，且显式 supersede 时跳过）
-  if (category !== "principle" && !hasValidSupersede) {
+  // 0.5) A③ 踩坑优先：pitfalls 已存在该问题时以踩坑为准（principle / 显式 supersede / 瞬时物件均豁免）
+  if (category !== "principle" && !hasValidSupersede && !isTransientBatonOrMail) {
     try {
       const pitfallRows = rowsOf(await client.list("pitfalls", { project, limit: FETCH_LIMIT }));
       const normTitle = normalizeSemanticText(title);
@@ -152,9 +152,7 @@ export async function saveMemory(client, cfg, m, ctx) {
     }
   }
 
-  // 当 targetSupersedeId 有效时，跳过 dup 与 crossDup 的 NOOP 短路（显式取代是最高优先级意图）
-  const isTransientBatonOrMail = /\b(?:handoff:open|mail:unread)\b/i.test(tags);
-  // 当 targetSupersedeId 有效或为交接棒/信件时，跳过常规 dup 与 crossDup 检查
+  // 显式取代意图 / 交接棒 / 跨项目信件：一律跳过 Layer① ② 常规 dup 短路（BUG-460-2a）
   if (!hasValidSupersede && !isTransientBatonOrMail) {
     // 2) Layer ① 语义指纹查重 + Layer ② 局部滑动窗口语义相似度比对
     const dup = findSemanticDuplicate(categoryRows, title, content, fp);
@@ -283,7 +281,7 @@ export async function saveMemory(client, cfg, m, ctx) {
   // 2.1) A② 跨类别去重：同 project + 归一化 title + 不同 category
   const normTitle = normalizeSemanticText(title);
   const otherCategoryRows = allActiveRows.filter((r) => r.category !== category);
-  const crossDup = otherCategoryRows.find((r) => {
+  const crossDup = isTransientBatonOrMail ? null : otherCategoryRows.find((r) => {
     if (hasConflictingNumbers(title, r.title)) return false;
     if (hasConflictingNumbers(content, r.content || r.full_text || "")) return false;
     const rNormTitle = normalizeSemanticText(r.title);
@@ -470,7 +468,8 @@ export async function saveMemory(client, cfg, m, ctx) {
     if (s && s.id) allSupersedeIds.add(s.id);
   }
 
-  if (allSupersedeIds.size > 0 && newId) {
+  // BUG-460-2a：瞬时物件不走同标题 UPDATE 覆写（旧棒交给 _supersedeStaleHandoffs），显式取代除外
+  if (allSupersedeIds.size > 0 && newId && (!isTransientBatonOrMail || hasValidSupersede)) {
     let updatedCount = 0;
     for (const sid of allSupersedeIds) {
       try {
@@ -567,13 +566,46 @@ export async function saveMemory(client, cfg, m, ctx) {
  * ================================================================== */
 
 const HANDOFF_OPEN_TAG_RE = /\bhandoff:open\b/i;
+const MAIL_UNREAD_TAG_RE = /\bmail:unread\b/i;
+
+/** BUG-460-2a：本次写入是否是交接棒——tags 含 `handoff:open`，或调用方显式声明 m.handoff === true。 */
+function _isHandoffBaton(m, tags) {
+  if (m && (m.handoff === true || m.handoff === "true")) return true;
+  return HANDOFF_OPEN_TAG_RE.test(String(tags || "") + "," + String((m && m.tags) || ""));
+}
+
+/**
+ * BUG-460-2a：判定本次写入是否属于"一次性瞬时物件"——交接棒（handoff）或跨项目信件（mail）。
+ * 二者每写一次都必须独立成行：新棒代表新进展，新信代表新通知；一旦被指纹/语义/踩坑去重
+ * 吞成 NOOP，接力方读到的就是过期交接单，跨项目通知则永久静默丢失。
+ */
+function _isTransientBatonOrMail(m, tags) {
+  const tagStr = String(tags || "") + "," + String((m && m.tags) || "");
+  return _isHandoffBaton(m, tags) || MAIL_UNREAD_TAG_RE.test(tagStr);
+}
+
+/**
+ * BUG-460-2a 配套：解析内容指纹。
+ * 数据库有 (project, content_fingerprint) 唯一索引（schema.js: idx_memories_uniq_fp），
+ * 内容逐字相同的新交接棒/新信件会被索引拦下、在 catch 里退化成 NOOP——这正是"新棒被吞"的第二条暗路。
+ * 因此瞬时物件的指纹追加一次性尾缀（总长 ≤ 64，仍符合 VARCHAR(64)）：它是"这一次写入"的身份，
+ * 而非"这份内容"的哈希；普通记忆仍走纯语义指纹，去重语义完全不变。
+ */
+function _resolveFingerprint(m, project, category, title, content, tags, isTransient) {
+  const explicit = (m && m.content_fingerprint && String(m.content_fingerprint).trim()) || "";
+  if (explicit) return explicit;
+  const base = semanticFingerprint(project, category, title, content, tags);
+  if (!isTransient) return base;
+  const nonce = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  return (base + ":" + nonce).slice(0, 64);
+}
 
 /**
  * 新交接棒写入后，把同项目内旧的 open 交接棒标记为已被取代。
  * 单一有效接力棒原则：旧棒留着会让新 Agent 接到过期的"下一步"。
  */
-async function _supersedeStaleHandoffs(client, project, newId, allActiveRows, tags) {
-  if (!HANDOFF_OPEN_TAG_RE.test(String(tags || ""))) return 0;
+async function _supersedeStaleHandoffs(client, project, newId, allActiveRows, tags, forcedBaton) {
+  if (!forcedBaton && !HANDOFF_OPEN_TAG_RE.test(String(tags || ""))) return 0;
   const stale = (allActiveRows || []).filter((r) =>
     r && Number(r.id) !== Number(newId) && !r.invalid_at &&
     (!r.lifecycle_status || r.lifecycle_status === "active") &&
@@ -618,14 +650,36 @@ async function _promoteCrossProjectProfile(client, project, m, category, tags, t
     if (r.lifecycle_status && r.lifecycle_status !== "active") continue;
     if (String(r.project || "") === "global") continue;
     if (normalizeSemanticText(r.title) !== normTitle) continue;
+    /* BUG-460-2b：同标题但数值/版本/端口冲突的记录绝不得并入同一条全局画像。
+     * 否则「Node 18 构建」与「Node 20 构建」会被合成为一条自相矛盾的个人习惯，
+     * 冷启动仓库注入后反而误导 Agent。冲突两侧各自留在原项目，谁也不升维。 */
+    if (hasConflictingNumbers(title, r.title)) continue;
+    if (hasConflictingNumbers(content, r.content || r.full_text || "")) continue;
     projects.add(String(r.project || ""));
   }
   if (projects.size < 2) return null;
 
-  // 幂等：global 下已有同标题画像则复用，避免每次印证都新增一条
+  /* 幂等：global 下已有同标题画像则复用该行，只按覆盖项目数同步 recurrence，
+   * 绝不重复生成第二条（历史重复脏行也只会被复用首条，不再放大）。 */
   const existingGlobal = (await fetchAll(client, "memories", { project: "global" }))
-    .filter((r) => r && !r.invalid_at && normalizeSemanticText(r.title) === normTitle);
-  if (existingGlobal.length > 0) return existingGlobal[0];
+    .filter((r) => r && !r.invalid_at
+      && (!r.lifecycle_status || r.lifecycle_status === "active")
+      && normalizeSemanticText(r.title) === normTitle);
+  if (existingGlobal.length > 0) {
+    const profile = existingGlobal[0];
+    const nextRecurrence = Math.max(Number(profile.recurrence) || 1, projects.size);
+    const profileConflict = hasConflictingNumbers(title, profile.title)
+      || hasConflictingNumbers(content, profile.content || profile.full_text || "");
+    if (!profileConflict && nextRecurrence > (Number(profile.recurrence) || 1)) {
+      try {
+        await client.update("memories", profile.id, { recurrence: nextRecurrence, updated_at: nowSql() });
+        profile.recurrence = nextRecurrence;
+      } catch (_) {
+        // fail-open：复发度回写失败只影响画像权重，画像本身仍可用
+      }
+    }
+    return profile;
+  }
 
   const now = nowSql();
   const profileTags = "profile, profile:converged, " + cat;
@@ -668,7 +722,7 @@ async function _processHandoffAndProfile(client, project, newId, allActiveRows, 
   if (!newId) return null;
   let handoffSuperseded = 0;
   try {
-    handoffSuperseded = await _supersedeStaleHandoffs(client, project, newId, allActiveRows, tags);
+    handoffSuperseded = await _supersedeStaleHandoffs(client, project, newId, allActiveRows, tags, _isHandoffBaton(m, tags));
   } catch (_) {
     // fail-open：核销失败只会留下多条 open 交接棒，不影响本次写入结果
   }

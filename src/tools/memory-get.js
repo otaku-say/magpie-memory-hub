@@ -24,7 +24,22 @@ async function _applyHelpfulFeedback(client, table, id, hit, count, now, helpful
   } catch (_) {
     return null; // 访问计数/反馈写失败不阻塞读取（fail-open）
   }
+  if (helpful) {
+    // BUG-460-4b：库内已提权，内存对象必须同步，否则回显给调用方的仍是提权前的旧分
+    hit.confidence_score = patch.confidence_score;
+    hit.recurrence = patch.recurrence;
+  }
   return helpful ? "helpful" : null;
+}
+
+/**
+ * BUG-460-4b：提权当次把「库内已生效」的 confidence_score / recurrence 回显到返回体。
+ * 只有 fbApplied 为真才调用，未提权路径不新增任何字段，保持旧返回体零侵入。
+ */
+function _applyFeedbackEcho(rec, hit, fbApplied) {
+  rec.feedback_applied = fbApplied;
+  rec.confidence_score = Number(hit.confidence_score);
+  rec.recurrence = Number(hit.recurrence) || 1;
 }
 
 export async function memoryGet(client, cfg, rawArgs) {
@@ -196,7 +211,7 @@ export async function memoryGet(client, cfg, rawArgs) {
           const fbApplied = await _applyHelpfulFeedback(client, "memories", tid, hit, count, now, helpful);
           // 先落库（含 helpful 提权）再装配返回体，保证 count / confidence 与回显一致
           const rec = formatMemoryRecord(hit, count, now, await getSupersededHistory(hit));
-          if (fbApplied) rec.feedback_applied = fbApplied;
+          if (fbApplied) _applyFeedbackEcho(rec, hit, fbApplied);
           items.push(rec);
         }
       }
@@ -230,7 +245,7 @@ export async function memoryGet(client, cfg, rawArgs) {
     // 先落库（含 helpful 提权）再装配返回体，保证 count / confidence 与回显一致
     const rec = formatMemoryRecord(hit, count, now,
       await getSupersededHistory(hit));
-    if (fbApplied) rec.feedback_applied = fbApplied;
+    if (fbApplied) _applyFeedbackEcho(rec, hit, fbApplied);
     return jsonOut(rec);
   }
 }
