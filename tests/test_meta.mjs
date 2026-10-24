@@ -157,7 +157,7 @@ export function runMetaCheck(options = {}) {
   }
 
   // 强断言：锁定当前活跃测试文件总数（新增 adversarial_v629_gate.mjs 后为 44 个）
-  assert.strictEqual(testFiles.length, 94, "测试文件总数断言：期望精确 94 个（新增 test_adversarial_timeout_and_rerank.mjs 后同步更新，不得放宽为 >= 掩盖误删）");
+  assert.strictEqual(testFiles.length, 95, "测试文件总数断言：期望精确 95 个（新增 test_adversarial_full_qa.mjs 后同步更新，不得放宽为 >= 掩盖误删）");
 
   // 反证测试 1：验证门禁对写 global 恶意用例具备拦截能力
   const fakeSample = `

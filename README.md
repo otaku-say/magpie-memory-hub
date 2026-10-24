@@ -3,7 +3,7 @@
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
 [![Version](https://img.shields.io/badge/version-v6.47.0-blue.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-94%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-95%20passed-brightgreen.svg)](tests/)
 [![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
 
 ---

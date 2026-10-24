@@ -1,5 +1,5 @@
 /**
- * 模块职责：定时去重时间窗口计算与触发判定
+ * 模块职责：定时去重时间窗口计算、触发判定与模型调用超时归一化
  * 依赖：无
  * 被依赖：src/services/audit/scheduler.js, src/services/audit/auditor.js, tools.js
  */
@@ -68,4 +68,26 @@ export function isDedupDue(opts) {
   }
 
   return false;
+}
+
+/**
+ * 模型调用超时归一化（全仓唯一实现）。
+ *
+ * 优先级：显式毫秒 > 秒配置 > 兜底值；结果夹紧到 [500ms, 120s]。
+ * 为什么下限是 500ms：Node 会把 0/负数/NaN 的 setTimeout 夹到 1ms，
+ * 那会让所有模型调用「瞬间 abort」——表现为在线模型永远不可用。
+ *
+ * 曾被复制粘贴在 provider-models / classify / extract 三个文件顶部，
+ * 既挡住模块注释头（结构门禁），也让三处下限各自漂移。
+ */
+export function safeTimeoutMs(directMs, secValue, fallbackMs) {
+  const direct = Number(directMs);
+  if (Number.isFinite(direct) && direct > 0) {
+    return Math.max(500, Math.min(120000, direct));
+  }
+  const sec = Number(secValue);
+  if (Number.isFinite(sec) && sec > 0) {
+    return Math.max(500, Math.min(120000, sec * 1000));
+  }
+  return fallbackMs;
 }

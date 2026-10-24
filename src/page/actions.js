@@ -104,6 +104,11 @@ export function readAction(options) {
   return {
     op, id,
     at: Number(a.at) || 0,
+    /* project 必须透传：下游 sync_snapshot / collectCollabSnapshot 都读 action.project，
+     * 早先漏了这个字段，导致信标指定的项目被静默丢弃、回落到 global ——
+     * 表现为「点刷新快照却拉到别的项目（或全局）的数据」，属于跨项目污染。
+     * 长度上限 200 只是防御性约束，避免脏数据把状态文件撑大。 */
+    project: a.project ? String(a.project).trim().slice(0, 200) : "",
     database: a.database ? String(a.database) : "",
     confirm: a.confirm ? String(a.confirm) : "",
     on_exist: a.on_exist ? String(a.on_exist) : "",
@@ -171,7 +176,9 @@ export async function runPendingAction(options, cfg) {
     // P1 清库纵深：严格校验时间戳有效性（fail-closed）。0/NaN/负数/超 5 分钟均拒绝，
     // 防止伪造或重放的老信标触发破坏性清库（覆盖 state.missing 分支的盲区）。
     const atNum = Number(action.at);
-    if (!Number.isFinite(atNum) || atNum <= 0 || (Date.now() - atNum > STALE_MS)) {
+    /* 未来时间戳同样必须拒绝：否则伪造一条 at=明天 的信标就能绕过「5 分钟陈旧」判定，
+     * 长期驻留在 options 里，等宿主任意一次加载时执行清库（重放攻击）。 */
+    if (!Number.isFinite(atNum) || atNum <= 0 || atNum > Date.now() + 60 * 1000 || (Date.now() - atNum > STALE_MS)) {
       return {
         ran: false, op: action.op, id: action.id,
         ok: false, action: "NOOP",
@@ -183,6 +190,7 @@ export async function runPendingAction(options, cfg) {
     if (!state.ok) {
       return {
         ran: false, op: action.op, id: action.id,
+        ok: false, action: "NOOP",
         reason: "执行记录文件损坏，无法确认清库任务是否已执行过；为避免重复清库已拒绝执行。" +
           "请在设置页重新点击「清空数据库」。",
       };
@@ -190,6 +198,7 @@ export async function runPendingAction(options, cfg) {
     if (state.missing && action.at > 0 && Date.now() - action.at > STALE_MS) {
       return {
         ran: false, op: action.op, id: action.id,
+        ok: false, action: "NOOP",
         reason: "这条清库信标已提交 " + Math.round((Date.now() - action.at) / 60000) +
           " 分钟，且本地没有它的执行记录（记录可能被删除）。为避免重复清库已拒绝。" +
           "确认要清库请在设置页重新点击「清空数据库」。",

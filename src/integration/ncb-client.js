@@ -77,6 +77,13 @@ export function NcbMcp(opts) {
   this.endpoint = opts.endpoint || MCP_ENDPOINT;
   this.timeout = opts.timeout || DEFAULT_TIMEOUT;
   this.signal = opts.signal || null;
+  /* fetch 可注入：生产走全局 fetch，测试用桩彻底杜绝「测试偷偷打真网」的情况
+   * （曾发生过静态工具名测试因未注入而访问线上 API 的事故）。 */
+  this.fetchImpl = typeof opts.fetch === "function" ? opts.fetch : null;
+  /* 只读调用（握手/列工具/读结构）允许有限重试；写操作默认不重试，
+   * 避免网络抖动导致 INSERT 被执行两次。 */
+  var r = Number(opts.retries);
+  this.retries = Number.isFinite(r) ? Math.max(0, Math.min(3, Math.floor(r))) : 2;
   this._seq = 0;
   this._sessionId = null;
   this._initPromise = null;
@@ -84,7 +91,7 @@ export function NcbMcp(opts) {
 }
 
 /** 发一次 JSON-RPC。失败抛异常（含可读原因）。 */
-NcbMcp.prototype.rpc = async function (method, params, isNotification, callOpts) {
+NcbMcp.prototype._rpcOnce = async function (method, params, isNotification, callOpts) {
   var externalSignal = (callOpts && callOpts.signal) || this.signal;
   if (externalSignal && externalSignal.aborted) {
     var abortErr = new Error("操作已被取消 (aborted)");
@@ -141,8 +148,10 @@ NcbMcp.prototype.rpc = async function (method, params, isNotification, callOpts)
   }
 
   var resp;
+  var doFetch = this.fetchImpl || (typeof fetch === "function" ? fetch : null);
+  if (!doFetch) throw new Error("当前运行时不支持 fetch，无法连接 NoCodeBackend MCP");
   try {
-    resp = await fetch(this.endpoint, {
+    resp = await doFetch(this.endpoint, {
       method: "POST",
       headers: headers,
       body: JSON.stringify(body),
@@ -191,6 +200,31 @@ NcbMcp.prototype.rpc = async function (method, params, isNotification, callOpts)
   return parsed;
 };
 
+/**
+ * 带「有界重试」的 JSON-RPC 入口。
+ * 只重试网络层瞬时失败（fetch failed / ECONNRESET / ETIMEDOUT / ENOTFOUND / EAI_AGAIN），
+ * 且必须由调用方显式传 { retry: true } —— 写操作永不被自动重放。
+ * 超时与主动取消（AbortError）不重试：重试只会把延迟和用户等待翻倍。
+ */
+NcbMcp.prototype.rpc = async function (method, params, isNotification, callOpts) {
+  var attempts = (callOpts && callOpts.retry === true) ? this.retries : 0;
+  var lastErr = null;
+  for (var attempt = 0; attempt <= attempts; attempt++) {
+    try {
+      return await this._rpcOnce(method, params, isNotification, callOpts);
+    } catch (e) {
+      lastErr = e;
+      var msg = String((e && e.message) || e);
+      var transient = !(e && e.name === "AbortError") &&
+        /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|连接 NoCodeBackend MCP 失败/.test(msg);
+      var timedOut = /请求超时/.test(msg);
+      if (!transient || timedOut || attempt === attempts) throw e;
+      await new Promise(function (resolve) { setTimeout(resolve, 150 * (attempt + 1)); });
+    }
+  }
+  throw lastErr;
+};
+
 /** 握手（幂等，可重复调用；失败会抛出可读错误；并发互斥复用 promise）。 */
 NcbMcp.prototype.initialize = async function () {
   if (this._ready) return this._serverInfo;
@@ -217,15 +251,15 @@ NcbMcp.prototype.initialize = async function () {
 /** 列出服务端工具名。 */
 NcbMcp.prototype.listTools = async function () {
   await this.initialize();
-  var res = await this.rpc("tools/list", {});
+  var res = await this.rpc("tools/list", {}, false, { retry: true });
   var tools = (res && res.result && res.result.tools) || [];
   return tools.map(function (t) { return t.name; });
 };
 
 /** 通用工具调用，返回文本；asJson=true 时尽量解析成对象。 */
-NcbMcp.prototype.callTool = async function (name, args, asJson) {
+NcbMcp.prototype.callTool = async function (name, args, asJson, callOpts) {
   await this.initialize();
-  var res = await this.rpc("tools/call", { name: name, arguments: args || {} });
+  var res = await this.rpc("tools/call", { name: name, arguments: args || {} }, false, callOpts);
   var text = unwrapToolText(res);
   return asJson === false ? text : maybeJson(text);
 };
@@ -237,7 +271,8 @@ NcbMcp.prototype.callTool = async function (name, args, asJson) {
 /** 读数据库结构（返回 {instance, tables:{表名:{columns:{列名:{...}}}}}）。 */
 NcbMcp.prototype.getSchema = function (database) {
   // 注意：这里返回的是对象的 JSON 文本，需按对象解析；不可解析时原样返回字符串
-  return this.callTool("get_schema", { database: database });
+  // 只读且幂等：允许有界重试，避免一次网络抖动就让整次初始化失败。
+  return this.callTool("get_schema", { database: database }, undefined, { retry: true });
 };
 
 /** 执行 SQL。sql 可以是单条，也可以是分号分隔的多条（服务端逐条执行）。 */
@@ -285,7 +320,7 @@ export function extractInstance(text, fallback) {
 
 /** 列出账号下的数据库。 */
 NcbMcp.prototype.listDatabases = function () {
-  return this.callTool("list_databases", {});
+  return this.callTool("list_databases", {}, undefined, { retry: true });
 };
 
 /** 配置该数据库的 R2 存储（自动建 bucket + CORS）。 */
