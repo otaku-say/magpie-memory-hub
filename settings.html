@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.46.3</span>
+    <span class="version-tag">v6.47.0</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、R2 存储。</p>
 
@@ -300,6 +300,57 @@
         </div>
         <div class="control">
           <input type="text" id="audit_model" list="magpie_known_models" placeholder="例如：group/claude-3-7-sonnet（留空则回退至提炼模型）" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="model_timeout_sec">大模型通用调用超时 (秒) (model_timeout_sec)</label>
+          <span class="badge rec">默认 30</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">提炼、诊断与分类等任务调用在线大模型的单次超时上限。</div>
+          <div class="hint-diff"><strong>范围</strong>：5~120 秒，推荐 30 秒。大模型响应超时将安全中断并按 fail-open 降级。</div>
+        </div>
+        <div class="control">
+          <div class="input-with-suffix">
+            <input type="number" id="model_timeout_sec" min="5" max="120" step="1" value="30">
+            <span class="input-suffix">秒</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="rerank_timeout_sec">检索重排超时 (秒) (rerank_timeout_sec)</label>
+          <span class="badge rec">默认 15</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">记忆检索与避坑排障中，在线重排模型对粗筛候选进行语义打分与挑选的单次超时。</div>
+          <div class="hint-diff"><strong>范围</strong>：3~60 秒，推荐 15 秒。超时自动触发 fail-open 并回退至词面检索排序，绝不阻塞对话。</div>
+        </div>
+        <div class="control">
+          <div class="input-with-suffix">
+            <input type="number" id="rerank_timeout_sec" min="3" max="60" step="1" value="15">
+            <span class="input-suffix">秒</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <label for="rerank_max_candidates">重排粗筛候选上限 (条) (rerank_max_candidates)</label>
+          <span class="badge rec">默认 10</span>
+        </div>
+        <div class="hint">
+          <div class="hint-desc">每次重排送入大模型的最大候选记录条数。避免因粗筛条目过多撑爆提示词长度与推理生成耗时。</div>
+          <div class="hint-diff"><strong>范围</strong>：3~25 条，推荐 10 条（有效预防 499 超时与大量结构化 token 生成开销）。</div>
+        </div>
+        <div class="control">
+          <div class="input-with-suffix">
+            <input type="number" id="rerank_max_candidates" min="3" max="25" step="1" value="10">
+            <span class="input-suffix">条</span>
+          </div>
         </div>
       </div>
 

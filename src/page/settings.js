@@ -19,7 +19,7 @@
   var CARD_FIELDS = {
     ncb: ["ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init"],
     r2: ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"],
-    model: ["extract_model", "classify_model", "audit_model", "dedup_schedule", "dedup_time", "dedup_weekday", "dedup_day", "dedup_batch_size", "classify_endpoint", "search_rewrite", "search_rerank", "harvest_max_per_min", "harvest_max_total"],
+    model: ["extract_model", "classify_model", "audit_model", "dedup_schedule", "dedup_time", "dedup_weekday", "dedup_day", "dedup_batch_size", "classify_endpoint", "search_rewrite", "search_rerank", "harvest_max_per_min", "harvest_max_total", "model_timeout_sec", "rerank_timeout_sec", "rerank_max_candidates"],
     harvest: ["auto_harvest", "gatewayTimeoutMs"],
     extract: ["inline_extract", "min_confidence"],
     inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"]
@@ -41,7 +41,10 @@
     harvest_max_per_min: 20,
     harvest_max_total: 2000,
     dedup_day: 1,
-    dedup_batch_size: 50
+    dedup_batch_size: 50,
+    model_timeout_sec: 30,
+    rerank_timeout_sec: 15,
+    rerank_max_candidates: 10
   };
   var BOOL = [
     "auto_init",
@@ -449,6 +452,12 @@
       return "每分钟调用上限应在 1~600 之间";
     if (o.harvest_max_total != null && (o.harvest_max_total < 10 || o.harvest_max_total > 100000))
       return "单进程累计上限应在 10~100000 之间";
+    if (o.model_timeout_sec != null && (o.model_timeout_sec < 5 || o.model_timeout_sec > 120))
+      return "大模型调用超时应在 5~120 秒之间";
+    if (o.rerank_timeout_sec != null && (o.rerank_timeout_sec < 3 || o.rerank_timeout_sec > 60))
+      return "重排超时应在 3~60 秒之间";
+    if (o.rerank_max_candidates != null && (o.rerank_max_candidates < 3 || o.rerank_max_candidates > 25))
+      return "重排候选上限应在 3~25 条之间";
     return "";
   }
 
