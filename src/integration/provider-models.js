@@ -1,15 +1,4 @@
 
-function safeTimeoutMs(directMs, secValue, fallbackMs) {
-  const direct = Number(directMs);
-  if (Number.isFinite(direct) && direct > 0) {
-    return Math.max(500, Math.min(120000, direct));
-  }
-  const sec = Number(secValue);
-  if (Number.isFinite(sec) && sec > 0) {
-    return Math.max(500, Math.min(120000, sec * 1000));
-  }
-  return fallbackMs;
-}
 
 /**
  * 模块职责：在线模型调用封装（报错人话解释 / 语义改写 / 检索重排 / 语义查重审计）
@@ -113,6 +102,7 @@ export function cleanQuery(query) {
 }
 
 
+import { safeTimeoutMs } from "../core/time.js";
 import {
   modelBudgetCheck,
   modelBudgetRecord,
@@ -578,6 +568,18 @@ export async function rerankSearchResultsWithModel({
     return null;
   }
 
+  /* 候选来自数据库查询，理论上都是对象；但上游可能塞进 null/字符串/数字
+   * （例如 fetchAll 某页返回脏数据）。此函数对调用方的契约是「严格 fail-open」，
+   * 因此绝不能因为一条脏候选就抛 TypeError —— 那会把整个 memory_search 打挂。 */
+  const safeCandidates = candidates.filter((c) => c && typeof c === "object");
+  if (safeCandidates.length === 0) return null;
+
+  /* maxTop 来自调用方的 limit；负数会让 Array.slice(0, -n) 产生「反向丢弃」语义，
+   * 0 则意味着调用方根本不需要结果。统一收敛到 [0, 50]，0 直接不发起请求。 */
+  const rawTop = Number(maxTop);
+  const topN = Number.isFinite(rawTop) ? Math.max(0, Math.min(Math.floor(rawTop), 50)) : 5;
+  if (topN === 0) return null;
+
   // 开关检查：允许用户在设置中关闭检索增强
   if (options.search_rerank === false) {
     return null;
@@ -607,7 +609,7 @@ export async function rerankSearchResultsWithModel({
   const maxCandidates = (Number.isFinite(rawMax) && rawMax > 0)
     ? Math.max(3, Math.min(25, Math.floor(rawMax)))
     : 10;
-  const candidateSummaries = candidates.slice(0, maxCandidates).map((c) => {
+  const candidateSummaries = safeCandidates.slice(0, maxCandidates).map((c) => {
     const title = String(c.title || (c.component ? `${c.component}: ${c.symptom}` : "")).trim();
     const tags = String(c.tags || "").trim();
     const textBody = String(c.content || c.solution || c.root_cause || "").trim();
@@ -660,14 +662,26 @@ export async function rerankSearchResultsWithModel({
       ? parsed.results
       : [];
 
+    /* 只接受真实存在的主键：id=0 / 负数 / 小数 / 非数字一律丢弃。
+     * 曾经这里只判 id != null，于是模型幻觉出的 id:0 会让 rerankUsed=true，
+     * 结果集却没变 —— 对外表现为「重排成功」的假象（假绿）。 */
     const validRanked = rankedList
       .filter((item) => item && item.id != null)
-      .map((item) => ({
-        id: Number(item.id),
-        score: typeof item.score === "number" ? item.score : 5,
-        reason: String(item.reason || "").trim(),
-      }))
-      .filter((item) => Number.isFinite(item.id) && item.score >= 2);
+      .map((item) => {
+        const id = Number(item.id);
+        const rawScore = typeof item.score === "number" ? item.score : Number(item.score);
+        /* JSON 里的 1e999 会解析成 Infinity；直接透出会让前端排序与展示崩坏，
+         * 统一夹紧到合法区间 [0, 10]（0 分仍会被下面的门槛过滤）。 */
+        let score = Number.isFinite(rawScore) ? rawScore : 5;
+        if (score > 10) score = 10;
+        if (score < 0) score = 0;
+        return {
+          id,
+          score,
+          reason: String(item.reason || "").trim(),
+        };
+      })
+      .filter((item) => Number.isInteger(item.id) && item.id > 0 && item.score >= 2);
 
     if (validRanked.length === 0) return null;
 
@@ -676,7 +690,7 @@ export async function rerankSearchResultsWithModel({
 
     return {
       modelUsed: model,
-      ranked: validRanked.slice(0, maxTop),
+      ranked: validRanked.slice(0, topN),
     };
   } catch (_) {
     // 严格 fail-open：模型超时或异常返回 null，调用方原样回落

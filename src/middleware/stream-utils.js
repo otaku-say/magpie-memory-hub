@@ -178,11 +178,15 @@ function _stripStreamInner(piece, st) {
   var holdLimit = (st && typeof st.holdMax === "number" && st.holdMax > 0) ? st.holdMax : HOLD_MAX;
 
   if (hold === 0) {
-    var i = piece.indexOf(OPEN_TAG);
+    /* 大小写不敏感匹配：<MEMORY>/<Memory> 与 <memory> 在流式与非流式下必须一致。
+     * 曾经这里用区分大小写的 indexOf，导致同一段回复「流式泄漏、非流式被剥离」——
+     * 用户看到的文本取决于是否开流，属于不可接受的行为漂移。 */
+    var lowerPiece = piece.toLowerCase();
+    var i = lowerPiece.indexOf(OPEN_TAG);
     if (i === -1) {
       /* 还可能是 "<mem" 这种被切开的半个标记：先扣住尾部待定部分 */
       for (var L = Math.min(piece.length, OPEN_TAG.length - 1); L > 0; L--) {
-        if (piece.slice(piece.length - L) === OPEN_TAG.slice(0, L)) {
+        if (lowerPiece.slice(piece.length - L) === OPEN_TAG.slice(0, L)) {
           st.memPending = piece.slice(piece.length - L);
           return piece.slice(0, piece.length - L);
         }
@@ -206,8 +210,8 @@ function _stripStreamInner(piece, st) {
     }
 
     var tagStr = rem.slice(0, closeAngle + 1);
-    // 严格保证只认 <memory> 或 <memory >，防止 <memoryManagement> 被误判
-    if (tagStr !== "<memory>" && !/^<memory\s*>$/i.test(tagStr)) {
+    // 严格保证只认 <memory> / <memory >（大小写不敏感），防止 <memoryManagement> 被误判
+    if (!/^<memory\s*>$/i.test(tagStr)) {
       return head + tagStr + stripStream(rem.slice(closeAngle + 1), st);
     }
 
@@ -228,10 +232,11 @@ function _stripStreamInner(piece, st) {
     st.memHold = 1;
     st.memBuf = rem;
     st.memHead = head;
-    var end0 = st.memBuf.indexOf(CLOSE_TAG);
+    var m0 = st.memBuf.match(/<\/memory\s*>/i);
+    var end0 = m0 ? m0.index : -1;
     if (end0 !== -1) {
       st.memHold = 0;   // 同一块内就闭合了，重置状态并支持后续连续块
-      var tail0 = st.memBuf.slice(end0 + CLOSE_TAG.length);
+      var tail0 = st.memBuf.slice(end0 + m0[0].length);
       st.memBuf = "";
       return st.memHead + (tail0 ? stripStream(tail0, st) : "");
     }
@@ -250,10 +255,11 @@ function _stripStreamInner(piece, st) {
 
   if (hold === 1) {
     st.memBuf += piece;
-    var end = st.memBuf.indexOf(CLOSE_TAG);
+    var mEnd = st.memBuf.match(/<\/memory\s*>/i);
+    var end = mEnd ? mEnd.index : -1;
     if (end !== -1) {
       st.memHold = 0;   // 块闭合了，恢复正常透传
-      var tail = st.memBuf.slice(end + CLOSE_TAG.length);
+      var tail = st.memBuf.slice(end + mEnd[0].length);
       st.memBuf = "";
       return tail ? stripStream(tail, st) : "";
     }
@@ -289,8 +295,17 @@ function stripStream(piece, st) {
 }
 
 function stripMemoryBlock(text) {
-  if (!text || text.indexOf("<memory") === -1) return text;
-  return text.replace(/<memory>\s*(?:\[|\{)[\s\S]*?<\/memory>/gi, "").replace(/\n{3,}/g, "\n\n");
+  if (!text || typeof text !== "string") return text;
+  if (text.toLowerCase().indexOf("<memory") === -1) return text;
+  var matched = false;
+  var out = text.replace(/<memory\s*>\s*(?:\[|\{)[\s\S]*?<\/memory\s*>/gi, function () {
+    matched = true;
+    return "";
+  });
+  /* 只有确实剥掉过记忆块，才做空行收敛：
+   * 否则「正文里提到 <memory> 一词」的回复会被顺手改写排版（连续空行被压缩），
+   * 与流式路径（逐块透传、从不重排）行为不一致。 */
+  return matched ? out.replace(/\n{3,}/g, "\n\n") : text;
 }
 
 /* ---------------- fail-open 外壳（最后一道防线） ----------------

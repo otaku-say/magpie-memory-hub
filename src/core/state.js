@@ -86,6 +86,17 @@ export function _recoverCorruptStateFile(p, raw, err) {
     try { fs.renameSync(p, corruptPath); } catch (_) {}
   }
 
+  /* 留下「不可信标记」而不是把文件删干净：
+   * 早先这里 unlink 掉损坏文件，于是下一次 readState 看到「文件不存在」，
+   * 按首次运行处理（_missing:true/_ok:true）—— 结果一条 5 分钟内的清库信标
+   * 会在损坏恢复后的下一跳被放行，等于把 fail-closed 直接架空。
+   * 标记文件里的 __corrupt 会让后续读取持续返回 _ok:false，直到某次
+   * 成功的普通写入（writeState）把状态真正修复为止。 */
+  try {
+    fs.writeFileSync(p, JSON.stringify({ __corrupt: true, at: Date.now(), err: String((err && err.message) || err || "invalid state") }), "utf8");
+    try { fs.chmodSync(p, 0o600); } catch (_) {}
+  } catch (_) {}
+
   const bakPath = `${p}.bak`;
   if (fs.existsSync(bakPath)) {
     try {
@@ -165,6 +176,27 @@ export function readState() {
 
     if (!o || typeof o !== "object") {
       return _recoverCorruptStateFile(p, raw, new Error("state is not an object"));
+    }
+
+    /* 上次恢复留下的「不可信标记」：继续 fail-closed，绝不冒充首次运行。
+     * 只有一次成功的普通写入才会把标记覆盖掉。 */
+    if (o.__corrupt === true) {
+      _cachedState = null;
+      _cachedMtime = 0;
+      _cachedSize = 0;
+      _cachedIno = 0;
+      _cachedPath = null;
+      return {
+        secrets: {},
+        actions: {},
+        gateway_harvest: {},
+        pending_patterns: {},
+        r2_mounts: {},
+        harvest_queue: [],
+        _ok: false,
+        _corrupt: true,
+        _err: String(o.err || "state marked corrupt"),
+      };
     }
 
     const parsed = {
@@ -312,6 +344,15 @@ export function lookupActionState() {
 /** 保存信标动作状态（单一状态源 state.json 维护） */
 export function rememberActionState(actionState) {
   const st = readState();
+  /* 损坏标记只用于拦截「破坏性操作」；当一条非破坏性动作明确要落盘完成态时，
+   * 说明用户已经在界面上重新操作过，此时允许重建一份干净状态（原损坏内容
+   * 已由 _recoverCorruptStateFile 备份为 .corrupt.<ts>，不会丢失取证线索）。
+   * 若不这样做，状态一旦损坏就永久无法写入，用户只能手动删文件才能恢复。 */
+  if (st._ok === false) {
+    st._ok = true;
+    delete st._corrupt;
+    delete st._err;
+  }
   const hist = (actionState && Array.isArray(actionState.history) ? actionState.history : []).slice(-50);
   const doneId = String(actionState?.lastDoneId || "");
   st.lastDoneId = doneId;

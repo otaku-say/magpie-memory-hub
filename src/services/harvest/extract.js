@@ -1,15 +1,4 @@
 
-function safeTimeoutMs(directMs, secValue, fallbackMs) {
-  const direct = Number(directMs);
-  if (Number.isFinite(direct) && direct > 0) {
-    return Math.max(500, Math.min(120000, direct));
-  }
-  const sec = Number(secValue);
-  if (Number.isFinite(sec) && sec > 0) {
-    return Math.max(500, Math.min(120000, sec * 1000));
-  }
-  return fallbackMs;
-}
 
 /**
  * 模块职责: 在线提炼模型调用 (extract_model)、结构化提炼、JSON 解析与字段归一化，以及模型连通性检测
@@ -17,6 +6,7 @@ function safeTimeoutMs(directMs, secValue, fallbackMs) {
  * 被依赖: src/services/harvest/harvest-pipeline.js, src/services/harvest/offline-scan.js, gateway_harvest.hooks.js, gateway_harvest.js
  */
 
+import { safeTimeoutMs } from "../../core/time.js";
 import { _diag } from "./scaffolding.js";
 import { parseExtractionJson } from "./dialog-extract.js";
 import { testClassificationModel } from "./classify.js";
