@@ -1048,6 +1048,24 @@
 
   function refreshCollabBlocks() {
     var s = window.__memhubStatus || null;
+    // 【UX-462-1】刷新动作必须可见：按钮短暂禁用 + 完成提示，杜绝「点了没反应」的静默体验
+    var refreshBtn = $("btn_collab_refresh");
+    var btnLabel = refreshBtn ? refreshBtn.textContent : "";
+    if (refreshBtn) {
+      refreshBtn.disabled = true;
+      refreshBtn.textContent = "刷新中…";
+    }
+    var finishRefresh = function () {
+      if (refreshBtn) {
+        refreshBtn.disabled = false;
+        refreshBtn.textContent = btnLabel || "刷新协作状态";
+      }
+      var stamp = new Date();
+      var hh = String(stamp.getHours()).padStart(2, "0");
+      var mm = String(stamp.getMinutes()).padStart(2, "0");
+      var ss = String(stamp.getSeconds()).padStart(2, "0");
+      say("协作状态已刷新（" + hh + ":" + mm + ":" + ss + "）", "good");
+    };
     var card = (s && (s.collab || s.inject)) || null;
     var detail = (card && card.detail && card.detail.collab) ? card.detail.collab : (card && card.detail ? card.detail : null);
     renderCollabBlocks(detail ? { detail: detail } : card);
@@ -1056,6 +1074,7 @@
       var card2 = (s2 && (s2.collab || s2.inject)) || null;
       var detail2 = (card2 && card2.detail && card2.detail.collab) ? card2.detail.collab : (card2 && card2.detail ? card2.detail : null);
       renderCollabBlocks(detail2 ? { detail: detail2 } : card2);
+      finishRefresh();
     });
   }
 

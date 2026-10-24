@@ -445,6 +445,11 @@ console.log("\n=== 12. 协作卡片真实 DOM 结构断言（card_collab / 各�
     check(re.test(card), `按钮 #${id} 为 type=button 且文案为「${text}」`);
   }
 
+  // 【UX-462-1】刷新协作状态必须可见反馈：按钮禁用态 + 完成提示（防静默刷新被误判“点了没反应”）
+  check(/刷新中…/.test(JS) && JS.includes('say("协作状态已刷新'),
+    "settings.js 刷新协作状态带按钮禁用态与「协作状态已刷新」完成提示");
+  check(/refreshBtn\.disabled = false/.test(JS), "刷新完成后按钮必须恢复可用（不得永久禁用）");
+
   // 跨项目信箱区块：标题 + 未读徽章 + 明确的 Agent Mailbox 语义说明
   check(/<span id="lbl_mailbox">跨项目信箱<\/span>/.test(card), "信箱区块标题为「跨项目信箱」");
   check(/<span class="badge req" id="mailbox_badge">未读提醒<\/span>/.test(card), "信箱区块带「未读提醒」必读徽章");
