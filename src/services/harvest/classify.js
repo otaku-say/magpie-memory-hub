@@ -1,3 +1,16 @@
+
+function safeTimeoutMs(directMs, secValue, fallbackMs) {
+  const direct = Number(directMs);
+  if (Number.isFinite(direct) && direct > 0) {
+    return Math.max(500, Math.min(120000, direct));
+  }
+  const sec = Number(secValue);
+  if (Number.isFinite(sec) && sec > 0) {
+    return Math.max(500, Math.min(120000, sec * 1000));
+  }
+  return fallbackMs;
+}
+
 /**
  * 模块职责: 在线分类模型意图判定 (classify_model / classify_endpoint)，自适应 systemone / chat 端点
  * 依赖: ./scaffolding.js (_diag), src/domain/token-budget.js (modelBudgetCheck, modelBudgetRecord, getInternalModelHeaders)
@@ -32,7 +45,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
   const endpointSetting = String(options.classify_endpoint || "auto").trim().toLowerCase();
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.classify_timeout_ms) || 15000;
+  const timeoutMs = safeTimeoutMs(options.classify_timeout_ms, options.model_timeout_sec, 15000);
   const threshold = typeof options.classify_threshold === "number" ? options.classify_threshold : 0.5;
   const doFetch = options._fetch || globalThis.fetch;
 
@@ -110,6 +123,7 @@ export async function classifyDialogueWithOnlineModel(dialogueText, options = {}
             content: dialogueText.slice(0, 3000),
           },
         ],
+        stream: false,
         temperature: 0.1,
         max_tokens: 10,
       };

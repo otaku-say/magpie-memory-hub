@@ -71,6 +71,15 @@ export function readOptions(options) {
     audit_max_batches: Number(o.audit_max_batches) > 0 ? Number(o.audit_max_batches) : 1,
     rerank_model: o.rerank_model || "",
     classify_endpoint: o.classify_endpoint || "auto",
+    model_timeout_sec: (Number.isFinite(Number(o.model_timeout_sec)) && Number(o.model_timeout_sec) > 0)
+      ? Math.max(5, Math.min(120, Math.floor(Number(o.model_timeout_sec))))
+      : 30,
+    rerank_timeout_sec: (Number.isFinite(Number(o.rerank_timeout_sec)) && Number(o.rerank_timeout_sec) > 0)
+      ? Math.max(3, Math.min(60, Math.floor(Number(o.rerank_timeout_sec))))
+      : undefined,
+    rerank_max_candidates: (Number.isFinite(Number(o.rerank_max_candidates)) && Number(o.rerank_max_candidates) > 0)
+      ? Math.max(3, Math.min(25, Math.floor(Number(o.rerank_max_candidates))))
+      : 10,
     search_rewrite: o.search_rewrite !== false,
     search_rerank: o.search_rerank !== false,
     // 检索可解释性调试开关（设置页「检索可解释性追踪」勾选即落盘）：

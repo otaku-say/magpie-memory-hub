@@ -1,3 +1,16 @@
+
+function safeTimeoutMs(directMs, secValue, fallbackMs) {
+  const direct = Number(directMs);
+  if (Number.isFinite(direct) && direct > 0) {
+    return Math.max(500, Math.min(120000, direct));
+  }
+  const sec = Number(secValue);
+  if (Number.isFinite(sec) && sec > 0) {
+    return Math.max(500, Math.min(120000, sec * 1000));
+  }
+  return fallbackMs;
+}
+
 /**
  * 模块职责：在线模型调用封装（报错人话解释 / 语义改写 / 检索重排 / 语义查重审计）
  * 依赖：src/domain/token-budget.js
@@ -82,17 +95,17 @@ export function cleanQuery(query) {
   if (!query || typeof query !== "string") return "";
   let s = String(query).trim();
   // 剥除自身注入的持久记忆上下文
-  s = s.replace(/\[Persistent Memory Context\][\s\S]*?(?=\n\n|\n\[user\]|\n用户查询|$)/gi, "");
+  s = s.replace(/\[Persistent Memory Context\][\s\S]*?(?=\n\n|\n\[user\]|\n[【\[]?用户查询[】\]]?|$)/gi, "");
   // 剥除自身注入的引导
-  s = s.replace(/\[Memory Agent Guide[\s\S]*?(?=\n\n|\n\[user\]|\n用户查询|$)/gi, "");
-  s = s.replace(/\[Memory Context\][\s\S]*?(?=\n\n|\n\[user\]|\n用户查询|$)/gi, "");
+  s = s.replace(/\[Memory Agent Guide[\s\S]*?(?=\n\n|\n\[user\]|\n[【\[]?用户查询[】\]]?|$)/gi, "");
+  s = s.replace(/\[Memory Context\][\s\S]*?(?=\n\n|\n\[user\]|\n[【\[]?用户查询[】\]]?|$)/gi, "");
   // 剥离子代理委托脚手架
   s = s.replace(/---\s*Context from the delegating agent\s*---[\s\S]*$/gi, "");
   // 剥除常见用户前缀提示
   s = s.replace(/^\[user\]:\s*/i, "");
-  s = s.replace(/^用户查询[：:]\s*/i, "");
-  // 提取如果末尾带有「用户查询：xxx」的实质内容
-  const m = s.match(/(?:^|\n)用户查询[：:]\s*([^\n]+)/i);
+  s = s.replace(/^[【\[]?用户查询[】\]]?[：:]\s*/i, "");
+  // 提取如果带有「【用户查询】：xxx」的实质内容
+  const m = s.match(/(?:^|\n)[【\[]?用户查询[】\]]?[：:]\s*([^\n]+)/i);
   if (m && m[1] && m[1].trim()) {
     s = m[1].trim();
   }
@@ -161,7 +174,7 @@ export async function explainUnknownErrorWithModel({
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.diagnose_timeout_ms) || 15000;
+  const timeoutMs = safeTimeoutMs(options.diagnose_timeout_ms, options.model_timeout_sec, 15000);
   const doFetch = options._fetch || globalThis.fetch;
 
   // 调用预算熔断（v6.20.0 事故修复）：错误诊断属于后台辅助调用，超限直接跳过。
@@ -184,6 +197,7 @@ ${rawError.slice(0, 2000)}
     const url = `${baseUrl}/v1/chat/completions`;
     const payload = {
       model,
+      stream: false,
       messages: [
         { role: "system", content: ERROR_DIAGNOSE_SYSTEM_PROMPT },
         { role: "user", content: userContent },
@@ -297,7 +311,7 @@ export async function rewriteSearchQuery({
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.search_rewrite_timeout_ms) || 12000;
+  const timeoutMs = safeTimeoutMs(options.search_rewrite_timeout_ms, options.model_timeout_sec, 12000);
   const doFetch = options._fetch || globalThis.fetch;
 
   // 调用预算熔断（v6.20.0 事故修复）：搜索改写超限直接跳过，调用方回落纯词面检索。
@@ -312,6 +326,7 @@ export async function rewriteSearchQuery({
     const url = `${baseUrl}/v1/chat/completions`;
     const payload = {
       model,
+      stream: false,
       messages: [
         { role: "system", content: QUERY_REWRITE_SYSTEM_PROMPT },
         { role: "user", content: `用户查询：${rawQuery}` },
@@ -408,7 +423,7 @@ export async function auditMemoriesWithModel({
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.audit_timeout_ms) || 15000;
+  const timeoutMs = safeTimeoutMs(options.audit_timeout_ms, options.model_timeout_sec, 15000);
   const doFetch = options._fetch || globalThis.fetch;
 
   if (!modelBudgetCheck(options).allowed) return null;
@@ -471,6 +486,7 @@ export async function auditMemoriesWithModel({
         const url = `${baseUrl}/v1/chat/completions`;
         const payload = {
           model,
+          stream: false,
           messages: [
             { role: "system", content: AUDIT_SYSTEM_PROMPT },
             { role: "user", content: buildPayload(chunk.mem, chunk.pit) },
@@ -551,11 +567,13 @@ export const RERANK_SYSTEM_PROMPT = `你是一个专业的记忆中枢检索增�
  */
 export async function rerankSearchResultsWithModel({
   query,
+  rawQuery: aliasQuery,
   candidates = [],
   options = {},
   maxTop = 5,
 }) {
-  const rawQuery = cleanQuery(query);
+  const effectiveQuery = query || aliasQuery || "";
+  const rawQuery = cleanQuery(effectiveQuery);
   if (!rawQuery || !Array.isArray(candidates) || candidates.length === 0) {
     return null;
   }
@@ -573,7 +591,7 @@ export async function rerankSearchResultsWithModel({
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.rerank_timeout_ms) || 15000;
+  const timeoutMs = safeTimeoutMs(options.rerank_timeout_ms, options.rerank_timeout_sec || options.model_timeout_sec, 15000);
   const doFetch = options._fetch || globalThis.fetch;
 
   // 调用预算熔断守卫
@@ -585,7 +603,11 @@ export async function rerankSearchResultsWithModel({
   const headers = getInternalModelHeaders(apiKey);
 
   // 提取轻量摘要（Lean Projection）：绝不把数万字全文送给重排模型
-  const candidateSummaries = candidates.slice(0, 25).map((c) => {
+  const rawMax = Number(options.rerank_max_candidates);
+  const maxCandidates = (Number.isFinite(rawMax) && rawMax > 0)
+    ? Math.max(3, Math.min(25, Math.floor(rawMax)))
+    : 10;
+  const candidateSummaries = candidates.slice(0, maxCandidates).map((c) => {
     const title = String(c.title || (c.component ? `${c.component}: ${c.symptom}` : "")).trim();
     const tags = String(c.tags || "").trim();
     const textBody = String(c.content || c.solution || c.root_cause || "").trim();
@@ -598,12 +620,15 @@ export async function rerankSearchResultsWithModel({
     };
   });
 
-  const userContent = `【用户查询】：\n${rawQuery}\n\n【粗筛候选列表（共 ${candidateSummaries.length} 条）】：\n${JSON.stringify(candidateSummaries, null, 2)}\n\n请针对用户查询，从上述候选中挑选最相关、最具价值的条目并重排打分（最高返回 ${maxTop} 条），输出合法 JSON。`;
+  const queryText = String(rawQuery || "").trim();
+
+  const userContent = `【用户查询】：\n${queryText}\n\n【粗筛候选列表（共 ${candidateSummaries.length} 条）】：\n${JSON.stringify(candidateSummaries, null, 2)}\n\n请针对用户查询，从上述候选中挑选最相关、最具价值的条目并重排打分（最高返回 ${maxTop} 条），输出合法 JSON。`;
 
   try {
     const url = `${baseUrl}/v1/chat/completions`;
     const payload = {
       model,
+      stream: false,
       messages: [
         { role: "system", content: RERANK_SYSTEM_PROMPT },
         { role: "user", content: userContent },

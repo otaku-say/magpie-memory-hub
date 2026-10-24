@@ -1,3 +1,16 @@
+
+function safeTimeoutMs(directMs, secValue, fallbackMs) {
+  const direct = Number(directMs);
+  if (Number.isFinite(direct) && direct > 0) {
+    return Math.max(500, Math.min(120000, direct));
+  }
+  const sec = Number(secValue);
+  if (Number.isFinite(sec) && sec > 0) {
+    return Math.max(500, Math.min(120000, sec * 1000));
+  }
+  return fallbackMs;
+}
+
 /**
  * 模块职责: 在线提炼模型调用 (extract_model)、结构化提炼、JSON 解析与字段归一化，以及模型连通性检测
  * 依赖: ./scaffolding.js (_diag), ./dialog-extract.js (parseExtractionJson), ./classify.js (testClassificationModel), src/domain/token-budget.js
@@ -52,7 +65,7 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
 
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
-  const timeoutMs = Number(options.harvest_timeout_ms) || 30000;
+  const timeoutMs = safeTimeoutMs(options.harvest_timeout_ms, options.model_timeout_sec, 30000);
   const doFetch = options._fetch || globalThis.fetch;
 
   // 调用预算熔断（v6.20.0 事故修复）：超限则直接跳过提炼（返回 null = 安全跳过），
@@ -72,6 +85,7 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
     const url = `${baseUrl}/v1/chat/completions`;
     const payload = {
       model,
+      stream: false,
       messages: [
         { role: "system", content: HARVEST_SYSTEM_PROMPT },
         { role: "user", content: dialogueText.slice(0, 8000) },
@@ -160,7 +174,7 @@ export async function testExtractionModel(options = {}) {
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
   // 弃用通用 timeout_ms，采用专名；检测为手动触发，默认放宽至 30 秒 (30000ms)
-  const timeoutMs = Number(options.model_check_timeout_ms || options.extract_timeout_ms) || 30000;
+  const timeoutMs = safeTimeoutMs(options.model_check_timeout_ms || options.extract_timeout_ms, options.model_timeout_sec, 30000);
   const doFetch = options._fetch || globalThis.fetch;
 
   const controller = new AbortController();
