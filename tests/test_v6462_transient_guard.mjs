@@ -139,7 +139,52 @@ try {
   const dupInvalid = dupRows.filter((r) => r.invalid_at);
   assert.strictEqual(dupRows.length, 2, "门1 前置：普通重复对照记忆必须都在库");
   assert.strictEqual(dupInvalid.length, 1, "门1 反证：普通同标题重复记忆仍必须被规则去重精确软失效 1 条（瞬时豁免不得扩大化）");
-  console.log("  ✓ 门1 通过：未消费信件与接力棒零吞没，普通重复仍正常去重。\n");
+
+  // 混排对照（钉死外层/内层两处守卫的独立击杀能力，OBS-1 测试灵敏度加固）：
+  // 顺序1：普通行先入库 → 未读信后入库（钉内层 b 守卫：b 为瞬时行时不得被拉进普通行分组）
+  await saveA({
+    category: "context", scope_level: "session", client: "agent-mix-1",
+    title: "混合样本标题甲",
+    content: "混排对照：普通行与未读信同标题共存场景。",
+  });
+  await saveA({
+    category: "context", scope_level: "session", client: "agent-mix-2",
+    tags: "mail, mail:unread",
+    title: "混合样本标题甲",
+    content: "混排对照：普通行与未读信同标题共存场景。",
+  });
+  // 顺序2：未读信先入库 → 普通行后入库（钉外层 a 守卫：a 为瞬时行时不得把普通行拖进分组）
+  // 普通行用 client.create 直写模拟存量——走 memory_save 会被写入侧同标题逻辑拦成 NOOP/UPDATE，
+  // 到不了 audit 环节就无法钉死外层守卫
+  await saveA({
+    category: "context", scope_level: "session", client: "agent-mix-3",
+    tags: "mail, mail:unread",
+    title: "混合样本标题乙",
+    content: "灰度发布窗口调整为每周三凌晨两点执行。",
+  });
+  await env.client.create("memories", {
+    project: env.project,
+    category: "context",
+    client: "agent-mix-4",
+    scope_level: "project",
+    title: "混合样本标题乙",
+    content: "灰度发布窗口调整为每周三凌晨两点执行。",
+    tags: "mix",
+    lifecycle_status: "active",
+    confidence_score: 100,
+    recurrence: 1,
+    retrieval_count: 0,
+  });
+  const mixAuditRes = parseOut(await memAudit.execute({
+    project: env.project,
+    batch_size: 50,
+    full: true,
+  }, {}));
+  assert.ok(mixAuditRes && typeof mixAuditRes === "object", "门1 混排：二次 audit 必须返回结构化结果");
+  const afterMixRows = rowsOf(await env.client.list("memories", { project: env.project, limit: 200 }));
+  const mixInvalid = afterMixRows.filter((r) => String(r.title || "").includes("混合样本标题") && r.invalid_at);
+  assert.strictEqual(mixInvalid.length, 0, "门1 混排反证：普通行与未读信同标题的两种入库顺序中，任何一条都不得被 audit 去重吞没（外层与内层瞬时守卫必须各自独立生效）");
+  console.log("  ✓ 门1 通过：未消费信件与接力棒零吞没，普通重复仍正常去重，混排两序零误伤。\n");
 
   // =================================================================
   // 门2：handoff:true 自动补齐 handoff:open 标签（BUG-461-2）
