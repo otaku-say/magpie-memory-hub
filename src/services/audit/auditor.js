@@ -145,16 +145,16 @@ export async function memoryAudit(client, cfg, args, ctx) {
 
     mergeColdStats(coldStats, await compactColdBatch(client, rows, now, batchTs, rollingLogs)); // 累加而非覆盖
     contradictions.push(...lintContradictions(rows));
-    // b) 内存中全量规则级查重（指纹相同 / 归一化标题相同 / tags 交集）覆盖整批记录
+    // b) 内存中全量规则级查重（指纹相同 / 归一化标题相同 / tags 交集）覆盖整批记录（BUG-461-1：瞬时控制行豁免，见顶层 isTransientControlRow）
     const batchDupIds = new Set();
     const groups = [];
     for (let i = 0; i < rows.length; i++) {
       const a = rows[i];
-      if (batchDupIds.has(a.id)) continue;
+      if (batchDupIds.has(a.id) || isTransientControlRow(a)) continue;
       const grp = [a];
       for (let j = i + 1; j < rows.length; j++) {
         const b = rows[j];
-        if (batchDupIds.has(b.id)) continue;
+        if (batchDupIds.has(b.id) || isTransientControlRow(b)) continue;
         if (hasConflictingNumbers(a.title, b.title)) continue;
         const contentA = a.content || a.full_text || "";
         const contentB = b.content || b.full_text || "";
@@ -194,11 +194,9 @@ export async function memoryAudit(client, cfg, args, ctx) {
         candidateItemMap.set(g.primary.id, g.primary);
         for (const d of g.duplicates) candidateItemMap.set(d.id, d);
       }
-      // 【P1-2 a】未分组行也要按 chunk 送模型（预算仍受 maxModelBatches 约束）
+      // 【P1-2 a】未分组行也要按 chunk 送模型（预算仍受 maxModelBatches 约束）；【BUG-461-1】瞬时行同样不得进入模型仲裁候选集
       for (const r of rows) {
-        if (!candidateItemMap.has(r.id)) {
-          candidateItemMap.set(r.id, r);
-        }
+        if (!isTransientControlRow(r) && !candidateItemMap.has(r.id)) candidateItemMap.set(r.id, r);
       }
       candidateList = Array.from(candidateItemMap.values());
 
@@ -870,6 +868,17 @@ const TOKEN_PATTERNS = [
 ];
 
 /** 时间戳解析：无法解析一律返回 0（绝不把「不认识的时间」当成「刚刚访问过」） */
+/**
+ * 【BUG-461-1】未消费瞬时控制行判定：tags 含 handoff:open 或 mail:unread。
+ * 这类行生命周期极短（消费/认领后即转 invalid），但"同标题多封"是合法形态——
+ * 不同 Agent 先后投递的同主题通知信 / 新旧交接棒，一旦被周期去重判重软失效，
+ * 接收方在消费前就会永久丢失第二封（静默吞没）。因此规则查重与模型仲裁
+ * 候选集构建必须整层跳过它们。
+ */
+function isTransientControlRow(r) {
+  return /\b(?:handoff:open|mail:unread)\b/i.test(String((r && r.tags) || ""));
+}
+
 function parseStamp(v) {
   if (!v) return 0;
   const ms = Date.parse(String(v).replace(" ", "T"));

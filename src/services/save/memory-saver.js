@@ -40,7 +40,7 @@ export async function saveMemory(client, cfg, m, ctx) {
   const fullText = (m.full_text != null && String(m.full_text).trim() !== "")
     ? scrubSecrets(String(m.full_text))
     : content;
-  const tags = scrubSecrets(String(m.tags || "").trim().toLowerCase());
+  const tags = _normalizeTagsWithHandoff(m, scrubSecrets(String(m.tags || "").trim().toLowerCase()));
   const relatedEntities = scrubSecrets(String(m.related_entities || "").trim());
   const rawConf = typeof m.confidence === "number"
     ? m.confidence
@@ -567,6 +567,20 @@ export async function saveMemory(client, cfg, m, ctx) {
 
 const HANDOFF_OPEN_TAG_RE = /\bhandoff:open\b/i;
 const MAIL_UNREAD_TAG_RE = /\bmail:unread\b/i;
+
+/**
+ * BUG-461-2：调用方仅传 handoff: true（不手写 tags）时自动补齐控制标签。
+ * 下游读取侧（memory_context 的 _detectAndClaimHandoff / 协作快照 collectCollabSnapshot）
+ * 均依赖 /\bhandoff:open\b/i.test(tags) 识别待接力任务——若不自动补齐，
+ * 仅传布尔的记录将永远无法被检出为接力棒。
+ */
+function _normalizeTagsWithHandoff(m, baseTags) {
+  let tags = String(baseTags || "");
+  if (m && (m.handoff === true || m.handoff === "true") && !HANDOFF_OPEN_TAG_RE.test(tags)) {
+    tags = tags ? `${tags}, handoff, handoff:open` : "handoff, handoff:open";
+  }
+  return tags;
+}
 
 /** BUG-460-2a：本次写入是否是交接棒——tags 含 `handoff:open`，或调用方显式声明 m.handoff === true。 */
 function _isHandoffBaton(m, tags) {
