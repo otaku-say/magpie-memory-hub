@@ -20,6 +20,29 @@ const BASELINE_COMMIT = process.env.SPLIT_BASELINE || "2c4a640";
 const BASELINE_FILE = "tools.js";
 const MAX_LINE_DELTA = 5;
 
+/**
+ * 行数变化白名单（豁免「合法功能演进」，但必须逐条精确登记）
+ *
+ * 规则：
+ *   - 只有「相对基线**纯新增**」才算豁免（signedDelta 必须等于登记值，缺一行/多一行都不放行）；
+ *   - 每条必须写明版本号 / 变更提交 / 具体新增内容，说明这 N 行不是顺手改逻辑；
+ *   - 登记后必须仍被真实命中，否则判定为「失效条目」直接失败，防止白名单腐烂成免死金牌；
+ *   - 未登记的漂移一律照旧失败（判定阈值 MAX_LINE_DELTA 不做任何放宽）。
+ */
+const ALLOWED_DRIFT = new Map([
+  [
+    "readOptions",
+    {
+      delta: 13,
+      reason:
+        "v6.47.0(c4286fc)+v6.46 纯增量：新增 model_timeout_sec / rerank_timeout_sec / rerank_max_candidates " +
+        "三个超时与候选上限配置的归一化赋值（3×3 行）+ explain_debug 调试开关（1 行注释组 + 1 行字段）；" +
+        "既有字段的取值逻辑与顺序零改动",
+      file: "src/core/config.js",
+    },
+  ],
+]);
+
 function sh(cmd) {
   return execSync(cmd, { cwd: ROOT, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
 }
@@ -106,22 +129,71 @@ for (const f of walk(ROOT)) {
 }
 console.log(`[现状] 提取到 ${nowFns.size} 个顶层函数`);
 
+function classifyDrift(name, baseLen, now) {
+  const signedDelta = now.len - baseLen;
+  const d = Math.abs(signedDelta);
+  if (d <= MAX_LINE_DELTA) return { kind: "ok", signedDelta };
+  const allow = ALLOWED_DRIFT.get(name);
+  if (allow && signedDelta === allow.delta && now.file === allow.file) {
+    return { kind: "allowed", signedDelta, reason: allow.reason };
+  }
+  return { kind: "drift", signedDelta, diff: d };
+}
+
 const missing = [];
 const drift = [];
+const allowedHits = new Map();
 for (const [name, baseLen] of baseFns) {
   const now = nowFns.get(name);
   if (!now) {
     missing.push(name);
     continue;
   }
-  const d = Math.abs(now.len - baseLen);
-  if (d > MAX_LINE_DELTA) {
-    drift.push({ name, baseLen, nowLen: now.len, diff: d, file: now.file });
+  const verdict = classifyDrift(name, baseLen, now);
+  if (verdict.kind === "allowed") {
+    allowedHits.set(name, { baseLen, nowLen: now.len, delta: verdict.signedDelta, reason: verdict.reason });
+  } else if (verdict.kind === "drift") {
+    drift.push({ name, baseLen, nowLen: now.len, diff: verdict.diff, file: now.file });
   }
 }
 
-if (missing.length === 0 && drift.length === 0) {
-  console.log(`\n✓ ${baseFns.size} 个函数全部存在，且同名函数行数变化均 ≤ ${MAX_LINE_DELTA} 行`);
+// 反证门：白名单必须「精确匹配才放行」，任何偏差都要回归失败，杜绝变成宽松豁免
+const falsifyCases = [
+  { name: "readOptions", baseLen: 62, now: { len: 76, file: "src/core/config.js" }, why: "登记 +13 却涨了 +14 行" },
+  { name: "readOptions", baseLen: 62, now: { len: 70, file: "src/core/config.js" }, why: "登记 +13 却只涨了 +8 行（可能被顺手删逻辑）" },
+  { name: "readOptions", baseLen: 62, now: { len: 75, file: "src/elsewhere.js" }, why: "登记文件与现状不符" },
+  { name: "someUnlistedFn", baseLen: 30, now: { len: 50, file: "src/core/config.js" }, why: "未登记的函数漂移" },
+];
+for (const c of falsifyCases) {
+  const v = classifyDrift(c.name, c.baseLen, c.now);
+  if (v.kind !== "drift") {
+    console.log(`✗ 反证失败：${c.name} 在「${c.why}」时竟被判为 ${v.kind}，白名单过宽`);
+    process.exit(1);
+  }
+}
+console.log(`[反证门] ${falsifyCases.length} 组越界/错配样本全部被正确判为 drift（白名单精确匹配生效）`);
+
+
+// 白名单防腐：登记了却不再命中（函数已回退/改名/文件搬走）说明条目已失效，必须删除
+const staleAllows = [...ALLOWED_DRIFT.keys()].filter((n) => !allowedHits.has(n));
+if (staleAllows.length > 0) {
+  console.log(`\n✗ 以下 ${staleAllows.length} 条白名单已失效（当前未命中登记的行数变化），请删除以免掩盖后续真实漂移：`);
+  for (const n of staleAllows) {
+    const now = nowFns.get(n);
+    console.log(`    - ${n}: 登记 +${ALLOWED_DRIFT.get(n).delta} 行，当前 ${now ? `${baseFns.get(n)} → ${now.len} 行 @ ${now.file}` : "函数缺失/已改名"}`);
+  }
+}
+
+if (allowedHits.size > 0) {
+  console.log(`\n[已登记豁免] ${allowedHits.size} 个函数的行数增长属合法功能演进：`);
+  for (const [n, info] of allowedHits) {
+    console.log(`    + ${n}: ${info.baseLen} → ${info.nowLen} 行（+${info.delta}，精确命中登记值）`);
+    console.log(`      理由: ${info.reason}`);
+  }
+}
+
+if (missing.length === 0 && drift.length === 0 && staleAllows.length === 0) {
+  console.log(`\n✓ ${baseFns.size} 个函数全部存在，且同名函数行数变化均 ≤ ${MAX_LINE_DELTA} 行（另有 ${allowedHits.size} 条已登记豁免）`);
   console.log("✅ check_split_equiv 通过");
   assert.ok(true, "检查通过");
 process.exit(0);

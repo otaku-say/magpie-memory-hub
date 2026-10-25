@@ -9,7 +9,7 @@ import {
   detectDrift, buildStatements, buildDropStatements, describePlan,
   versionUpsertSQL, SCHEMA_VERSION, TABLES, META_TABLE, VERSION_KEY, toNcbTables,
 } from "./schema.js";
-import { rememberSecret, lookupSecret, forgetSecret, rememberDatabase, knownDatabases, lookupRealDatabase, clearAuditCursor, clearHarvestQueue, readState, writeState } from "../core/state.js";
+import { rememberSecret, lookupSecret, forgetSecret, rememberDatabase, knownDatabases, lookupRealDatabase, clearAuditCursor, clearHarvestQueue, readStateForWrite, writeState } from "../core/state.js";
 import { r2Setup, r2Upload, r2Guide, resolveRealDatabase } from "./r2-storage.js";
 import { explainUnknownErrorWithModel, attachAiDiagnosis } from "./provider-models.js";
 
@@ -267,7 +267,7 @@ export async function dbReset(cfg, args) {
       if (typeof clearHarvestQueue === "function") {
         clearHarvestQueue();
       }
-      const st = readState();
+      const st = readStateForWrite();
       // 遍历 state.audit.cursors 清空全部 project（不仅当前）
       if (st.audit && st.audit.cursors && typeof st.audit.cursors === "object") {
         for (const prj of Object.keys(st.audit.cursors)) {
@@ -276,7 +276,9 @@ export async function dbReset(cfg, args) {
           }
         }
       }
-      const freshState = readState();
+      /* 走普通写入通道：若 state 恰好残留 __corrupt 标记，这里会重建干净基座并在
+       * corrupt_recovery 里留下重放窗口，避免「清库清理动作因状态损坏而静默失效」。 */
+      const freshState = readStateForWrite();
       if (freshState.audit && typeof freshState.audit === "object") {
         freshState.audit.cursors = {};
       }
