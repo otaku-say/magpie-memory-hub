@@ -37,6 +37,7 @@ import {
   recordPendingEvidence,
   rememberSecret,
   rememberActionState,
+  lookupActionState,
 } from "../src/core/state.js";
 
 import {
@@ -141,7 +142,8 @@ async function runTests() {
       "仅把 _ok 改成 true 仍必须被 _corrupt 防抹平保护拒绝（否则等于绕过 fail-closed）"
     );
 
-    // 走产品唯一修复通道：rememberActionState 在用户重新操作后重建干净状态（源码内 delete st._corrupt）
+    // 普通写入通道即可重建干净状态（旧实现靠 rememberActionState 内手工 delete st._corrupt 特判，
+    // 本次修复改为 readStateForWrite() 统一重建基座，诊断字段全程不进入待写对象）
     assert.strictEqual(
       rememberActionState({ lastDoneId: "repair_after_corrupt", pendingId: "", history: [] }),
       true,
@@ -169,6 +171,90 @@ async function runTests() {
     else try { fs.unlinkSync(statusJsonPath); } catch (e) { void e; }
     if (origStatusJs !== null) fs.writeFileSync(statusJsPath, origStatusJs, "utf8");
     else try { fs.unlinkSync(statusJsPath); } catch (e) { void e; }
+
+    // 1.2c 损坏恢复设计缺陷（v6.47.1 修复）：__corrupt 标记的语义是「拦截破坏性信标重放 +
+    // readState 如实报告不可信」，绝不是「禁止一切持久化」。修复前：损坏后 rememberSecret /
+    // rememberAuditState / recordPendingEvidence 内部的 writeState 恒返回 false 并被调用方忽略，
+    // pending_patterns 证据永远无法毕业 —— 与 _recoverCorruptStateFile 注释里「直到某次成功的
+    // 普通写入把状态真正修复」自相矛盾。本段同时锁死「普通写入可自愈」与「伪造对象仍拒写」两条边界。
+    try { fs.unlinkSync(testBakFile); } catch (e) { void e; } // 无 .bak 可恢复 = 真·不可信
+    fs.writeFileSync(testStateFile, "{{{ truncated half-written json", "utf8");
+    _resetStateCacheForTests();
+    const corruptAgain = readState();
+    assert.strictEqual(corruptAgain._ok, false, "前置条件：损坏状态下 readState 必须 _ok:false");
+    assert.strictEqual(corruptAgain._corrupt, true, "前置条件：必须带 _corrupt 不可信标记");
+
+    // 1.2c-1 普通写入必须先活过来（修复前这里恒为 false，即缺陷本体）
+    assert.strictEqual(
+      rememberSecret("damaged_db", "secret_after_corrupt"),
+      true,
+      "损坏后 rememberSecret 必须能成功写入（否则普通持久化在用户重新界面操作前永久失效）"
+    );
+    const healedState = readState();
+    assert.strictEqual(healedState._ok, true, "一次成功的普通写入后 readState 必须恢复可信");
+    assert.strictEqual(healedState._corrupt, undefined, "愈合后不得再携带 _corrupt 标记");
+    assert.strictEqual(
+      healedState.secrets["damaged_db"]?.v,
+      "secret_after_corrupt",
+      "愈合写入的 secret 必须真正落盘并可读回"
+    );
+
+    // 1.2c-2 诊断字段（_ok/_missing/_err/_corrupt/_corrupt_at）只该由 readState 在读取时附加，永不落盘
+    const rawAfterHeal = fs.readFileSync(testStateFile, "utf8");
+    const healedOnDisk = JSON.parse(rawAfterHeal);
+    assert.strictEqual(healedOnDisk.__corrupt, undefined, "愈合后磁盘仍残留 __corrupt 标记（下一次 readState 会继续误判不可信）");
+    // 判据用「键名是否以 _ 开头」而不是字符串包含：lastDoneId 之类业务值里出现 after_corrupt 属正常
+    const leakedDiagFields = Object.keys(healedOnDisk).filter((k) => k.startsWith("_"));
+    assert.deepStrictEqual(leakedDiagFields, [], "诊断字段被写进了磁盘：" + leakedDiagFields.join(","));
+
+    // 1.2c-3 反证门：愈合通道绝不放行「从损坏快照派生」的对象（伪造绕过）
+    assert.strictEqual(
+      writeState({ ...corruptAgain, _ok: true }),
+      false,
+      "愈合通道放行了 { ...损坏快照, _ok: true }（等于绕过 fail-closed）"
+    );
+    assert.strictEqual(
+      writeState({ ...corruptAgain, _corrupt: undefined }),
+      false,
+      "只删掉 _corrupt 但仍是 _ok:false 的派生对象也必须拒写"
+    );
+
+    // 1.2c-4 证据链：损坏后 pending 证据必须能累计并毕业（原缺陷下永远停在内存里，无法毕业）
+    const damagedFp = "p:damaged_proj:oom_killed";
+    const damagedPayload = {
+      project: "damaged_proj",
+      component: "worker",
+      symptom: "进程被 OOM Killer 杀掉",
+      solution: "限制并发并增加内存水位告警",
+    };
+    const d1 = recordPendingEvidence(damagedFp, damagedPayload, { kind: "pitfall", minEvidence: 2 });
+    assert.strictEqual(d1.shouldGraduate, false, "首次观测不应毕业");
+    assert.ok(readState().pending_patterns[damagedFp], "首次观测必须落盘（否则证据永远无法累计）");
+    const d2 = recordPendingEvidence(damagedFp, damagedPayload, { kind: "pitfall", minEvidence: 2 });
+    assert.strictEqual(d2.shouldGraduate, true, "第二次观测必须毕业（证据链必须恢复）");
+    assert.strictEqual(readState().pending_patterns[damagedFp], undefined, "毕业后必须从 pending_patterns 中移除");
+    assert.strictEqual(readState()._ok, true, "证据链写入后状态仍必须可信");
+
+    // 1.2c-5 安全不变量：愈合 ≠ 放开清库重放窗口。
+    // 损坏期间可能已有一条清库信标执行完却没落盘（记录丢失），它在 5 分钟内仍可能被重放，
+    // 因此清库门禁 lookupActionState().ok 在重放窗口内必须继续 fail-closed。
+    _resetStateCacheForTests(); // 模拟换进程/页面重载：重放窗口必须能从磁盘读回，不能只活在内存缓存里
+    const actAfterHeal = lookupActionState();
+    assert.strictEqual(actAfterHeal.quarantined, true, "愈合后必须留下重放窗口隔离记录 corrupt_recovery（且能物化读回）");
+    assert.strictEqual(actAfterHeal.ok, false, "愈合后重放窗口内清库门禁竟已放行（fail-closed 被架空）");
+
+    // 反证：窗口过期后必须恢复放行，不得变成清库死锁
+    const stExpire = readState();
+    stExpire.corrupt_recovery = { ...stExpire.corrupt_recovery, until: Date.now() - 1 };
+    assert.strictEqual(writeState(stExpire), true, "改写重放窗口失败");
+    _resetStateCacheForTests();
+    const actExpired = lookupActionState();
+    assert.strictEqual(actExpired.quarantined, false, "重放窗口过期后不得再报隔离中");
+    assert.strictEqual(
+      actExpired.ok,
+      true,
+      "重放窗口过期后清库门禁必须恢复放行（否则清库永久死锁）"
+    );
 
     // 1.4 recordPendingEvidence 踩坑 (pitfall) 语义去重
     _resetStateCacheForTests();

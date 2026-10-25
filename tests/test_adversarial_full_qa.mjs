@@ -724,6 +724,47 @@ await guard("4.9 状态损坏时清库信标 fail-closed", async () => {
   assert.match(String(res.reason), /损坏|无法确认/);
 });
 
+// 4.9b 损坏后普通写入必须自愈（旧缺陷：writeState 恒返回 false，普通持久化在重新界面操作前永久失效），
+// 但自愈绝不能架空清库重放窗口的 fail-closed 防线
+await guard("4.9b 损坏后普通写入自愈且清库门禁不架空", async () => {
+  _resetStateCacheForTests();
+  const p = statePath();
+  try { fs.unlinkSync(p + ".bak"); } catch (e) { void e; }
+  fs.writeFileSync(p, "{ half written json", "utf8");
+  _resetStateCacheForTests();
+  assert.equal(readState()._ok, false, "前置条件：损坏状态必须不可信");
+
+  assert.equal(
+    rememberSecret("qa_heal_db", "qa_heal_secret"),
+    true,
+    "损坏后 rememberSecret 恒失败（普通持久化永久失效缺陷）"
+  );
+  _resetStateCacheForTests();
+  const st = readState();
+  assert.equal(st._ok, true, "普通写入后状态未愈合");
+  assert.equal(st._corrupt, undefined, "愈合后仍带 _corrupt 标记");
+  assert.equal(lookupSecret("qa_heal_db"), "qa_heal_secret", "愈合写入的 secret 读不回（等于没落盘）");
+
+  // 愈合 ≠ 放开重放：损坏期间可能已有一条清库信标执行完却没落盘，它在 5 分钟窗口内仍可能被重放
+  const res = await runPendingAction(
+    { _action: { op: "reset", id: "reset-after-heal-" + Date.now(), at: Date.now(), confirm: "RESET" } },
+    { client: { list: async () => ({ data: [] }) } }
+  );
+  assert.equal(res.ran, false, "愈合后重放窗口内的清库信标竟被执行（fail-closed 被架空）");
+  assert.equal(res.ok, false, "未返回 ok:false");
+
+  // 反证：把重放窗口挪到过去后，新鲜清库信标必须照常放行（不得变成清库死锁）
+  const stExpire = readState();
+  stExpire.corrupt_recovery = { ...stExpire.corrupt_recovery, until: Date.now() - 1 };
+  assert.equal(writeState(stExpire), true, "改写重放窗口失败");
+  _resetStateCacheForTests();
+  const res2 = await runPendingAction(
+    { _action: { op: "reset", id: "reset-after-window-" + Date.now(), at: Date.now(), confirm: "RESET" } },
+    { client: { list: async () => ({ data: [] }) }, options: {} }
+  );
+  assert.equal(res2.ran, true, "重放窗口过期后清库仍被误杀（清库死锁）：" + JSON.stringify(res2.reason));
+});
+
 // 4.10 清库信标时间戳：伪造的 0 / 未来 / 过期都必须拒绝
 await guard("4.10 清库信标时间戳校验", async () => {
   _resetStateCacheForTests();

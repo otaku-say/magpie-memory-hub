@@ -64,6 +64,53 @@ export function _resetStateCacheForTests() {
   _cachedPath = null;
 }
 
+/* 损坏恢复后的「破坏性信标重放窗口」，与 page/actions.js 的清库陈旧阈值 STALE_MS 对齐（5 分钟）。
+ * 为什么需要它：状态损坏期间可能已有一条清库信标执行完、却没来得及把 lastDoneId 落盘。
+ * 那条信标自身在 5 分钟新鲜期内仍可能被重放（幂等比对已经无从查证），因此即使状态随后被
+ * 一次普通写入治愈，清库门禁（lookupActionState().ok）也必须继续 fail-closed 到窗口结束。
+ * 这条隔离记录同时保证「愈合 ≠ 放开重放」，把 __corrupt 原本承担的 fail-closed 职责
+ * 从「禁止一切持久化」精确收窄为「只拦破坏性信标重放」。 */
+export const CORRUPT_REPLAY_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * 读一份「可用于写回」的状态（普通写入通道）。
+ *
+ * 语义边界（关键，别改坏）：
+ *   - 健康快照（_ok:true 且无 _corrupt）→ 原样返回，零额外开销；
+ *   - __corrupt 标记快照（_corrupt:true）→ 重建一份全新干净基座，并把重放窗口写进
+ *     corrupt_recovery。这样一次普通写入（rememberSecret / recordPendingEvidence …）
+ *     就能把状态真正修复 —— 旧实现让 writeState 拒写任何带 _corrupt:true 的对象，
+ *     于是除 rememberActionState 特判外，所有普通持久化在损坏后永久失效、pending 证据
+ *     永远无法毕业，与 _recoverCorruptStateFile 注释「直到某次成功的普通写入把状态真正
+ *     修复」自相矛盾。原损坏内容早已备份为 .corrupt.<ts>，取证线索不会丢。
+ *   - 其它不可信快照（例如 stat/readFile 瞬时失败导致的 _ok:false）→ 原样返回，
+ *     继续被 writeState 拒写：这类失败可能只是读取抖动，绝不能拿空基座去抹平磁盘上的真数据。
+ *
+ * 诊断字段（_ok/_missing/_err/_corrupt/_corrupt_at）只在读取时附加、永不落盘；
+ * 因此「readState() 返回的损坏对象 + 只改 _ok」依旧不是可写对象（它还带着 _corrupt:true），
+ * 而「全新干净完整对象」才能落盘 —— 防伪造绕过的边界由此保持精确。
+ */
+export function readStateForWrite() {
+  const st = readState();
+  if (!st || st._corrupt !== true) return st;
+  const corruptAt = Number(st._corrupt_at) > 0 ? Number(st._corrupt_at) : Date.now();
+  return {
+    current: "",
+    secrets: {},
+    actions: {},
+    audit: {},
+    gateway_harvest: {},
+    pending_patterns: {},
+    r2_mounts: {},
+    harvest_queue: [],
+    corrupt_recovery: {
+      at: corruptAt,
+      until: corruptAt + CORRUPT_REPLAY_WINDOW_MS,
+      err: String(st._err || "state was corrupt"),
+    },
+  };
+}
+
 /** 读状态。带进程内 mtime 缓存，损坏自愈与防抹平保护。 */
 /**
  * 抽公共函数：状态文件损坏时执行自愈与容灾。
@@ -90,10 +137,16 @@ export function _recoverCorruptStateFile(p, raw, err) {
    * 早先这里 unlink 掉损坏文件，于是下一次 readState 看到「文件不存在」，
    * 按首次运行处理（_missing:true/_ok:true）—— 结果一条 5 分钟内的清库信标
    * 会在损坏恢复后的下一跳被放行，等于把 fail-closed 直接架空。
-   * 标记文件里的 __corrupt 会让后续读取持续返回 _ok:false，直到某次
-   * 成功的普通写入（writeState）把状态真正修复为止。 */
+   *
+   * 标记的语义要精确，别扩大成「禁止一切持久化」：
+   *   ① 后续 readState 持续返回 _ok:false，如实报告「不可信」；
+   *   ② 清库这类破坏性信标的重放被拦下（lookupActionState().ok===false）；
+   *   ③ 但它绝不冻结普通持久化 —— 一次成功的普通写入（rememberSecret /
+   *      recordPendingEvidence 等走 readStateForWrite()）会重建一份干净状态并把标记覆盖掉，
+   *      同时留下 corrupt_recovery 重放窗口，让 ② 的防线在窗口内继续生效。 */
+  const corruptAt = Date.now();
   try {
-    fs.writeFileSync(p, JSON.stringify({ __corrupt: true, at: Date.now(), err: String((err && err.message) || err || "invalid state") }), "utf8");
+    fs.writeFileSync(p, JSON.stringify({ __corrupt: true, at: corruptAt, err: String((err && err.message) || err || "invalid state") }), "utf8");
     try { fs.chmodSync(p, 0o600); } catch (_) {}
   } catch (_) {}
 
@@ -115,6 +168,10 @@ export function _recoverCorruptStateFile(p, raw, err) {
           _ok: true,
           _recovered_from_bak: true,
         };
+        // 备份里若已带着重放窗口，恢复时原样继承，绝不因为换了恢复路径就把 fail-closed 丢掉
+        if (bakObj.corrupt_recovery && typeof bakObj.corrupt_recovery === "object") {
+          recovered.corrupt_recovery = bakObj.corrupt_recovery;
+        }
         try {
           fs.copyFileSync(bakPath, p);
           const restat = fs.statSync(p);
@@ -141,6 +198,9 @@ export function _recoverCorruptStateFile(p, raw, err) {
     harvest_queue: [],
     _ok: false,
     _corrupt: true,
+    /* 损坏发生时刻：普通写入愈合时用它锚定 corrupt_recovery 的重放窗口，
+     * 使窗口从「损坏发生」而非「愈合时刻」起算（避免把用户多关 5 分钟）。 */
+    _corrupt_at: corruptAt,
     _err: String((err && err.message) || err || "invalid state object"),
   };
 }
@@ -179,7 +239,7 @@ export function readState() {
     }
 
     /* 上次恢复留下的「不可信标记」：继续 fail-closed，绝不冒充首次运行。
-     * 只有一次成功的普通写入才会把标记覆盖掉。 */
+     * 一次成功的普通写入（走 readStateForWrite 重建干净基座）才会把标记覆盖掉。 */
     if (o.__corrupt === true) {
       _cachedState = null;
       _cachedMtime = 0;
@@ -195,6 +255,7 @@ export function readState() {
         harvest_queue: [],
         _ok: false,
         _corrupt: true,
+        _corrupt_at: Number(o.at) || 0,
         _err: String(o.err || "state marked corrupt"),
       };
     }
@@ -210,6 +271,11 @@ export function readState() {
       harvest_queue: Array.isArray(o.harvest_queue) ? o.harvest_queue : [],
       _ok: true,
     };
+    /* corrupt_recovery 必须物化读回：它是「损坏愈合后的清库重放窗口」唯一的持久载体，
+     * 若被白名单丢掉，readState 一换进程（缓存失效）重放窗口就凭空消失、fail-closed 被架空。 */
+    if (o.corrupt_recovery && typeof o.corrupt_recovery === "object") {
+      parsed.corrupt_recovery = o.corrupt_recovery;
+    }
     _cachedState = parsed;
     _cachedMtime = stat.mtimeMs;
     _cachedSize = stat.size;
@@ -225,7 +291,12 @@ export function readState() {
 export function writeState(state) {
   const p = statePath();
   if (!p) return false;
-  // 防抹平保护：严禁写入损坏状态或异常抹平状态
+  /* 防抹平保护：拒写「不可信 / 损坏」状态对象。
+   * 这条形状判据正是安全边界的精确表达：
+   *   - readState() 返回的损坏快照必然带 _corrupt:true / _ok:false，任何「只改 _ok」的派生对象
+   *     仍然带着 _corrupt:true → 依旧拒写（防伪造绕过）；
+   *   - 普通写入通道走 readStateForWrite()，给出的是一份不含任何诊断字段的全新干净基座
+   *     → 放行，从而把损坏后的状态真正修复（旧实现在这里把普通写入一并冻死，属于过度拦截）。 */
   if (!state || state._ok === false || state._corrupt === true) {
     return false;
   }
@@ -247,6 +318,7 @@ export function writeState(state) {
     delete out._missing;
     delete out._err;
     delete out._corrupt;
+    delete out._corrupt_at;
     delete out._recovered_from_bak;
 
     // 自动 Compact 保护：若 pending_patterns 存在已达标项（count>=2）或超量，自动清洗
@@ -278,7 +350,9 @@ export function writeState(state) {
     try { fs.chmodSync(p, 0o600); } catch (e) { /* 某些文件系统不支持，忽略 */ }
     try {
       const st = fs.statSync(p);
-      _cachedState = JSON.parse(JSON.stringify(out));
+      /* 缓存里补回 _ok:true：一次成功的写入之后状态确定可信，紧随其后的 readState
+       * 必须如实报告 _ok:true（旧实现缓存的是 out 本身，_ok 会变成 undefined）。 */
+      _cachedState = JSON.parse(JSON.stringify(Object.assign({}, out, { _ok: true })));
       _cachedMtime = st.mtimeMs;
       _cachedSize = st.size;
       _cachedIno = st.ino;
@@ -295,13 +369,13 @@ export function writeState(state) {
 
 /** 读回 gateway_harvest 增量状态 */
 export function lookupGatewayHarvest() {
-  const st = readState();
+  const st = readStateForWrite();
   return st.gateway_harvest || {};
 }
 
 /** 保存 gateway_harvest 增量状态（file_states 最多保留最近 500 个；processed_fingerprints 上限 1000） */
 export function rememberGatewayHarvest(harvestState) {
-  const st = readState();
+  const st = readStateForWrite();
   const gh = Object.assign({}, st.gateway_harvest || {}, harvestState || {});
 
   // 1. file_states (files) 淘汰上限：按 processed_at 排序，最多保留最近 500 个
@@ -330,29 +404,34 @@ export function rememberGatewayHarvest(harvestState) {
 
 /** 读回信标动作状态（单一状态源 state.json 维护） */
 export function lookupActionState() {
+  /* 这里必须读原始快照（不是 readStateForWrite）：诊断字段 _ok/_missing 与重放窗口
+   * corrupt_recovery 正是破坏性门禁的判据所在。 */
   const st = readState();
   const act = (st.actions && typeof st.actions === "object") ? st.actions : {};
+  /* 损坏愈合后的「破坏性信标重放窗口」：__corrupt 标记会被一次成功的普通写入覆盖，
+   * readState 随即恢复可信；但损坏期间可能已有一条清库信标执行完却没来得及落盘
+   * （记录丢失），它在自身 5 分钟新鲜期内仍可能被重放。窗口结束之前清库门禁必须
+   * 继续 fail-closed —— 「普通写入可自愈」绝不能顺带把重放防线架空。 */
+  const q = (st.corrupt_recovery && typeof st.corrupt_recovery === "object") ? st.corrupt_recovery : null;
+  const quarantineUntil = q && Number(q.until) > 0 ? Number(q.until) : 0;
+  const quarantined = quarantineUntil > Date.now();
   return {
-    ok: st._ok !== false,
+    ok: st._ok !== false && !quarantined,
     lastDoneId: String(act.lastDoneId || ""),
     pendingId: String(act.pendingId || ""),
     history: Array.isArray(act.history) ? act.history : [],
     missing: !!st._missing,
+    quarantined,
+    corrupt_at: quarantined ? Number(q.at) || 0 : 0,
   };
 }
 
 /** 保存信标动作状态（单一状态源 state.json 维护） */
 export function rememberActionState(actionState) {
-  const st = readState();
-  /* 损坏标记只用于拦截「破坏性操作」；当一条非破坏性动作明确要落盘完成态时，
-   * 说明用户已经在界面上重新操作过，此时允许重建一份干净状态（原损坏内容
-   * 已由 _recoverCorruptStateFile 备份为 .corrupt.<ts>，不会丢失取证线索）。
-   * 若不这样做，状态一旦损坏就永久无法写入，用户只能手动删文件才能恢复。 */
-  if (st._ok === false) {
-    st._ok = true;
-    delete st._corrupt;
-    delete st._err;
-  }
+  /* 愈合能力已收敛到 readStateForWrite()：损坏快照会被重建为干净基座，诊断字段
+   * 全程不进入待写对象，因此这里不再需要「手工把 _ok 掰回 true 再 delete _corrupt」
+   * 的特判（旧实现只有这一条特判能让状态复活，其余普通写入全被冻死）。 */
+  const st = readStateForWrite();
   const hist = (actionState && Array.isArray(actionState.history) ? actionState.history : []).slice(-50);
   const doneId = String(actionState?.lastDoneId || "");
   st.lastDoneId = doneId;
@@ -367,21 +446,21 @@ export function rememberActionState(actionState) {
 /** 记住某个数据库的 Secret Key —— 只在内存里传一次，落盘即刻。 */
 export function rememberSecret(database, secret) {
   if (!database || !secret) return false;
-  const st = readState();
+  const st = readStateForWrite();
   st.secrets[database] = { v: String(secret), at: Date.now() };
   return writeState(st);
 }
 
 /** 读回全自动去重调度与状态 (last_dedup_at, last_dedup_batch_ts, last_dedup_ids, etc.) */
 export function lookupAuditState() {
-  const st = readState();
+  const st = readStateForWrite();
   return st.audit || {};
 }
 export const lookupDedupState = lookupAuditState;
 
 /** 记录全自动去重状态 */
 export function rememberAuditState(auditState) {
-  const st = readState();
+  const st = readStateForWrite();
   st.audit = Object.assign({}, st.audit || {}, auditState || {});
   writeState(st);
   return st.audit;
@@ -391,7 +470,7 @@ export const rememberDedupState = rememberAuditState;
 /** 读回指定项目的记忆体检增量游标（断点续跑与避免上万条全量扫描） */
 export function getAuditCursor(project) {
   const prj = String(project || "global").trim();
-  const st = readState();
+  const st = readStateForWrite();
   const cursors = (st.audit && st.audit.cursors) || {};
   return cursors[prj] || { last_memory_id: null, last_pitfall_id: null, last_id: null, last_updated_at: "", reviewed_count: 0 };
 }
@@ -399,7 +478,7 @@ export function getAuditCursor(project) {
 /** 保存指定项目的记忆体检增量游标 */
 export function saveAuditCursor(project, cursorData) {
   const prj = String(project || "global").trim();
-  const st = readState();
+  const st = readStateForWrite();
   if (!st.audit) st.audit = {};
   if (!st.audit.cursors) st.audit.cursors = {};
   st.audit.cursors[prj] = Object.assign({}, st.audit.cursors[prj] || {}, cursorData, { at: Date.now() });
@@ -410,7 +489,7 @@ export function saveAuditCursor(project, cursorData) {
 /** 清理/重置指定项目的记忆体检游标（供全量体检使用） */
 export function clearAuditCursor(project) {
   const prj = String(project || "global").trim();
-  const st = readState();
+  const st = readStateForWrite();
   if (st.audit && st.audit.cursors && st.audit.cursors[prj]) {
     delete st.audit.cursors[prj];
     writeState(st);
@@ -432,7 +511,7 @@ export function clearAuditCursor(project) {
  *   ③ 唯一记录兜底：本地只存了一条时直接用它（本插件通常只服务一个库）
  */
 export function lookupSecret(database) {
-  const st = readState();
+  const st = readStateForWrite();
   const secrets = st.secrets && typeof st.secrets === "object" ? st.secrets : {};
   const names = Object.keys(secrets);
   if (!names.length) return "";
@@ -472,7 +551,7 @@ export function lookupSecret(database) {
  * 对称匹配 lookupSecret 的逻辑：精确匹配 -> 归一化匹配 -> 唯一记录兜底清除。
  */
 export function forgetSecret(database) {
-  const st = readState();
+  const st = readStateForWrite();
   const secrets = st.secrets && typeof st.secrets === "object" ? st.secrets : {};
   const names = Object.keys(secrets);
   if (!names.length) return false;
@@ -509,20 +588,20 @@ export function forgetSecret(database) {
 /** 记住本次真正使用的数据库实例名（NCB 可能自动加账号前缀或后缀）。 */
 export function rememberDatabase(name) {
   if (!name) return false;
-  const st = readState();
+  const st = readStateForWrite();
   st.current = String(name);
   return writeState(st);
 }
 
 /** 取回上次真正使用的数据库实例名。 */
 export function lookupDatabase() {
-  const st = readState();
+  const st = readStateForWrite();
   return st.current || "";
 }
 
 /** 已记录 Secret Key 的数据库名清单（不含任何密钥值）。 */
 export function knownDatabases() {
-  const st = readState();
+  const st = readStateForWrite();
   return Object.keys(st.secrets);
 }
 
@@ -535,7 +614,7 @@ export function lookupRealDatabase(database) {
   if (!want) return "";
   if (/^\d+_/.test(want)) return want;
 
-  const st = readState();
+  const st = readStateForWrite();
   const secrets = st.secrets && typeof st.secrets === "object" ? st.secrets : {};
   const names = Object.keys(secrets);
 
@@ -563,7 +642,7 @@ export function lookupRealDatabase(database) {
  */
 export function rememberR2Mount(database, mountInfo) {
   if (!database) return false;
-  const st = readState();
+  const st = readStateForWrite();
   if (!st.r2_mounts || typeof st.r2_mounts !== "object") st.r2_mounts = {};
   const info = mountInfo || {};
   st.r2_mounts[database] = {
@@ -581,7 +660,7 @@ export function rememberR2Mount(database, mountInfo) {
  * 同样采用三级策略：①精确匹配 ②归一化匹配（忽略账号前缀与大小写） ③唯一记录兜底
  */
 export function lookupR2Mount(database) {
-  const st = readState();
+  const st = readStateForWrite();
   const mounts = st.r2_mounts && typeof st.r2_mounts === "object" ? st.r2_mounts : {};
   const names = Object.keys(mounts);
   if (!names.length) return null;
@@ -610,7 +689,7 @@ export function lookupR2Mount(database) {
  */
 export function forgetR2Mount(database) {
   if (!database) return false;
-  const st = readState();
+  const st = readStateForWrite();
   let changed = false;
   if (st.r2_mounts && typeof st.r2_mounts === "object") {
     const norm = (x) => String(x || "").toLowerCase().replace(/^\d+_/, "");
@@ -712,7 +791,7 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
     };
   }
 
-  const st = readState();
+  const st = readStateForWrite();
   const pending = st.pending_patterns && typeof st.pending_patterns === "object" ? st.pending_patterns : {};
 
   // 1. 清理过期项 (21 天未复现硬淘汰)、损坏脏项、已达标历史残留并截断超长样本
@@ -889,12 +968,12 @@ export function recordPendingEvidence(fingerprint, payload, options = {}) {
 }
 
 export function getPendingEvidence(fingerprint) {
-  const st = readState();
+  const st = readStateForWrite();
   return (st.pending_patterns && st.pending_patterns[fingerprint]) || null;
 }
 
 export function clearPendingEvidence(fingerprint) {
-  const st = readState();
+  const st = readStateForWrite();
   if (st.pending_patterns && st.pending_patterns[fingerprint]) {
     delete st.pending_patterns[fingerprint];
     return writeState(st);
@@ -903,12 +982,12 @@ export function clearPendingEvidence(fingerprint) {
 }
 
 export function listPendingEvidence() {
-  const st = readState();
+  const st = readStateForWrite();
   return Object.values(st.pending_patterns || {});
 }
 
 export function cleanExpiredPending(ttlMs = DEFAULT_PENDING_TTL_MS, now = Date.now()) {
-  const st = readState();
+  const st = readStateForWrite();
   const pending = st.pending_patterns && typeof st.pending_patterns === "object" ? st.pending_patterns : {};
   let removed = 0;
   for (const [k, v] of Object.entries(pending)) {
@@ -936,7 +1015,7 @@ export function cleanExpiredPending(ttlMs = DEFAULT_PENDING_TTL_MS, now = Date.n
 
 export function enqueueHarvestItems(items) {
   if (!Array.isArray(items) || items.length === 0) return 0;
-  const st = readState();
+  const st = readStateForWrite();
   const queue = Array.isArray(st.harvest_queue) ? st.harvest_queue : [];
   let added = 0;
   for (const item of items) {
@@ -966,14 +1045,14 @@ export function enqueueHarvestItems(items) {
 }
 
 export function readHarvestQueue() {
-  const st = readState();
+  const st = readStateForWrite();
   return Array.isArray(st.harvest_queue) ? st.harvest_queue : [];
 }
 
 export function removeHarvestItems(ids) {
   if (!Array.isArray(ids) || ids.length === 0) return 0;
   const idSet = new Set(ids);
-  const st = readState();
+  const st = readStateForWrite();
   const queue = Array.isArray(st.harvest_queue) ? st.harvest_queue : [];
   const initialLen = queue.length;
   const nextQueue = queue.filter((q) => !idSet.has(q.id));
@@ -987,7 +1066,7 @@ export function removeHarvestItems(ids) {
 
 export function updateHarvestItemRetries(id, errMessage) {
   if (!id) return false;
-  const st = readState();
+  const st = readStateForWrite();
   const queue = Array.isArray(st.harvest_queue) ? st.harvest_queue : [];
   let updated = false;
   for (const item of queue) {
@@ -1006,7 +1085,7 @@ export function updateHarvestItemRetries(id, errMessage) {
 }
 
 export function clearHarvestQueue() {
-  const st = readState();
+  const st = readStateForWrite();
   st.harvest_queue = [];
   return writeState(st);
 }
