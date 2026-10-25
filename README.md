@@ -115,22 +115,22 @@ grep '"version"' /config/magpie/plugins/node_modules/magpie-memory-hub/package.j
 
 ## 五、测试与质量保证
 
-全套 **92 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
+全套 **95 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
 
 ```bash
-node tests/test_meta.mjs             # 92 个测试文件元检查（100% 隔离合规）
+node tests/test_meta.mjs             # 95 个测试文件元检查（100% 隔离合规）
 node tests/adversarial_v629_gate.mjs # 红队 6 大核心缺陷反证靶场（6/6 GREEN）
 node tests/test_proactive_memory_ux.mjs # 主动记忆、一站式召回与脱敏专项测试
 node tests/settings_page_test.mjs    # 设置页表单与 DOM 交互测试
 node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 ```
 
-**计数口径（三处数字同源，均取 `tests/` 活跃套件总数 92）**：徽章、本节正文与项目结构树声明的是同一批套件；
-`tests/test_meta.mjs` 的锁定断言 `testFiles.length === 92` 是唯一权威值，`tests/test_helpers.mjs` 是共享桩库、
+**计数口径（三处数字同源，均取 `tests/` 活跃套件总数 95）**：徽章、本节正文与项目结构树声明的是同一批套件；
+`tests/test_meta.mjs` 的锁定断言 `testFiles.length === 95` 是唯一权威值，`tests/test_helpers.mjs` 是共享桩库、
 `tests/test_meta.mjs` 自身是元检查器，二者不计入套件数。
 
-全量逐套执行入口 `bash /tmp/ra.sh`（跳过 `test_meta.mjs`、其余 93 个文件全部执行）实测：
-**通过 89 / 跳过 4 / 失败 0**。93 = 92 套件 + `test_helpers.mjs` 桩库；4 套跳过
+全量逐套执行入口（跳过 `test_meta.mjs` 元检查器与 `test_helpers.mjs` 共享桩库，其余 95 个套件串行全跑）实测：
+**通过 91 / 跳过 4 / 失败 0**；4 套跳过
 （`test_all_20_tools_e2e`、`test_backend_acceptance`、`test_mcp_only`、`test_pollution_guard`）均因容器内缺少
 真实 NoCodeBackend 凭证或宿主环境而显式 `exit 77`，属于可解释跳过而非失败。
 
@@ -150,7 +150,7 @@ node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 │   │   └── harvest/    对话采集
 │   ├── tools/          MCP 工具入口
 │   └── page/           设置页面
-├── tests/              测试套件（92 套）
+├── tests/              测试套件（95 套）
 ├── docs/               架构文档与决策记录
 └── tools.js 等         仅保留宿主契约入口（tools / middleware / hooks）与运行时状态
 ```

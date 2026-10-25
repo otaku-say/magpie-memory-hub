@@ -35,6 +35,12 @@ const KNOWN_NON_TOOL_SYMBOLS = new Set([
   "db_tools",
   // 配置选项 / 参数名
   "ncb_instance",
+  // v6.47.0 大模型/重排超时与候选上限配置项（非工具）：
+  // 三者均声明于 package.json → magpie.options，并在 settings.html 以 <input id="…"> 落盘，
+  // 见下方「白名单自证门」——必须同时在 options 声明与设置页控件中存在才允许豁免。
+  "model_timeout_sec",
+  "rerank_timeout_sec",
+  "rerank_max_candidates",
   "ncb_secret",
   "r2_account_id",
   "r2_access_key_id",
@@ -62,6 +68,47 @@ const KNOWN_NON_TOOL_SYMBOLS = new Set([
 ]);
 
 const TOOL_PATTERN = /\b(memory|pitfall|storage|db|ncb|r2|model)_[a-zA-Z0-9_]+\b/g;
+
+/**
+ * 白名单自证门：豁免「不是工具」的符号必须拿出可验证的证据。
+ * v6.47.0 新增的三个 `model_` / `rerank_` 前缀配置键命中工具名正则属**测试误报**，
+ * 它们既不是 MCP 工具，也不该被扫成工具；这里强制它们同时满足：
+ *   1) 出现在 package.json 的 magpie.options 默认值中（宿主据此渲染/校验选项）；
+ *   2) 出现在 settings.html 中形如 id="<key>" 的表单控件上（用户可配置的入口）。
+ * 任一条不成立，说明白名单被当成「万能免死金牌」滥用，必须失败。
+ */
+function assertConfigKeysAreNotTools(keys) {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const options = (pkg && pkg.magpie && pkg.magpie.options) || {};
+  const settingsHtml = readFileSync(new URL("../settings.html", import.meta.url), "utf8");
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(options, key)) {
+      throw new Error(`白名单自证失败：${key} 未在 package.json 的 magpie.options 中声明，不能豁免为配置项`);
+    }
+    if (!settingsHtml.includes(`id="${key}"`)) {
+      throw new Error(`白名单自证失败：${key} 未在 settings.html 中以 id="${key}" 控件暴露，不能豁免为配置项`);
+    }
+    if (registeredTools.has(key)) {
+      throw new Error(`白名单自证失败：${key} 已是真实注册工具，不应出现在非工具白名单中`);
+    }
+  }
+}
+
+const V647_CONFIG_KEYS = ["model_timeout_sec", "rerank_timeout_sec", "rerank_max_candidates"];
+assertConfigKeysAreNotTools(V647_CONFIG_KEYS);
+console.log(`[1.5] 白名单自证门通过：${V647_CONFIG_KEYS.join(", ")} 均为 package.json/settings.html 中的配置项，非工具`);
+
+// 反证：自证门必须能拒绝「没有 options 声明」的键，否则白名单就成了万能免死金牌
+let selfProofRejected = false;
+try {
+  assertConfigKeysAreNotTools(["model_budget"]);
+} catch {
+  selfProofRejected = true;
+}
+if (!selfProofRejected) {
+  throw new Error("反证失败：白名单自证门未能拦截未在 package.json options 声明的键 model_budget");
+}
+console.log("  ✓ 反证门：未在 options 声明的 model_budget 被自证门拒绝豁免");
 
 /**
  * 扫描文本并返回未识别的工具标识符

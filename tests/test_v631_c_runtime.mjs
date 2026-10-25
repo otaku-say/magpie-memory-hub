@@ -36,6 +36,7 @@ import {
   rememberR2Mount,
   recordPendingEvidence,
   rememberSecret,
+  rememberActionState,
 } from "../src/core/state.js";
 
 import {
@@ -126,12 +127,34 @@ async function runTests() {
     fs.writeFileSync(statusJsonPath, JSON.stringify(mockStatusData, null, 2), "utf8");
     fs.writeFileSync(statusJsPath, `window.__memhubStatus = ${JSON.stringify(mockStatusData, null, 2)};\n`, "utf8");
 
-    // 模拟存在 r2 挂载记录并清除
+    // 1.2b 无 .bak 可恢复时，_recoverCorruptStateFile 会留下 __corrupt「不可信标记」（v6.47.0 QA 加固），
+    // 之后 readState 必须持续 fail-closed；只有产品自带的修复通道能让状态重新可信。
+    // 这层状态污染若不清掉，会连带让 1.4 的 pending 证据永远写不进盘（writeState 被拒）——
+    // 语义去重断言就会以「无历史条目」的形式假性失败。先在这里把该不变量显式锁死。
     _resetStateCacheForTests();
+    const stillCorrupt = readState();
+    assert.strictEqual(stillCorrupt._ok, false, "无 .bak 可恢复时 readState 必须持续返回 _ok:false（fail-closed）");
+    assert.strictEqual(stillCorrupt._corrupt, true, "必须保留 _corrupt 不可信标记");
+    assert.strictEqual(
+      writeState({ ...stillCorrupt, _ok: true }),
+      false,
+      "仅把 _ok 改成 true 仍必须被 _corrupt 防抹平保护拒绝（否则等于绕过 fail-closed）"
+    );
+
+    // 走产品唯一修复通道：rememberActionState 在用户重新操作后重建干净状态（源码内 delete st._corrupt）
+    assert.strictEqual(
+      rememberActionState({ lastDoneId: "repair_after_corrupt", pendingId: "", history: [] }),
+      true,
+      "rememberActionState 必须能修复被 __corrupt 标记的状态"
+    );
+    _resetStateCacheForTests();
+
+    // 模拟存在 r2 挂载记录并清除
     const stWithMount = readState();
-    stWithMount._ok = true;
+    assert.strictEqual(stWithMount._ok, true, "修复通道写回后 readState 必须恢复可信");
+    assert.strictEqual(stWithMount._corrupt, undefined, "修复后不得再携带 _corrupt 标记");
     stWithMount.r2_mounts = { "41694_c_runtime_db": { bucket: "test-bucket", at: Date.now() } };
-    writeState(stWithMount);
+    assert.strictEqual(writeState(stWithMount), true, "修复后写回 r2 挂载记录必须成功");
 
     forgetR2Mount("41694_c_runtime_db");
 
