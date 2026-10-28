@@ -796,8 +796,31 @@ function onRequestInner(body, ctx) {
   return body;
 }
 
+/* v6.48.1 新增慢路径观测：正常 onRequest 应在微秒级（历史实测 87µs）。
+ * 线上出现「平均 136ms」时无法归因，因为既没有耗时分布、也没有慢请求的特征快照。
+ * 这里只在超过阈值时打一条带 prompt 长度 / 记忆条数 / 协议 / 快照版本号的采样日志，
+ * 用来区分「索引重建慢」与「长文本清洗慢」——先测量，再决定要不要动 cleanText 的正则。 */
+var MW_SLOW_MS = 50;
+function _logSlowRequest(dtMs, ctx) {
+  try {
+    var st = (ctx && ctx.state) || {};
+    var opts = (ctx && ctx.options) || {};
+    var promptLen = String(st.promptText || "").length;
+    var memCount = (opts.memories && Array.isArray(opts.memories)) ? opts.memories.length : 0;
+    console.log("[memory-hub] onRequest 慢路径 " + dtMs + "ms: prompt=" + promptLen +
+      "B memories=" + memCount + " proto=" + String(st.protocol || "?") +
+      " version=" + String(opts.memories_version != null ? opts.memories_version : "none"));
+  } catch (_) { /* 观测代码自身绝不抛 */ }
+}
+
 export function onRequest(body, ctx) {
-  try { return onRequestInner(body, ctx); }
+  var t0 = (typeof Date !== "undefined" && Date.now) ? Date.now() : 0;
+  try {
+    var out = onRequestInner(body, ctx);
+    var dt = ((typeof Date !== "undefined" && Date.now) ? Date.now() : 0) - t0;
+    if (dt > MW_SLOW_MS) _logSlowRequest(dt, ctx);
+    return out;
+  }
   catch (e) { return _mwFailOpen("onRequest", e, body); }
 }
 

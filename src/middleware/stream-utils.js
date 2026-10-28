@@ -320,12 +320,19 @@ function stripMemoryBlock(text) {
  *   ② 每个钩子用 try/catch 包住，异常一律降级为「不做任何改动」
  *   ③ 降级时只打印一行简短原因（不打印内容，避免泄露用户对话）
  */
-var _mwErrLogged = 0;
+/* v6.48.1 修复：原实现是模块级【全局】计数且只打印前 3 条。长期运行的宿主进程一旦超过
+ * 3 次就永久静默——面板上能数出 41 次失败，日志里却只有 3 条原因，观测与面板互相矛盾，
+ * 线上因此永远查不出降级真因。改为「按 hook 分别计数 + 前 20 条全记 + 之后每 100 条采样」：
+ * 保留刷屏保护，同时让长尾失败仍然可查。 */
+var MW_ERR_FULL_LOG = 20;
+var MW_ERR_SAMPLE_EVERY = 100;
+var _mwErrCount = { onRequest: 0, onEvent: 0, onResponse: 0 };
 function _mwFailOpen(name, e, fallback) {
-  if (_mwErrLogged < 3) {           // 高频出错时别刷屏
-    _mwErrLogged++;
+  var key = String(name || "unknown");
+  var n = (_mwErrCount[key] = (_mwErrCount[key] || 0) + 1);
+  if (n <= MW_ERR_FULL_LOG || n % MW_ERR_SAMPLE_EVERY === 0) {
     try {
-      console.log("[memory-hub] " + name + " 已降级(fail-open): " +
+      console.log("[memory-hub] " + key + " 已降级(fail-open) 第 " + n + " 次: " +
         ((e && e.name) || "Error") + ": " + String((e && e.message) || e).slice(0, 160));
     } catch (_) { /* 连打印都不能抛 */ }
   }

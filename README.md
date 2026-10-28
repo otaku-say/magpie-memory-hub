@@ -2,13 +2,13 @@
 
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
-[![Version](https://img.shields.io/badge/version-v6.48.0-blue.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-95%20passed-brightgreen.svg)](tests/)
+[![Version](https://img.shields.io/badge/version-v6.48.1-blue.svg)](package.json)
+[![Tests](https://img.shields.io/badge/tests-97%20passed-brightgreen.svg)](tests/)
 [![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
 
 ---
 
-## 一、记忆工作模式与运行架构 (v6.48.0)
+## 一、记忆工作模式与运行架构 (v6.48.1)
 
 | 环节 | 运行时机制 | 协作方式与说明 |
 |---|---|---|
@@ -108,28 +108,28 @@ rm -rf /config/home/.cache/magpie/bun/install-cache/*
 
 # 3. 校验版本
 grep '"version"' /config/magpie/plugins/node_modules/magpie-memory-hub/package.json
-# 输出: "version": "6.48.0"
+# 输出: "version": "6.48.1"
 ```
 
 ---
 
 ## 五、测试与质量保证
 
-全套 **95 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
+全套 **97 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
 
 ```bash
-node tests/test_meta.mjs             # 95 个测试文件元检查（100% 隔离合规）
+node tests/test_meta.mjs             # 97 个测试文件元检查（100% 隔离合规）
 node tests/adversarial_v629_gate.mjs # 红队 6 大核心缺陷反证靶场（6/6 GREEN）
 node tests/test_proactive_memory_ux.mjs # 主动记忆、一站式召回与脱敏专项测试
 node tests/settings_page_test.mjs    # 设置页表单与 DOM 交互测试
 node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 ```
 
-**计数口径（三处数字同源，均取 `tests/` 活跃套件总数 95）**：徽章、本节正文与项目结构树声明的是同一批套件；
-`tests/test_meta.mjs` 的锁定断言 `testFiles.length === 95` 是唯一权威值，`tests/test_helpers.mjs` 是共享桩库、
+**计数口径（三处数字同源，均取 `tests/` 活跃套件总数 97）**：徽章、本节正文与项目结构树声明的是同一批套件；
+`tests/test_meta.mjs` 的锁定断言 `testFiles.length === 97` 是唯一权威值，`tests/test_helpers.mjs` 是共享桩库、
 `tests/test_meta.mjs` 自身是元检查器，二者不计入套件数。
 
-全量逐套执行入口（跳过 `test_meta.mjs` 元检查器与 `test_helpers.mjs` 共享桩库，其余 95 个套件串行全跑）实测：
+全量逐套执行入口（跳过 `test_meta.mjs` 元检查器与 `test_helpers.mjs` 共享桩库，其余 97 个套件串行全跑）实测：
 **通过 91 / 跳过 4 / 失败 0**；4 套跳过
 （`test_all_20_tools_e2e`、`test_backend_acceptance`、`test_mcp_only`、`test_pollution_guard`）均因容器内缺少
 真实 NoCodeBackend 凭证或宿主环境而显式 `exit 77`，属于可解释跳过而非失败。
@@ -150,7 +150,7 @@ node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 │   │   └── harvest/    对话采集
 │   ├── tools/          MCP 工具入口
 │   └── page/           设置页面
-├── tests/              测试套件（95 套）
+├── tests/              测试套件（97 套）
 ├── docs/               架构文档与决策记录
 └── tools.js 等         仅保留宿主契约入口（tools / middleware / hooks）与运行时状态
 ```
