@@ -8,7 +8,13 @@ var PLUGIN_NAME = "magpie-memory-hub";
 
 /* ================= 渲染 ================= */
 function cut(s, n) {
-  var v = String(s == null ? "" : s);
+  /* v6.48.0 修复：注入正文原先不转义换行。记忆内容里只要带 "\n\n[Memory Agent Guide]"，
+   * 就能跳出 bullet 列表伪造独立引导块，构成间接提示词注入。
+   * 这里把所有空白折叠成单空格，并剔除方括号包裹的保留标识符。 */
+  var v = String(s == null ? "" : s)
+    .replace(/\s+/g, " ")
+    .replace(/\[(?:Memory Agent Guide|user|system|assistant)\]/gi, "")
+    .trim();
   return v.length > n ? v.slice(0, n) + "…" : v;
 }
 

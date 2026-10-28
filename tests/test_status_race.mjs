@@ -10,7 +10,7 @@
  *
  * 本测试直接复现原始场景并断言容器内容不再被旧结果污染。
  */
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 
 process.chdir(fileURLToPath(new URL("..", import.meta.url)));
@@ -88,7 +88,7 @@ window.magpie = {
   read: () => Promise.resolve({}),
 };
 
-await import(path.join(process.cwd(), "src/page/settings.js"));
+await import(pathToFileURL(path.join(process.cwd(), "src/page/settings.js")).href);
 await new Promise((r) => setTimeout(r, 60));   // 等 boot 跑完
 
 console.log("=== 0. 初始状态：应显示旧的 MCP 检测成功结果 ===");

@@ -571,8 +571,10 @@ export function forgetSecret(database) {
     }
   }
 
-  // 若未精准/归一化匹配但本地仅存 1 条记录（对应 lookupSecret 的 ③ 唯一记录兜底命中），也将其清除
-  if (removed === 0 && names.length === 1) {
+  /* v6.48.0 修复：唯一记录兜底只在「没指定目标库」时才允许。
+   * 原实现无条件下手：为库 B 报 403 时会把本地唯一一条（属于库 A）的 Secret Key 删掉，
+   * 表现为「一条无关的鉴权失败抹掉了有效凭据」。 */
+  if (removed === 0 && names.length === 1 && !want) {
     delete secrets[names[0]];
     removed++;
   }

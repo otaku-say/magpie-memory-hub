@@ -26,6 +26,35 @@ export const NO_CONVERSATIONS_MSG = "未检测到对话录制。请在 Magpie �
 export const PRIVACY_NOTICE = "数据来自 Magpie 的 GatewayConversations 落盘，可在 Magpie 设置里关闭该录制";
 
 
+/* v6.48.0 修复：整套 POSIX 域限制（/var /home /root）在 win32 上静默失效——
+ * path.resolve("/root") 在 Windows 得到 "D:\root"，之后所有 POSIX 前缀比较全部落空，
+ * 守卫只剩 SENSITIVE_SEGMENTS 一层，C:\Windows、C:\Program Files 从来不在任何名单里。
+ * 这里同时补一份 Windows 系统目录黑名单，两种形态都拦。 */
+export const WIN32_FORBIDDEN_PREFIXES = [
+  "c:/windows",
+  "c:/program files",
+  "c:/program files (x86)",
+  "c:/programdata",
+  "c:/system volume information",
+  "c:/$recycle.bin",
+  "c:/recovery",
+  "c:/boot",
+  "c:/users/all users",
+  "c:/users/default",
+];
+
+/** 判定 win32 形态的系统敏感目录（盘符根 / Windows 系统目录）。命中返回命中项，否则 null。 */
+function win32Forbidden(target) {
+  const p = String(target || "").replace(/\\/g, "/").toLowerCase();
+  const m = /^([a-z]):\/(.*)$/.exec(p);
+  if (!m) return null;
+  if (m[2] === "") return m[1] + ":/ (盘符根)";
+  for (const prefix of WIN32_FORBIDDEN_PREFIXES) {
+    if (p === prefix || p.startsWith(prefix + "/")) return prefix;
+  }
+  return null;
+}
+
 export const HARD_FORBIDDEN_PREFIXES = [
   "/etc",
   "/proc",
@@ -302,11 +331,33 @@ function checkPathForbidden(targetPath) {
   // 1. 敏感子路径黑名单校验（任何位置一票否决）
   checkSensitiveSubpaths(norm);
 
+  /* 2.5) 原始 POSIX 形态校验（v6.48.0）：必须在任何平台都生效。
+   * 步骤 1-2 用的是 path.resolve 之后的形态，在 Windows 上 "/root" 已经是 "D:\root"，
+   * 于是 /var /home /root 三条域限制全部静默失效。这里不信 resolve，直接看原始字符串。 */
+  const rawPosix = String(targetPath).replace(/\\/g, "/");
+  if (/^\/(?:var|private\/var|home|root)(?:\/|$)/.test(rawPosix)) {
+    if (!isWhitelistedGatewayDir(rawPosix)) {
+      throw new Error("[SECURITY_BLOCKED] 禁止遍历系统敏感目录: " + targetPath);
+    }
+  } else {
+    for (const prefix of HARD_FORBIDDEN_PREFIXES) {
+      if (rawPosix === prefix || rawPosix.startsWith(prefix + "/")) {
+        throw new Error("[SECURITY_BLOCKED] 禁止遍历系统敏感目录: " + targetPath);
+      }
+    }
+  }
+
   // 2. 硬拦截系统目录
   for (const prefix of HARD_FORBIDDEN_PREFIXES) {
     if (norm === prefix || norm.startsWith(prefix + path.sep)) {
       throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${norm}`);
     }
+  }
+
+  // 2.9) win32 系统目录与盘符根（Windows 宿主上的真实风险面）
+  const win32Hit = win32Forbidden(norm);
+  if (win32Hit) {
+    throw new Error(`[SECURITY_BLOCKED] 禁止遍历系统敏感目录: ${norm}`);
   }
 
   // 3. /var 根域子域限制（仅允许 minis / folders / tmp，其它如 /var/log 一律拒）

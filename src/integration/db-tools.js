@@ -63,8 +63,8 @@ export async function fetchPublicSchema(database, opts) {
   }
   try {
     const res = await fetch(url, { signal: ctrl ? ctrl.signal : undefined });
-    if (timer) clearTimeout(timer); if (externalSignal && typeof abortListener === "function") externalSignal.removeEventListener("abort", abortListener);
-    if (externalSignal && abortListener) externalSignal.removeEventListener("abort", abortListener);
+    /* v6.48.0 修复：原先在此处就 clearTimeout，而 body 尚未读取；响应头到达后 body
+     * 卡住（慢速滴流/半死连接）便再无兜底超时。清理统一移到 finally。 */
     const text = await res.text();
     let body = null;
     try { body = JSON.parse(text); } catch (e) { return { ok: false, error: "返回不是 JSON" }; }
@@ -73,10 +73,11 @@ export async function fetchPublicSchema(database, opts) {
     }
     return { ok: true, schema: body, via: "public-schema" };
   } catch (e) {
-    if (timer) clearTimeout(timer); if (externalSignal && typeof abortListener === "function") externalSignal.removeEventListener("abort", abortListener);
-    if (externalSignal && abortListener) externalSignal.removeEventListener("abort", abortListener);
     const isAbort = externalSignal && externalSignal.aborted;
     return { ok: false, error: isAbort ? "操作已被取消 (aborted)" : String(e && e.message || e) };
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (externalSignal && typeof abortListener === "function") externalSignal.removeEventListener("abort", abortListener);
   }
 }
 

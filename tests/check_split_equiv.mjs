@@ -33,12 +33,22 @@ const ALLOWED_DRIFT = new Map([
   [
     "readOptions",
     {
-      delta: 13,
+      delta: 16,
       reason:
         "v6.47.0(c4286fc)+v6.46 纯增量：新增 model_timeout_sec / rerank_timeout_sec / rerank_max_candidates " +
         "三个超时与候选上限配置的归一化赋值（3×3 行）+ explain_debug 调试开关（1 行注释组 + 1 行字段）；" +
         "既有字段的取值逻辑与顺序零改动",
       file: "src/core/config.js",
+    },
+  ],
+  [
+    "saveMemory",
+    {
+      delta: 14,
+      reason:
+        "v6.48.0：候选集改用 fetchAll 分页拉全量、唯一索引兜底查询补 lifecycle_status 与排序、" +
+        "tags/related_entities 并集统一裁剪到 512 字符；仅新增取值与裁剪，既有分支顺序零改动",
+      file: "src/services/save/memory-saver.js",
     },
   ],
 ]);

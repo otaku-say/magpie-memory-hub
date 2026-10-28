@@ -103,6 +103,7 @@ export function cleanQuery(query) {
 
 
 import { safeTimeoutMs } from "../core/time.js";
+import { scrubSecrets } from "../core/sanitize.js";
 import {
   modelBudgetCheck,
   modelBudgetRecord,
@@ -112,6 +113,14 @@ import {
 /**
  * 健壮解析 JSON 对象
  */
+/* v6.48.0：模型输出解析失败必预留下可观测痕迹，否则线上分不清「模型没配」与「输出坏了」。 */
+function markParseFailed(model, rawContent) {
+  try {
+    console.log("[memory-hub][model] parse-failed :: " + String(model || "") +
+      " :: " + scrubSecrets(String(rawContent || "")).slice(0, 200));
+  } catch (_) {}
+}
+
 export function parseJsonObject(rawText) {
   if (!rawText || typeof rawText !== "string") return null;
   let s = rawText.trim();
@@ -153,7 +162,9 @@ export async function explainUnknownErrorWithModel({
   database = "",
   options = {},
 }) {
-  const rawError = String((error && error.message) || error || "").trim();
+  /* v6.48.0 修复：原始报错未经脱敏就拼进提示词外发给在线模型。ncb-client 的错误消息里会带
+   * 「原始 HTTP 响应体前 200 字符」，而 create_database 的响应体恰恰含自动生成的 Secret Key。 */
+  const rawError = scrubSecrets(String((error && error.message) || error || "").trim());
   if (!rawError) return null;
 
   // 检查是否配置了在线模型（优先使用 extract_model，次选 classify_model）
@@ -497,7 +508,10 @@ export async function auditMemoriesWithModel({
 
         const json = await res.json();
         const rawContent = json?.choices?.[0]?.message?.content || "";
-        const parsed = parseJsonObject(rawContent) || {};
+        /* v6.48.0 修复：解析失败也置 anySucceeded=true，调用方无法区分「没有重复」与
+         * 「模型输出没解析出来」，体检报告显示模型已参与却零产出（假绿）。 */
+        const parsed = parseJsonObject(rawContent);
+        if (!parsed) { markParseFailed(model, rawContent); continue; }
         anySucceeded = true;
 
         const memDups = Array.isArray(parsed.memory_duplicates)
@@ -665,6 +679,9 @@ export async function rerankSearchResultsWithModel({
     /* 只接受真实存在的主键：id=0 / 负数 / 小数 / 非数字一律丢弃。
      * 曾经这里只判 id != null，于是模型幻觉出的 id:0 会让 rerankUsed=true，
      * 结果集却没变 —— 对外表现为「重排成功」的假象（假绿）。 */
+    /* v6.48.0 修复：注释自称「只接受真实存在的主键」，实际只校验了正整数。
+     * 模型幻觉出的候选池外 ID 会让 rerankUsed=true 而结果集不变（又一处假绿）。 */
+    const candidateIdSet = new Set(safeCandidates.map((c) => Number(c.id)));
     const validRanked = rankedList
       .filter((item) => item && item.id != null)
       .map((item) => {
@@ -681,7 +698,7 @@ export async function rerankSearchResultsWithModel({
           reason: String(item.reason || "").trim(),
         };
       })
-      .filter((item) => Number.isInteger(item.id) && item.id > 0 && item.score >= 2);
+      .filter((item) => Number.isInteger(item.id) && item.id > 0 && item.score >= 2 && candidateIdSet.has(item.id));
 
     if (validRanked.length === 0) return null;
 

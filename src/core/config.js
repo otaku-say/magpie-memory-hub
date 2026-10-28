@@ -74,9 +74,12 @@ export function readOptions(options) {
     model_timeout_sec: (Number.isFinite(Number(o.model_timeout_sec)) && Number(o.model_timeout_sec) > 0)
       ? Math.max(5, Math.min(120, Math.floor(Number(o.model_timeout_sec))))
       : 30,
+    /* v6.48.0 修复：两者都未显式传入时，rerank 应回落到声明默认 15s，而不是继承
+     * model_timeout_sec 的 30s 默认值（那时 safeTimeoutMs 的 15000 兜底永远走不到）。
+     * 只有用户显式给了 model_timeout_sec 才允许继承它。 */
     rerank_timeout_sec: (Number.isFinite(Number(o.rerank_timeout_sec)) && Number(o.rerank_timeout_sec) > 0)
       ? Math.max(3, Math.min(60, Math.floor(Number(o.rerank_timeout_sec))))
-      : undefined,
+      : ((Number.isFinite(Number(o.model_timeout_sec)) && Number(o.model_timeout_sec) > 0) ? undefined : 15),
     rerank_max_candidates: (Number.isFinite(Number(o.rerank_max_candidates)) && Number(o.rerank_max_candidates) > 0)
       ? Math.max(3, Math.min(25, Math.floor(Number(o.rerank_max_candidates))))
       : 10,

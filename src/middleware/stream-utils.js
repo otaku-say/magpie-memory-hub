@@ -211,7 +211,8 @@ function _stripStreamInner(piece, st) {
 
     var tagStr = rem.slice(0, closeAngle + 1);
     // 严格保证只认 <memory> / <memory >（大小写不敏感），防止 <memoryManagement> 被误判
-    if (!/^<memory\s*>$/i.test(tagStr)) {
+    /* v6.48.0：放宽为允许标签携带属性（<memory type="json">），仍拒绝 <memoryManagement>。 */
+    if (!/^<memory(?:\s[^>]*)?>$/i.test(tagStr)) {
       return head + tagStr + stripStream(rem.slice(closeAngle + 1), st);
     }
 
@@ -225,7 +226,7 @@ function _stripStreamInner(piece, st) {
 
     /* 必须判定「是否真的像记忆块」再扣留：
      * 跳过空白必须紧跟 "[" 或 "{"；若紧跟散文汉字/英文等，绝不扣留！原样吐出。 */
-    if (!/^\s*[\[{]/.test(afterTag)) {
+    if (!/^\s*(?:```(?:json)?\s*)?[\[{]/.test(afterTag)) {
       return head + tagStr + stripStream(afterTag, st);
     }
 
@@ -298,7 +299,7 @@ function stripMemoryBlock(text) {
   if (!text || typeof text !== "string") return text;
   if (text.toLowerCase().indexOf("<memory") === -1) return text;
   var matched = false;
-  var out = text.replace(/<memory\s*>\s*(?:\[|\{)[\s\S]*?<\/memory\s*>/gi, function () {
+  var out = text.replace(/<memory(?:\s[^>]*)?>\s*(?:```(?:json)?\s*)?(?:\[|\{)[\s\S]*?<\/memory\s*>/gi, function () {
     matched = true;
     return "";
   });

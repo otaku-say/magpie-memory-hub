@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 /* 对抗测试 A：配置链路连通性 + 超时边界矩阵 + 候选上限 + fail-open + cleanQuery */
-import { readOptions } from "/workspace/magpie-memory-hub/src/core/config.js";
-import { rerankSearchResultsWithModel, rewriteSearchQuery } from "/workspace/magpie-memory-hub/src/integration/provider-models.js";
-import { harvestWithOnlineModel } from "/workspace/magpie-memory-hub/src/services/harvest/extract.js";
+import { readOptions } from "../src/core/config.js";
+import { rerankSearchResultsWithModel, rewriteSearchQuery } from "../src/integration/provider-models.js";
+import { harvestWithOnlineModel } from "../src/services/harvest/extract.js";
 
 const fail = [];
 const rec = (name, ok, detail) => { console.log(`${ok ? "✓" : "✗"} ${name}${detail ? " :: " + detail : ""}`); if (!ok) fail.push(name + " :: " + detail); };
@@ -109,7 +109,7 @@ const r5Fallback = await measure(() => rerankSearchResultsWithModel({ query: "q"
 rec(`仅设全局 model_timeout_sec=45 时 rerank 正确回退: ${r5Fallback.delay}ms`, r5Fallback.delay === 45000, "全局回退失败");
 
 /* ---------- 6. cleanQuery 回归 ---------- */
-const { cleanQuery } = await import("/workspace/magpie-memory-hub/src/integration/provider-models.js");
+const { cleanQuery } = await import("../src/integration/provider-models.js");
 console.log("\n=== 6. cleanQuery 附加改动回归 ===");
 const q1 = "排障清单：\n- 先查避坑：检查 499 超时\n- 修复必存：保存经验";
 console.log("输入:", JSON.stringify(q1), "\n输出:", JSON.stringify(cleanQuery(q1)));

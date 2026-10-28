@@ -9,14 +9,14 @@
  */
 import assert from "node:assert";
 import { readFileSync, existsSync, rmSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { createTestEnv } from "./lib/testenv.mjs";
 
 process.chdir(fileURLToPath(new URL("..", import.meta.url)));
 const ROOT = process.cwd();
 
-const { readAction, runPendingAction, writeCardStatus, OPS, STATUS_JSON_PATH } = await import(path.join(ROOT, "src/page/actions.js"));
+const { readAction, runPendingAction, writeCardStatus, OPS, STATUS_JSON_PATH } = await import(pathToFileURL(path.join(ROOT, "src/page/actions.js")).href);
 
 const env = await createTestEnv({ instance: "41694_agent_memory", requireMcp: true });
 console.log(`[test_beacon_e2e] 隔离命名空间 project: ${env.project}`);

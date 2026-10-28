@@ -12,8 +12,12 @@ export function isMemoryValid(row, nowMs = Date.now()) {
   if (row.invalid_at) return false;
   if (row.expires_at) {
     const str = String(row.expires_at).trim();
-    const iso = str.replace(" ", "T") + (str.includes("Z") ? "" : "Z");
-    const t = Date.parse(iso);
+    /* v6.48.0 修复：原先无条件补 "Z"，导致带时区偏移（+08:00）或纯日期（YYYY-MM-DD）
+     * 的合法输入一律 Date.parse 成 NaN，isNaN 分支按「未过期」放行——过期记忆永不过期。
+     * 现在依次尝试：原样 -> 空格换 T -> 补 Z，三者皆 NaN 才视为无法解析。 */
+    let t = Date.parse(str);
+    if (isNaN(t)) t = Date.parse(str.replace(" ", "T"));
+    if (isNaN(t)) t = Date.parse(str.replace(" ", "T") + "Z");
     if (!isNaN(t) && t <= nowMs) return false;
   }
   return true;

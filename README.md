@@ -2,13 +2,13 @@
 
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
-[![Version](https://img.shields.io/badge/version-v6.47.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-v6.48.0-blue.svg)](package.json)
 [![Tests](https://img.shields.io/badge/tests-95%20passed-brightgreen.svg)](tests/)
 [![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
 
 ---
 
-## 一、记忆工作模式与运行架构 (v6.47.0)
+## 一、记忆工作模式与运行架构 (v6.48.0)
 
 | 环节 | 运行时机制 | 协作方式与说明 |
 |---|---|---|
@@ -108,7 +108,7 @@ rm -rf /config/home/.cache/magpie/bun/install-cache/*
 
 # 3. 校验版本
 grep '"version"' /config/magpie/plugins/node_modules/magpie-memory-hub/package.json
-# 输出: "version": "6.47.0"
+# 输出: "version": "6.48.0"
 ```
 
 ---
@@ -156,3 +156,40 @@ node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 ```
 
 详见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+---
+
+## v6.48.0 修复清单
+
+本轮为全量代码审计后的回归修复，共 17 项，全部配反证门测试（`tests/test_v648_adversarial.mjs`，33 项断言）。
+
+**数据正确性**
+
+- 去重候选集改为分页拉全量：原先只取最近 200 条，活跃记忆超限后指纹查重、语义查重、版本链与 supersede 全部静默失效。
+- 唯一索引兜底查询补 `lifecycle_status='active'` 与排序：原先可能把复发计数累加到已失效记录上。
+- `tags` / `related_entities` 并集统一裁剪到 512 字符：原先多轮演进后撞列宽，MySQL strict 模式下整次保存抛错。
+- 过期时间解析支持带时区偏移与纯日期：原先一律 `NaN`，导致过期记忆永不过期。
+
+**安全**
+
+- 模型诊断请求的原始报错先经 `scrubSecrets`：原先可能把自动生成的 Secret Key 发给在线模型。
+- 路径守卫补齐原始 POSIX 形态与 win32 系统目录判定：原先在 Windows 宿主上整套 `/var` `/home` `/root` 域限制静默失效。
+- `forgetSecret` 的唯一记录兜底仅在未指定目标时生效：原先一条无关的 403 会删除本地唯一有效凭据。
+- 注入到 prompt 的记忆正文折叠换行并剔除保留标识符：阻断借换行伪造 `[Memory Agent Guide]` 引导块的结构注入。
+
+**契约与假绿**
+
+- `memory_save` 的 schema 补齐 `source_session` / `source_turn` 声明，与 handler 实际读取字段对齐。
+- rerank 校验返回的 id 必须属于候选集，原先只校验正整数，幻觉 ID 会造成「重排成功但结果未变」的假绿。
+- 模型输出解析失败不再标记 `anySucceeded=true`，并留 `[memory-hub][model] parse-failed` 日志。
+- `rerank_timeout_sec` 未显式配置时回落到声明的 15s，原先继承 `model_timeout_sec` 的 30s 默认值。
+
+**中间件与客户端**
+
+- `<memory>` 标签剥离支持属性变体（`<memory type="json">`）与代码围栏包裹，流式与非流式行为对齐。
+- NCB public schema 请求的超时清理移到 `finally`，原先在读取响应体之前就清掉，body 卡住时无兜底超时。
+
+**测试可移植性**
+
+- 移除 `tests/test_adversarial_timeout_and_rerank.mjs` 中的 `/workspace` 硬编码绝对路径。
+- 动态 `import()` 绝对路径改用 `pathToFileURL`，Windows 下不再抛 `ERR_UNSUPPORTED_ESM_URL_SCHEME`。

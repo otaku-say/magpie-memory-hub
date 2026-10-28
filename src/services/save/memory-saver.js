@@ -70,8 +70,12 @@ export async function saveMemory(client, cfg, m, ctx) {
   }
 
   // 1) 候选集拉取（按 project + lifecycle_status='active' 过滤，按 updated_at DESC 排序）
-  const queryParams = { project, lifecycle_status: "active", order_by: "updated_at DESC", limit: FETCH_LIMIT };
-  const allActiveRows = rowsOf(await client.list("memories", queryParams));
+  /* v6.48.0 修复：原先只发一次 list(limit=200) 且忽略 hasMore。活跃记忆超 200 条后，
+   * 指纹查重、语义查重、同标题 supersede、版本链基线全部只在最近一页生效——
+   * 重复行照写、revision 从 1 重新开始、旧版永不取代，且无任何日志。
+   * 现在复用 ncb.fetchAll 分页拉全量（默认最多 5 页 = 1000 条，与本仓其他工具口径一致）。 */
+  const queryParams = { project, lifecycle_status: "active", order_by: "updated_at DESC" };
+  const allActiveRows = await fetchAll(client, "memories", queryParams);
   let categoryRows = allActiveRows.filter((r) => !category || r.category === category);
 
   // BUG-38-2 / BUG-39-2: 支持显式指定 supersede_id（严格校验项目归属与有效性，前置到踩坑优先拦截之前）
@@ -194,11 +198,13 @@ export async function saveMemory(client, cfg, m, ctx) {
 
       const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
       const newTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-      const mergedTags = Array.from(new Set([...existingTags, ...newTags])).join(", ");
+      /* v6.48.0 修复：并集只增不减，多轮 ENRICHED 后必然撞 tags 列 VARCHAR(512)：
+       * MySQL strict 模式下整次保存抛错，非 strict 下静默截断出残缺标签（污染检索权重）。 */
+      const mergedTags = Array.from(new Set([...existingTags, ...newTags])).join(", ").slice(0, 512);
 
       const existingEntities = String(dup.related_entities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
       const newEntities = String(relatedEntities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
-      const mergedEntities = Array.from(new Set([...existingEntities, ...newEntities])).join(", ");
+      const mergedEntities = Array.from(new Set([...existingEntities, ...newEntities])).join(", ").slice(0, 512);
 
       const nextRevision = (Number(dup.revision) || 1) + 1;
       const targetTitle = (isExplicitSupersede && title) ? title : dup.title;
@@ -242,11 +248,11 @@ export async function saveMemory(client, cfg, m, ctx) {
       // BUG-3: NOOP 分支除了 recurrence/updated_at，还要把本次传入的 tags 与 related_entities 取并集回写
       const existingTags = String(dup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
       const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-      const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
+      const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ").slice(0, 512);
 
       const existingEntities = String(dup.related_entities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
       const incomingEntities = String(relatedEntities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
-      const mergedEntities = Array.from(new Set([...existingEntities, ...incomingEntities])).join(", ");
+      const mergedEntities = Array.from(new Set([...existingEntities, ...incomingEntities])).join(", ").slice(0, 512);
 
       const updatePayload = {
         recurrence: next,
@@ -294,11 +300,11 @@ export async function saveMemory(client, cfg, m, ctx) {
     const now = nowSql();
     const existingTags = String(crossDup.tags || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
     const newTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
-    const mergedTags = Array.from(new Set([...existingTags, ...newTags])).join(", ");
+    const mergedTags = Array.from(new Set([...existingTags, ...newTags])).join(", ").slice(0, 512);
 
     const existingEntities = String(crossDup.related_entities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
     const newEntities = String(relatedEntities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
-    const mergedEntities = Array.from(new Set([...existingEntities, ...newEntities])).join(", ");
+    const mergedEntities = Array.from(new Set([...existingEntities, ...newEntities])).join(", ").slice(0, 512);
 
     // 【P1-3】principle 准则保护：若新记录是 principle 且旧记录不是 principle，
     // 升级旧记录为 principle 并保留准则内容与指纹，绝不允许把 principle 降级为普通分类
@@ -413,9 +419,13 @@ export async function saveMemory(client, cfg, m, ctx) {
   } catch (e) {
     if (/duplicate entry/i.test(String(e.message))) {
       markRecent("m:" + project + ":" + fp); markRecent("m:" + fp);
-      const dupRow = rowsOf(await client.list("memories", { project, limit: FETCH_LIMIT })).filter(
-        (r) => r.content_fingerprint === fp
-      )[0];
+      /* v6.48.0 修复：原查询无 lifecycle_status 过滤、无排序、且只看首页。命中已失效行会把
+       * 复发计数加到无用记录上；目标行不在首页时直接走 NOOP，静默吞掉本期 recurrence。 */
+      const dupRow = (await fetchAll(client, "memories", {
+        project,
+        lifecycle_status: "active",
+        order_by: "updated_at DESC",
+      })).filter((r) => r.content_fingerprint === fp && !r.invalid_at)[0];
       if (dupRow) {
         const next = (Number(dupRow.recurrence) || 1) + initialRecurrence;
         const crystallizationThreshold = Number(m.crystallization_threshold ?? cfg?.crystallization_threshold ?? 5) || 5;
@@ -428,11 +438,11 @@ export async function saveMemory(client, cfg, m, ctx) {
 
         const existingTags = String(dupRow.tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
         const incomingTags = String(tags || "").split(/[,;\s，、]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-        const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ");
+        const mergedTags = Array.from(new Set([...existingTags, ...incomingTags])).join(", ").slice(0, 512);
 
         const existingEntities = String(dupRow.related_entities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
         const incomingEntities = String(relatedEntities || "").split(/[,;\s，、]+/).map((s) => s.trim()).filter(Boolean);
-        const mergedEntities = Array.from(new Set([...existingEntities, ...incomingEntities])).join(", ");
+        const mergedEntities = Array.from(new Set([...existingEntities, ...incomingEntities])).join(", ").slice(0, 512);
 
         const updatePayload = {
           recurrence: next,
