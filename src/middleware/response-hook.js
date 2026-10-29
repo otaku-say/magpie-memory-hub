@@ -57,6 +57,6 @@ function onResponseInner(body, ctx) {
 
 export function onResponse(body, ctx) {
   try { return onResponseInner(body, ctx); }
-  catch (e) { return _mwFailOpen("onResponse", e, body); }
+  catch (e) { return _mwFailOpen("onResponse", e, body, ctx); }
 }
 

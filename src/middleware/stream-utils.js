@@ -327,10 +327,21 @@ function stripMemoryBlock(text) {
 var MW_ERR_FULL_LOG = 20;
 var MW_ERR_SAMPLE_EVERY = 100;
 var _mwErrCount = { onRequest: 0, onEvent: 0, onResponse: 0 };
-function _mwFailOpen(name, e, fallback) {
+
+/* v6.49.0 日志等级（中间件运行在无文件系统的受限沙箱，只能按等级过滤后输出到网关控制台）：
+ * off=0 / error=1 / info=2 / debug=3。缺省按 info 处理，与历史行为一致。 */
+function _mwLogLevel(ctx) {
+  var s = String(((ctx && ctx.options) || {}).log_level || "");
+  if (s === "off") return 0;
+  if (s === "error") return 1;
+  if (s === "debug") return 3;
+  return 2;
+}
+
+function _mwFailOpen(name, e, fallback, ctx) {
   var key = String(name || "unknown");
   var n = (_mwErrCount[key] = (_mwErrCount[key] || 0) + 1);
-  if (n <= MW_ERR_FULL_LOG || n % MW_ERR_SAMPLE_EVERY === 0) {
+  if ((n <= MW_ERR_FULL_LOG || n % MW_ERR_SAMPLE_EVERY === 0) && _mwLogLevel(ctx) >= 1) {
     try {
       console.log("[memory-hub] " + key + " 已降级(fail-open) 第 " + n + " 次: " +
         ((e && e.name) || "Error") + ": " + String((e && e.message) || e).slice(0, 160));
@@ -347,5 +358,6 @@ export {
   CLOSE_TAG,
   stripStream,
   stripMemoryBlock,
-  _mwFailOpen
+  _mwFailOpen,
+  _mwLogLevel
 };

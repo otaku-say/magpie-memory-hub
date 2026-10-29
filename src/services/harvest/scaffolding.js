@@ -3,12 +3,13 @@
  * 依赖: 无外部依赖
  * 被依赖: src/services/harvest/*, gateway_harvest.js, gateway_harvest.hooks.js
  */
+import { logDebug } from "../../core/logger.js";
 
 var _diagLogged = {};
 export function _diag(tag, msg) {
   if (_diagLogged[tag]) return;
   _diagLogged[tag] = 1;
-  try { console.log("[memory-hub][diag] " + tag + ": " + String(msg).slice(0, 300)); } catch (_) {}
+  try { logDebug("[memory-hub][diag] " + tag + ": " + String(msg).slice(0, 300)); } catch (_) {}
 }
 
 /** Headroom :68-80 脚手架注入前缀黑名单 */

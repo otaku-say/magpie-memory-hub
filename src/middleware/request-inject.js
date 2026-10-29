@@ -4,7 +4,7 @@
  * 被依赖：./memory.middleware.js, 根目录 memory.middleware.js
  */
 import { buildContextBlock, buildAgentGuide } from "./inject-builder.js";
-import { _mwFailOpen } from "./stream-utils.js";
+import { _mwFailOpen, _mwLogLevel } from "./stream-utils.js";
 
 var PLUGIN_NAME = "magpie-memory-hub";
 var RRF_K = 60;
@@ -802,6 +802,7 @@ function onRequestInner(body, ctx) {
  * 用来区分「索引重建慢」与「长文本清洗慢」——先测量，再决定要不要动 cleanText 的正则。 */
 var MW_SLOW_MS = 50;
 function _logSlowRequest(dtMs, ctx) {
+  if (_mwLogLevel(ctx) < 2) return;
   try {
     var st = (ctx && ctx.state) || {};
     var opts = (ctx && ctx.options) || {};
@@ -819,8 +820,16 @@ export function onRequest(body, ctx) {
     var out = onRequestInner(body, ctx);
     var dt = ((typeof Date !== "undefined" && Date.now) ? Date.now() : 0) - t0;
     if (dt > MW_SLOW_MS) _logSlowRequest(dt, ctx);
+    else if (_mwLogLevel(ctx) >= 3) {
+      /* debug 全量：每次请求一条耗时记录，配合 [model] 打点即可定位 136ms 级劣化出在哪一段 */
+      try {
+        var st = (ctx && ctx.state) || {};
+        console.log("[memory-hub] onRequest " + dt + "ms proto=" + String(st.protocol || "?") +
+          " turn=" + (st.turnNo || 0) + " prompt=" + String(st.promptText || "").length + "B");
+      } catch (_) { /* 观测代码自身绝不抛 */ }
+    }
     return out;
   }
-  catch (e) { return _mwFailOpen("onRequest", e, body); }
+  catch (e) { return _mwFailOpen("onRequest", e, body, ctx); }
 }
 

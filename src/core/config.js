@@ -83,6 +83,8 @@ export function readOptions(options) {
     rerank_max_candidates: (Number.isFinite(Number(o.rerank_max_candidates)) && Number(o.rerank_max_candidates) > 0)
       ? Math.max(3, Math.min(25, Math.floor(Number(o.rerank_max_candidates))))
       : 10,
+    // v6.49.0 日志等级：off=零日志并自动清理历史日志文件；error=仅错误；info=常规事件；debug=全量（含请求与模型调用耗时）
+    log_level: ["off", "error", "info", "debug"].includes(o.log_level) ? o.log_level : "off",
     search_rewrite: o.search_rewrite !== false,
     search_rerank: o.search_rerank !== false,
     // 检索可解释性调试开关（设置页「检索可解释性追踪」勾选即落盘）：

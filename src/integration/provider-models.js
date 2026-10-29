@@ -102,6 +102,7 @@ export function cleanQuery(query) {
 }
 
 
+import { logError, logDebug } from "../core/logger.js";
 import { safeTimeoutMs } from "../core/time.js";
 import { scrubSecrets } from "../core/sanitize.js";
 import {
@@ -116,7 +117,7 @@ import {
 /* v6.48.0：模型输出解析失败必预留下可观测痕迹，否则线上分不清「模型没配」与「输出坏了」。 */
 function markParseFailed(model, rawContent) {
   try {
-    console.log("[memory-hub][model] parse-failed :: " + String(model || "") +
+    logError("[memory-hub][model] parse-failed :: " + String(model || "") +
       " :: " + scrubSecrets(String(rawContent || "")).slice(0, 200));
   } catch (_) {}
 }
@@ -176,6 +177,8 @@ export async function explainUnknownErrorWithModel({
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
   const timeoutMs = safeTimeoutMs(options.diagnose_timeout_ms, options.model_timeout_sec, 15000);
+  const __t0 = Date.now();
+  const __callTag = "diagnose";
   const doFetch = options._fetch || globalThis.fetch;
 
   // 调用预算熔断（v6.20.0 事故修复）：错误诊断属于后台辅助调用，超限直接跳过。
@@ -237,6 +240,7 @@ ${rawError.slice(0, 2000)}
     return null;
   } finally {
     clearTimeout(timer);
+    try { logDebug("[memory-hub][model] " + __callTag + " 耗时 " + (Date.now() - __t0) + "ms"); } catch (_) {}
   }
 }
 
@@ -313,6 +317,8 @@ export async function rewriteSearchQuery({
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
   const timeoutMs = safeTimeoutMs(options.search_rewrite_timeout_ms, options.model_timeout_sec, 12000);
+  const __t0 = Date.now();
+  const __callTag = "rewrite";
   const doFetch = options._fetch || globalThis.fetch;
 
   // 调用预算熔断（v6.20.0 事故修复）：搜索改写超限直接跳过，调用方回落纯词面检索。
@@ -368,6 +374,7 @@ export async function rewriteSearchQuery({
     return null;
   } finally {
     clearTimeout(timer);
+    try { logDebug("[memory-hub][model] " + __callTag + " 耗时 " + (Date.now() - __t0) + "ms"); } catch (_) {}
   }
 }
 
@@ -425,6 +432,8 @@ export async function auditMemoriesWithModel({
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
   const timeoutMs = safeTimeoutMs(options.audit_timeout_ms, options.model_timeout_sec, 15000);
+  const __t0 = Date.now();
+  const __callTag = "audit";
   const doFetch = options._fetch || globalThis.fetch;
 
   if (!modelBudgetCheck(options).allowed) return null;
@@ -526,6 +535,7 @@ export async function auditMemoriesWithModel({
         // 单块失败不阻断其余块
       } finally {
         clearTimeout(timer);
+        try { logDebug("[memory-hub][model] " + __callTag + " 分块耗时 " + (Date.now() - __t0) + "ms"); } catch (_) {}
       }
     }
   } catch (_) {
@@ -608,6 +618,8 @@ export async function rerankSearchResultsWithModel({
   const baseUrl = (options.gateway_url || options.api_base_url || process.env.MAGPIE_BASE_URL || "http://127.0.0.1:3425").replace(/\/+$/, "");
   const apiKey = options.gateway_api_key || options.api_key || process.env.MAGPIE_API_KEY || "";
   const timeoutMs = safeTimeoutMs(options.rerank_timeout_ms, options.rerank_timeout_sec || options.model_timeout_sec, 15000);
+  const __t0 = Date.now();
+  const __callTag = "rerank";
   const doFetch = options._fetch || globalThis.fetch;
 
   // 调用预算熔断守卫
@@ -714,6 +726,7 @@ export async function rerankSearchResultsWithModel({
     return null;
   } finally {
     clearTimeout(timer);
+    try { logDebug("[memory-hub][model] " + __callTag + " 耗时 " + (Date.now() - __t0) + "ms"); } catch (_) {}
   }
 }
 

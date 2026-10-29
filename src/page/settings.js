@@ -20,6 +20,7 @@
     ncb: ["ncb_instance", "mcp_key", "ncb_secret", "on_exist", "auto_init"],
     r2: ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"],
     model: ["extract_model", "classify_model", "audit_model", "dedup_schedule", "dedup_time", "dedup_weekday", "dedup_day", "dedup_batch_size", "classify_endpoint", "search_rewrite", "search_rerank", "harvest_max_per_min", "harvest_max_total", "model_timeout_sec", "rerank_timeout_sec", "rerank_max_candidates"],
+    log: ["log_level"],
     harvest: ["auto_harvest", "gatewayTimeoutMs"],
     extract: ["inline_extract", "min_confidence"],
     inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"]
@@ -31,7 +32,7 @@
     "r2_bucket_name", "r2_public_url",
     "extract_model", "classify_model", "audit_model", "dedup_time"
   ];
-  var SELECT = ["on_exist", "classify_endpoint", "dedup_schedule", "dedup_weekday"];
+  var SELECT = ["on_exist", "classify_endpoint", "dedup_schedule", "dedup_weekday", "log_level"];
   var NUM = {
     min_confidence: 0.6,
     max_inject_count: 5,
@@ -458,6 +459,8 @@
       return "重排超时应在 3~60 秒之间";
     if (o.rerank_max_candidates != null && (o.rerank_max_candidates < 3 || o.rerank_max_candidates > 25))
       return "重排候选上限应在 3~25 条之间";
+    if (o.log_level && ["off", "error", "info", "debug"].indexOf(o.log_level) === -1)
+      return "日志等级必须是 off/error/info/debug 之一";
     return "";
   }
 
@@ -1288,6 +1291,114 @@
     );
   }
 
+  /* ---------------- v6.49.0 日志导出 ---------------- */
+
+  /* 设置页跑在 connect-src none 的沙箱 iframe，不能 fetch；与 loadStatus 同模式，
+   * 用动态 script 标签（带缓存穿透）加载 Node 侧落盘的 _logs.js 快照。 */
+  function loadLogsSnapshot(callback) {
+    if (typeof document === "undefined" || !document.createElement) {
+      if (typeof callback === "function") callback(null, window.__memhubLogs || null);
+      return;
+    }
+    var head = document.head || (document.getElementsByTagName && document.getElementsByTagName("head")[0]) || document.body || document.documentElement;
+    if (!head) {
+      if (typeof callback === "function") callback(null, window.__memhubLogs || null);
+      return;
+    }
+    var old = (document.querySelector && document.querySelector("script[data-memhub-logs]")) || null;
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    var script = document.createElement("script");
+    script.setAttribute("data-memhub-logs", "true");
+    script.src = "_logs.js?t=" + Date.now();
+    var done = false;
+    var finish = function (data) {
+      if (done) return;
+      done = true;
+      if (script.parentNode) script.parentNode.removeChild(script);
+      if (typeof callback === "function") callback(null, data || null);
+    };
+    script.onload = function () { finish(window.__memhubLogs || null); };
+    script.onerror = function () { finish(null); };
+    head.appendChild(script);
+  }
+
+  /* 下载可能被沙箱 iframe 拦截（无 allow-downloads）：始终同时给出弹窗 + 全选复制兜底 */
+  function showLogsModal(text, count) {
+    try {
+      var old = document.getElementById("memhub_logs_modal");
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+      var box = document.createElement("div");
+      box.id = "memhub_logs_modal";
+      box.style.cssText = "position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;";
+      var panel = document.createElement("div");
+      panel.style.cssText = "max-width:860px;width:100%;max-height:80vh;display:flex;flex-direction:column;border-radius:10px;padding:12px;box-shadow:0 8px 32px rgba(0,0,0,.35);";
+      var bar = document.createElement("div");
+      bar.style.cssText = "display:flex;gap:8px;align-items:center;margin-bottom:8px;flex:0 0 auto;";
+      var tip = document.createElement("span");
+      tip.textContent = "日志 " + count + " 条（若下载被沙箱拦截，可全选复制）";
+      tip.style.cssText = "flex:1 1 auto;font-size:12px;opacity:.8;";
+      var sel = document.createElement("button");
+      sel.type = "button";
+      sel.textContent = "全选复制";
+      var close = document.createElement("button");
+      close.type = "button";
+      close.textContent = "关闭";
+      var ta = document.createElement("textarea");
+      ta.readOnly = true;
+      ta.value = text;
+      ta.style.cssText = "flex:1 1 auto;min-height:46vh;width:100%;resize:vertical;font-family:monospace;font-size:12px;";
+      sel.addEventListener("click", function () {
+        ta.focus();
+        ta.select();
+        var ok = false;
+        try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
+        sel.textContent = ok ? "已复制" : "请按 Ctrl+C";
+      });
+      close.addEventListener("click", function () {
+        if (box.parentNode) box.parentNode.removeChild(box);
+      });
+      bar.appendChild(tip);
+      bar.appendChild(sel);
+      bar.appendChild(close);
+      panel.appendChild(bar);
+      panel.appendChild(ta);
+      box.appendChild(panel);
+      document.body.appendChild(box);
+    } catch (_) { /* 弹窗失败不影响主流程 */ }
+  }
+
+  function exportLogs() {
+    var btn = $("btn_export_logs");
+    if (btn) btn.disabled = true;
+    cardSay("status_card_logs", "读取日志快照…");
+    loadLogsSnapshot(function (err, data) {
+      if (btn) btn.disabled = false;
+      if (!data || !data.entries || !data.entries.length) {
+        cardSay("status_card_logs", "暂无日志：等级为 off 时不产生日志文件", "warn");
+        return;
+      }
+      var text = data.entries.map(function (e) { return e.msg; }).join("\n");
+      var fname = "memhub-logs-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19) + ".log";
+      var downloaded = false;
+      try {
+        var blob = new Blob([text], { type: "text/plain" });
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = fname;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () {
+          try { URL.revokeObjectURL(a.href); if (a.parentNode) a.parentNode.removeChild(a); } catch (_) {}
+        }, 800);
+        downloaded = true;
+      } catch (_) { downloaded = false; }
+      cardSay("status_card_logs",
+        downloaded ? "已导出 " + data.count + " 条" : "下载被拦截，已改为弹窗展示",
+        downloaded ? "ok" : "warn");
+      showLogsModal(text, data.count);
+    });
+  }
+
   /* ---------------- 单卡片独立保存 ---------------- */
   function saveCard(cardKey, btnId, statusId) {
     if (!window.magpie || !window.magpie.options) {
@@ -1545,6 +1656,16 @@
         saveCard("model", "btn_save_card_model", "status_card_model");
       });
     }
+
+    // v6.49.0 日志与诊断卡片：保存等级 + 导出日志快照
+    var saveCardLogsBtn = $("btn_save_card_logs");
+    if (saveCardLogsBtn) {
+      saveCardLogsBtn.addEventListener("click", function () {
+        saveCard("log", "btn_save_card_logs", "status_card_logs");
+      });
+    }
+    var exportLogsBtn = $("btn_export_logs");
+    if (exportLogsBtn) exportLogsBtn.addEventListener("click", exportLogs);
 
     // MCP Key 切换密码显隐
     var toggleMcpBtn = $("toggle_mcp_key");

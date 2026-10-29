@@ -3,6 +3,7 @@
  * 依赖：node:fs, node:path, node:url
  * 被依赖：src/services/audit/auditor.js, src/services/audit/undo.js, src/services/harvest/offline-scan.js, src/page/actions.js
  */
+import { logError } from "./logger.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +14,7 @@ const STATUS_JSON_PATH = fileURLToPath(new URL("../../_status.json", import.meta
 
 export function writeCardStatus(key, payloadOrResult, opHint, customStatusPath) {
   if (key !== "ncb" && key !== "r2" && key !== "model" && key !== "gateway" && key !== "db" && key !== "audit" && key !== "inject") {
-    console.error(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2", "model", "gateway", "audit", "db" or "inject"`);
+    logError(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2", "model", "gateway", "audit", "db" or "inject"`);
     return false;
   }
 
@@ -85,7 +86,7 @@ export function writeCardStatus(key, payloadOrResult, opHint, customStatusPath) 
     try { if (fs.existsSync(tmpJsonPath)) fs.unlinkSync(tmpJsonPath); } catch (_) {}
     try { if (fs.existsSync(tmpJsPath)) fs.unlinkSync(tmpJsPath); } catch (_) {}
 
-    console.error("[memory-hub] writeCardStatus failed (directory read-only or not writable):", (err && err.message) || err);
+    logError("[memory-hub] writeCardStatus failed (directory read-only or not writable):", (err && err.message) || err);
     return false;
   }
 }

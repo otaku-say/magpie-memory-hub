@@ -77,7 +77,7 @@ export function onEvent(event, ctx) {
     }
     var isHostRuntime = Boolean(ctx && typeof ctx.report === "function");
     var fallback = mutated ? event : (isHostRuntime ? undefined : event);
-    return _mwFailOpen("onEvent", e, fallback);
+    return _mwFailOpen("onEvent", e, fallback, ctx);
   }
 }
 

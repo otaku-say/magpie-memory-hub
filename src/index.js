@@ -4,6 +4,7 @@
  * 被依赖：tools.js (薄门面)
  */
 
+import { initLogger, logError, logInfo } from "./core/logger.js";
 import {
   dbStatus, dbInit, dbProvision, dbReset, storageSetup, storageUpload, storageGuide, ncbCheck, RESET_CONFIRM,
 } from "./integration/db-tools.js";
@@ -395,6 +396,12 @@ export const MagpieMemoryHub = async (input, options) => {
    * 必须阻断入口副作用：不写 _status.js 的 db 卡片、不触发 autoInit、不触发 autoHarvest。 */
   const noScheduler = (options && options._no_scheduler === true) || (input && input._no_scheduler === true);
 
+  /* v6.49.0 日志等级：off 时立即清理插件产生的全部日志产物（logs/ 目录与 _logs.json/_logs.js）。
+   * 测试模式跳过初始化，避免给全量测试引入无谓的文件副作用。 */
+  if (!noScheduler && !isTestMode()) {
+    try { initLogger(cfg); } catch (_) {}
+  }
+
   // 同步将当前库的前缀解析状态写入 _status.js，供设置页即时只读展示真实库名
   if (!noScheduler) {
     try {
@@ -404,7 +411,7 @@ export const MagpieMemoryHub = async (input, options) => {
         writeCardStatus("db", dbInfo);
       }
     } catch (e) {
-      console.error("[memory-hub] db prefix sync error:", (e && e.message) || e);
+      logError("[memory-hub] db prefix sync error:", (e && e.message) || e);
     }
   }
 
@@ -416,14 +423,14 @@ export const MagpieMemoryHub = async (input, options) => {
     try {
       const r = await runPendingAction(options, cfg);
       if (r.ran) {
-        console.error("[memory-hub] 页面任务 " + r.op + "#" + r.id + " 已执行：" +
+        logError("[memory-hub] 页面任务 " + r.op + "#" + r.id + " 已执行：" +
           JSON.stringify(r.result).slice(0, 400));
       } else {
-        console.error("[memory-hub] 页面任务跳过：" + r.reason);
+        logError("[memory-hub] 页面任务跳过：" + r.reason);
       }
     } catch (e) {
       // 信标执行失败绝不能让宿主加载失败
-      console.error("[memory-hub] 页面任务执行异常：" + String(e && e.message || e));
+      logError("[memory-hub] 页面任务执行异常：" + String(e && e.message || e));
     }
   }
 
@@ -432,7 +439,7 @@ export const MagpieMemoryHub = async (input, options) => {
    * 宿主进程长驻，这个 promise 会自行跑完。 */
   if (!noScheduler && cfg.autoInit && cfg.mcpKey && !isTestMode()) {
     dbInit(cfg, {}).catch((e) => {
-      console.error("[memory-hub] auto_init 失败：" + String(e && e.message || e));
+      logError("[memory-hub] auto_init 失败：" + String(e && e.message || e));
     });
   }
 
@@ -448,7 +455,7 @@ export const MagpieMemoryHub = async (input, options) => {
       saveMemory,
       pitfallSave,
     }).catch((e) => {
-      console.error("[memory-hub] auto_harvest 失败：" + String((e && e.message) || e));
+      logError("[memory-hub] auto_harvest 失败：" + String((e && e.message) || e));
     });
   }
 
@@ -532,7 +539,7 @@ export const MagpieMemoryHub = async (input, options) => {
             writeCardStatus("r2", result, name);
           }
         } catch (e) {
-          console.error("[memory-hub] writeCardStatus tool hook error:", (e && e.message) || e);
+          logError("[memory-hub] writeCardStatus tool hook error:", (e && e.message) || e);
         }
         return result;
       },

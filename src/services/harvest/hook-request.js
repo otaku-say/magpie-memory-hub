@@ -4,6 +4,7 @@
  * 被依赖: src/services/harvest/index.js, src/services/harvest/hook-response.js, gateway_harvest.hooks.js
  */
 
+import { logDebug } from "../../core/logger.js";
 import { isInternalHarvestRequest } from "../../domain/token-budget.js";
 
 var _hookProbeLogged = 0;
@@ -12,7 +13,7 @@ export function _hookProbe(which, opts) {
   _hookProbeLogged = 1;
   try {
     var keys = (opts && typeof opts === "object") ? Object.keys(opts) : [];
-    console.log("[memory-hub][hook] " + which + " 已被调用 | auto_harvest=" +
+    logDebug("[memory-hub][hook] " + which + " 已被调用 | auto_harvest=" +
       String(opts && opts.auto_harvest) + " | options 键数=" + keys.length +
       " | gatewayTimeoutMs=" + String(opts && opts.gatewayTimeoutMs));
   } catch (_) { /* 连打印都不许抛 */ }

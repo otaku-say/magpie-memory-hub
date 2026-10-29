@@ -4,6 +4,7 @@
  * 被依赖: src/services/harvest/index.js, src/services/harvest/harvest-pipeline.js, gateway_harvest.js
  */
 
+import { logError } from "../../core/logger.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1027,7 +1028,7 @@ export async function harvestGateway(args, context) {
               memoriesSaved++;
             }
           } catch (e) {
-            console.error("[memory-hub] harvest saveMemory error:", (e && e.message) || e);
+            logError("[memory-hub] harvest saveMemory error:", (e && e.message) || e);
           }
         }
       }
@@ -1082,7 +1083,7 @@ export async function harvestGateway(args, context) {
               pitfallsSaved++;
             }
           } catch (e) {
-            console.error("[memory-hub] harvest pitfallSave error:", (e && e.message) || e);
+            logError("[memory-hub] harvest pitfallSave error:", (e && e.message) || e);
           }
         }
       }

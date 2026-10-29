@@ -13,7 +13,7 @@
 
   <div class="header-row">
     <h1>记忆中枢</h1>
-    <span class="version-tag">v6.48.1</span>
+    <span class="version-tag">v6.49.0</span>
   </div>
   <p class="lead">透明记忆网关：把经过 Magpie 的对话沉淀为长期记忆，并通过 MCP 供 agent 检索；内置踩坑库、R2 存储。</p>
 
@@ -545,6 +545,36 @@
     </div>
   </details>
 
+  <!-- ②.5 日志与诊断 -->
+  <details class="card" id="card_logs" open>
+    <summary>
+      <span class="chev"></span>
+      <span class="t">日志与诊断</span>
+      <span class="sub">等级过滤 · 全量记录 · 一键导出</span>
+    </summary>
+    <div class="body">
+      <div class="row">
+        <label for="log_level">日志等级 (log_level)</label>
+        <div class="control">
+          <select id="log_level">
+            <option value="off">关闭（自动清理全部日志文件）</option>
+            <option value="error">仅错误 (error)</option>
+            <option value="info">常规 (info)</option>
+            <option value="debug">调试 · 全量 (debug)</option>
+          </select>
+        </div>
+      </div>
+      <div class="hint">
+        off：不产生任何日志文件，保存后插件下次加载时自动清理历史日志；error：只记失败与降级；info：常规运行事件（含慢路径采样）；debug：全量日志（含每次请求耗时与在线模型调用耗时）。网关请求链路（中间件）运行在无文件系统的受限沙箱，其日志按同一等级过滤后输出到网关控制台，不进入导出文件。
+      </div>
+      <div class="card-save-row">
+        <button type="button" class="btn-card-save" id="btn_save_card_logs">保存本卡片</button>
+        <button type="button" id="btn_export_logs">导出日志</button>
+        <span class="status" id="status_card_logs" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </details>
+
   <!-- ③ 记忆采集来源 -->
   <details class="card" id="card_harvest">
     <summary>
@@ -947,5 +977,7 @@
   </div>
 </div>
 
+  <!-- v6.49.0 日志导出弹窗占位：真实节点由 settings.js 动态创建 -->
+  <div id="memhub_logs_modal" style="display:none;" aria-hidden="true"></div>
 </body>
 </html>

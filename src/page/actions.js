@@ -34,6 +34,7 @@
  *     **一律拒绝执行**（fail-closed），绝不冒重复清库的风险。
  */
 /** @internal 由 src/index.js 注入 MagpieMemoryHub 工厂函数 */
+import { logError } from "../core/logger.js";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
@@ -604,7 +605,7 @@ async function execute(action, cfg, fs, sp, state, options) {
           };
           writeCardStatus("audit", finalResult, "memory_audit");
         } catch (bgErr) {
-          console.error("[memory-hub] background memory_audit failed:", bgErr);
+          logError("[memory-hub] background memory_audit failed:", bgErr);
           writeCardStatus("audit", {
             ok: false,
             at: Date.now(),
@@ -649,7 +650,7 @@ async function execute(action, cfg, fs, sp, state, options) {
       writeCardStatus(cardKey, result, action.op);
     }
   } catch (e) {
-    console.error("[memory-hub] writeCardStatus execution error:", (e && e.message) || e);
+    logError("[memory-hub] writeCardStatus execution error:", (e && e.message) || e);
   }
 
   // 被确认门拦下 = 什么都没发生 → 清掉 pendingId，保留原 lastDoneId，用户可重试

@@ -4,6 +4,7 @@
  * 被依赖：src/tools/**, src/index.js, tools.js
  */
 
+import { logError } from "../../core/logger.js";
 import { nowSql, readOptions } from "../../core/config.js";
 import { isTestMode } from "../../core/env.js";
 import { isDedupDue, getDedupTimeWindow } from "../../core/time.js";
@@ -92,7 +93,7 @@ export async function checkScheduledDedup(client, cfg) {
     });
     return res;
   } catch (err) {
-    console.error("[memory-hub] checkScheduledDedup error:", (err && err.message) || err);
+    logError("[memory-hub] checkScheduledDedup error:", (err && err.message) || err);
     return null;
   }
 }
@@ -177,12 +178,12 @@ export function ensureAuditScheduler(client, cfg, optionsGetter) {
 
   if (!isTestMode()) {
     runScheduled().catch((e) => {
-      console.error("[memory-hub] 启动去重检查跳过:", (e && e.message) || e);
+      logError("[memory-hub] 启动去重检查跳过:", (e && e.message) || e);
     });
 
     _auditTimer = setInterval(() => {
       runScheduled().catch((e) => {
-        console.error("[memory-hub] 定时去重跳过:", (e && e.message) || e);
+        logError("[memory-hub] 定时去重跳过:", (e && e.message) || e);
       });
     }, 5 * 60 * 1000);
     if (_auditTimer && _auditTimer.unref) _auditTimer.unref();

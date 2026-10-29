@@ -4,6 +4,7 @@
  * 被依赖：model_budget.js, src/services/harvest/**, src/core/config.js, online_models.js, page_actions.js
  */
 
+import { logInfo } from "../core/logger.js";
 import { readFileSync } from "node:fs";
 
 export const MEMHUB_INTERNAL_HEADER = "x-memhub-internal";
@@ -215,7 +216,7 @@ function _prune(now) {
 function _warnOnce(tag, msg) {
   if (_warned.has(tag)) return;
   _warned.add(tag);
-  try { console.log("[memory-hub][model-budget] " + msg); } catch (_) {}
+  try { logInfo("[memory-hub][model-budget] " + msg); } catch (_) {}
 }
 
 export function getModelBudgetState() {

@@ -33,7 +33,7 @@ const ALLOWED_DRIFT = new Map([
   [
     "readOptions",
     {
-      delta: 16,
+      delta: 18,
       reason:
         "v6.47.0(c4286fc)+v6.46 纯增量：新增 model_timeout_sec / rerank_timeout_sec / rerank_max_candidates " +
         "三个超时与候选上限配置的归一化赋值（3×3 行）+ explain_debug 调试开关（1 行注释组 + 1 行字段）；" +
