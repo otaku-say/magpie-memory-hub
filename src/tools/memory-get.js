@@ -134,6 +134,9 @@ export async function memoryGet(client, cfg, rawArgs) {
       full_text: full,
       tags: hit.tags,
       related_entities: hit.related_entities || "",
+      /* v7.0.3：env_scope 必须回显。否则注入卡片里那句〔仅 os=windows〕
+       * 就没有任何工具层面的落点——排查“为什么这条没召回”时看不到原因。 */
+      env_scope: hit.env_scope || "",
       retrieval_count: count,
       last_used_at: lastUsed,
       revision: Number(hit.revision) || 1,
@@ -178,6 +181,7 @@ export async function memoryGet(client, cfg, rawArgs) {
       superseded_by_id: (hit.superseded_by_id != null && String(hit.superseded_by_id).trim() !== "") ? Number(hit.superseded_by_id) : null,
       _lifecycle_warning: warning || null,
       last_occurred_at: hit.last_occurred_at || now,
+      env_scope: hit.env_scope || "",
       _note: "已返回踩坑排障完整记录",
     };
     if (autoFallback) {

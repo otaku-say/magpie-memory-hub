@@ -17,6 +17,8 @@ import path from "node:path";
 
 import { saveMemory } from "../src/services/save/memory-saver.js";
 import { memoryForget } from "../src/tools/memory-forget.js";
+import { memoryGet } from "../src/tools/memory-get.js";
+import { memorySearch } from "../src/tools/memory-search.js";
 import { harvestWithOnlineModel } from "../src/services/harvest/extract.js";
 import { appliesToToScope, normalizeEnvScope, mergeEnvScope } from "../src/domain/env-scope.js";
 import { _resetRecentWrite } from "../src/core/state-recent.js";
@@ -150,6 +152,41 @@ await checkAsync("二次写入去重时作用域取并集", async () => {
   assert.ok(r2);
 });
 
+/* ================= 2.5 回显侧：env_scope 必须能被看见 ================= */
+console.log(NL + "▶ [2.5] 回显侧 env_scope 可见性");
+
+await checkAsync("memory_get 回显 env_scope（否则〔仅 os=windows〕无法溯源）", async () => {
+  cleanup();
+  _resetRecentWrite();
+  const r = await saveMemory(mockDbClient, cfg, {
+    project: TEST_PROJECT, title: "echo", content: "作用域回显验证的正文", category: "fact",
+    env_scope: "os=windows",
+  }, {});
+  const got = JSON.parse(await memoryGet(mockDbClient, cfg, { id: r.id }));
+  assert.strictEqual(got.env_scope, "os=windows", "memory_get 必须回显 env_scope");
+});
+
+await checkAsync("memory_get 对无作用域记录回显空串（不伪造）", async () => {
+  cleanup();
+  _resetRecentWrite();
+  const r = await saveMemory(mockDbClient, cfg, {
+    project: TEST_PROJECT, title: "echo2", content: "无作用域的正文", category: "fact",
+  }, {});
+  const got = JSON.parse(await memoryGet(mockDbClient, cfg, { id: r.id }));
+  assert.strictEqual(got.env_scope, "", "无作用域必须回显空串");
+});
+
+await checkAsync("memory_search 结果带 env_scope", async () => {
+  cleanup();
+  _resetRecentWrite();
+  await saveMemory(mockDbClient, cfg, {
+    project: TEST_PROJECT, title: "search-echo", content: "搜索回显作用域的正文", category: "fact",
+    env_scope: "arch=arm64",
+  }, {});
+  const cfgNoRerank = Object.assign({}, cfg, { search_rerank: false, search_rewrite: false });
+  const raw = await memorySearch(mockDbClient, cfgNoRerank, { project: TEST_PROJECT, query: "搜索回显作用域" });
+  assert.ok(String(raw).includes("arch=arm64"), "memory_search 结果必须带 env_scope");
+});
 /* ================= 3. 提炼侧 ================= */
 console.log(NL + "▶ [3] 提炼侧 applies_to → env_scope");
 
@@ -272,5 +309,5 @@ if (fail.length) {
   for (const f of fail) console.error("   - " + f);
   process.exit(1);
 }
-console.log("✅ v7.0.2 env_scope / applies_to / 负反馈 / 能力遥测 对抗回归全部通过（" + pass + " 项）");
+console.log("✅ v7.0.3 env_scope / applies_to / 负反馈 / 能力遥测 对抗回归全部通过（" + pass + " 项）");
 console.log("=================================================================");

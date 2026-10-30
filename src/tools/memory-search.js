@@ -222,6 +222,8 @@ export async function memorySearch(client, cfg, rawArgs) {
     content: x.row.content,
     tags: x.row.tags,
     related_entities: x.row.related_entities || null,
+    /* v7.0.3：带上作用域，才能解释“为何这条在某些客户端不出现” */
+    env_scope: x.row.env_scope || null,
     confidence: x.row.confidence_score,
     recurrence: Number(x.row.recurrence) || 1,
     retrieval_count: Number(x.row.retrieval_count) || 0,

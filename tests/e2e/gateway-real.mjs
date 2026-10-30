@@ -355,5 +355,5 @@ if (fail.length) {
   for (const f of fail) console.error("   - " + f);
   process.exit(1);
 }
-console.log("✅ v7.0.2 真机网关集成测试全部通过（" + pass + " 项）");
+console.log("✅ v7.0.3 真机网关集成测试全部通过（" + pass + " 项）");
 console.log("=================================================================");

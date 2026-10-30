@@ -167,7 +167,7 @@ console.log("=== 7. 契约对齐（设置页 / package.json / 三层接线）===
 await check("settings.html 有 log_level 选择器与导出按钮", () => {
   const h = fs.readFileSync(path.join(ROOT, "settings.html"), "utf8");
   return h.includes('id="log_level"') && h.includes('id="btn_export_logs"') &&
-    h.includes('id="btn_save_card_logs"') && h.includes("v7.0.2");
+    h.includes('id="btn_save_card_logs"') && h.includes("v7.0.3");
 });
 await check("settings.js 注册 SELECT/卡片/校验/导出函数", () => {
   const j = fs.readFileSync(path.join(ROOT, "src/page/settings.js"), "utf8");
@@ -176,7 +176,7 @@ await check("settings.js 注册 SELECT/卡片/校验/导出函数", () => {
 });
 await check("package.json 声明 log_level 默认 off", () => {
   const p = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
-  return p.version === "7.0.2" && p.magpie.options.log_level === "off";
+  return p.version === "7.0.3" && p.magpie.options.log_level === "off";
 });
 await check("Node 侧已收口（无裸 console.* 带 [memory-hub]）", () => {
   const files = [

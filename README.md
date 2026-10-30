@@ -2,13 +2,13 @@
 
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
-[![Version](https://img.shields.io/badge/version-v7.0.2-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-v7.0.3-blue.svg)](package.json)
 [![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen.svg)](tests/)
 [![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
 
 ---
 
-## 一、记忆工作模式与运行架构 (v7.0.2)
+## 一、记忆工作模式与运行架构 (v7.0.3)
 
 | 环节 | 运行时机制 | 协作方式与说明 |
 |---|---|---|
@@ -182,6 +182,17 @@ node tests/e2e/gateway-real.mjs         # 真机网关集成（真 HTTP + 真中
 ```
 
 详见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+---
+
+## v7.0.3 变更清单
+
+补上一个可用性漏洞：**`env_scope` 写进去了，但读不回来**。
+
+- `memory_get` / `memory_search` 的输出是字段白名单，`env_scope` 不在里面，
+  于是注入卡片里那句〔仅 os=windows〕没有任何工具层面的落点——排查「为什么这条没召回」时看不到原因。
+- 两处投影都补上 `env_scope`；无作用域时回显空串（不伪造）。
+- 新增 3 项断言：有作用域 / 无作用域 / `memory_search` 结果带作用域。
 
 ---
 

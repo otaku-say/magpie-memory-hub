@@ -64,6 +64,16 @@ const ALLOWED_DRIFT = new Map([
       file: "src/tools/pitfall-save.js",
     },
   ],
+  [
+    "memorySearch",
+    {
+      delta: 7,
+      reason:
+        "拆分后累计 +5 行（历史遗漏未登记，正好卡在阈值上所以一直没被拦）+ v7.0.3 新增 2 行：" +
+        "结果投影补 env_scope 回显（含 1 行说明注释）。既有分支顺序零改动",
+      file: "src/tools/memory-search.js",
+    },
+  ],
 ]);
 
 function sh(cmd) {
