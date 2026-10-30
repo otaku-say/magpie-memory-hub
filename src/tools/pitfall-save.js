@@ -4,6 +4,7 @@
  * 被依赖：src/index.js
  */
 
+import { normalizeEnvScope, mergeEnvScope, envScopeOf, envTagsOf } from "../domain/env-scope.js";
 import { normalizeToolArgs } from "./args.js";
 import { SEVERITIES, FETCH_LIMIT, nowSql } from "../core/config.js";
 import { isTestMode } from "../core/env.js";
@@ -283,6 +284,7 @@ export async function pitfallSave(client, cfg, rawArgs, ctx) {
         await client.update("pitfalls", dup.id, {
           recurrence: next,
           tags: mergedTags || dup.tags,
+          env_scope: mergeEnvScope(envScopeOf(dup), normalizeEnvScope(String(args.env_scope || ""))),
           last_occurred_at: now,
           updated_at: now,
         });
@@ -323,6 +325,7 @@ export async function pitfallSave(client, cfg, rawArgs, ctx) {
         solution: (isSolutionMoreDetailed && newSol) ? newSol : oldSol,
         root_cause: (hasExplicitRootCause && explicitRc) ? explicitRc : oldRc,
         tags: mergedTags || dup.tags,
+          env_scope: mergeEnvScope(envScopeOf(dup), normalizeEnvScope(String(args.env_scope || ""))),
         recurrence: next,
         last_occurred_at: now,
         updated_at: now,
@@ -347,6 +350,7 @@ export async function pitfallSave(client, cfg, rawArgs, ctx) {
         await client.update("pitfalls", dup.id, {
           recurrence: next,
           tags: mergedTags || dup.tags,
+          env_scope: mergeEnvScope(envScopeOf(dup), normalizeEnvScope(String(args.env_scope || ""))),
           last_occurred_at: now,
           updated_at: now,
         });
@@ -369,6 +373,7 @@ export async function pitfallSave(client, cfg, rawArgs, ctx) {
     created = await client.create("pitfalls", {
       project, client: clientVal, component, symptom, root_cause: rootCause, solution,
       severity, error_type: errorType, tags, related_entities: args.related_entities ? scrubSecrets(String(args.related_entities).trim()).slice(0, 500) : "", content_fingerprint: fp,
+      env_scope: normalizeEnvScope(String(args.env_scope || "").trim() || envTagsOf(args.related_entities || "")),
       recurrence: initialRecurrence, last_occurred_at: now,
       source_session: sourceSession,
       source_turn: sourceTurn,
@@ -397,6 +402,7 @@ export async function pitfallSave(client, cfg, rawArgs, ctx) {
             await client.update("pitfalls", dup.id, {
               recurrence: next,
               tags: mergedTags || dup.tags,
+          env_scope: mergeEnvScope(envScopeOf(dup), normalizeEnvScope(String(args.env_scope || ""))),
               last_occurred_at: now,
               updated_at: now,
             });
@@ -432,6 +438,7 @@ export async function pitfallSave(client, cfg, rawArgs, ctx) {
               solution: (isSolutionMoreDetailed && newSol) ? newSol : oldSol,
               root_cause: (hasExplicitRootCause && explicitRc) ? explicitRc : oldRc,
               tags: mergedTags || dup.tags,
+          env_scope: mergeEnvScope(envScopeOf(dup), normalizeEnvScope(String(args.env_scope || ""))),
               recurrence: next,
               last_occurred_at: now,
               updated_at: now,
@@ -445,6 +452,7 @@ export async function pitfallSave(client, cfg, rawArgs, ctx) {
           await client.update("pitfalls", dup.id, {
             recurrence: next,
             tags: mergedTags || dup.tags,
+          env_scope: mergeEnvScope(envScopeOf(dup), normalizeEnvScope(String(args.env_scope || ""))),
             last_occurred_at: now,
             updated_at: now,
           });

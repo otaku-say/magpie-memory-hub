@@ -4,6 +4,7 @@
  * 被依赖：./memory.middleware.js, 根目录 memory.middleware.js
  */
 import { buildContextBlock, buildAgentGuide } from "./inject-builder.js";
+import { buildEnv, matchEnvScope, envScopeOf } from "./capability.js";
 import { _mwFailOpen, _mwLogLevel } from "./stream-utils.js";
 
 var PLUGIN_NAME = "magpie-memory-hub";
@@ -248,7 +249,12 @@ function buildIndex(memories, now, version, project) {
     var entsStr = m.related_entities;
     if (entsStr) {
       var ents = String(entsStr).toLowerCase().split(/[\s,]+/);
-      for (var e = 0; e < ents.length; e++) if (ents[e].length >= 2) keys[ents[e]] = 1;
+      for (var e = 0; e < ents.length; e++) {
+        /* env:xxx 是保留的环境作用域标签（见 capability.envScopeOf），
+         * 它是过滤条件而不是检索词，进索引只会污染倒排桶。 */
+        if (ents[e].indexOf("env:") === 0) continue;
+        if (ents[e].length >= 2) keys[ents[e]] = 1;
+      }
     }
     if (m.tags) {
       var tags = String(m.tags).toLowerCase().split(",");
@@ -662,6 +668,23 @@ function onRequestInner(body, ctx) {
   ctx.state.memPending = "";
   ctx.opts = opts;
 
+  /* --- ⓠ 能力与环境画像（v7.0.0） ---
+   * 必须在注入前算出：工具指引要按能力分档（否则无 MCP 的客户端会被命令去
+   * 调不存在的工具），召回要按环境作用域过滤（否则 Windows 专属记忆会注入到
+   * arm64 alpine 沙箱会话里）。
+   * 不做跨请求缓存：同一会话内 body.tools 稳定，现算成本可忽略；
+   * 而缓存会让「客户端中途接上 MCP」这种真实场景永远不生效。 */
+  var capability = buildEnv(body, ctx, opts);
+  ctx.state.caps = capability.caps;
+  ctx.state.env = capability.env;
+  ctx.state.envAgent = capability.agentKey;
+  /* 只有工具真的就绪时才允许提「展开某条记忆」——否则无工具客户端会去调不存在的工具 */
+  opts = Object.assign({}, opts, { _canExpand: capability.caps.present });
+  /* 带作用域的记忆默认必须正向确认环境才召回（env_scope_strict 默认 true）。
+   * 没有作用域的记忆不受影响。 */
+  ctx.state.envScopeOpts = { requireKnown: opts.env_scope_strict !== false };
+  ctx.options = opts;
+
   var injected = "";
   var now = Date.now ? Date.now() : 0;
 
@@ -679,7 +702,15 @@ function onRequestInner(body, ctx) {
     if (built && opts.inject_principles !== false) {
       var cap = parseInt(opts.max_principles, 10) || 2;
       for (var pi = 0; pi < built.principles.length && principles.length < cap; pi++) {
-        principles.push(built.principles[pi]);
+        var pItem = built.principles[pi];
+        /* 准则虽然「无条件置顶」，但环境作用域必须过硬门：
+         * 「Windows 上用 X 改配置」这类准则一旦注入到 arm64 alpine 沙箱，
+         * 比不注入危害更大——它会被当成当前环境的铁律执行。
+         * 空作用域 = 通用，现有数据无需迁移。 */
+        var pScope = envScopeOf(pItem);
+        if (!matchEnvScope(pScope, capability.env, ctx.state.envScopeOpts)) continue;
+        if (pScope) pItem._envScope = pScope;
+        principles.push(pItem);
       }
     }
 
@@ -701,7 +732,13 @@ function onRequestInner(body, ctx) {
           seen[uid] = 1;
           m._uid = uid;
           m._lex = lexicalScore(m, tokens);
+          /* 环境作用域硬门：不匹配的候选连参与 RRF 的资格都没有。
+           * 放在这里而不是 buildIndex 里，因为索引是跨请求缓存的，
+           * 而 env 是逐请求变化的（同一快照服务不同客户端）。 */
           if (m._lex > 0) {
+            var mScope = envScopeOf(m);
+            if (mScope && !matchEnvScope(mScope, capability.env)) continue;
+            if (mScope) m._envScope = mScope;
             cand.push(m);
             if (cand.length >= HARD_CAND) break;
           }
@@ -775,7 +812,12 @@ function onRequestInner(body, ctx) {
 
   /* --- ② 可选：内联提炼指令 --- */
   var guideBlock = buildAgentGuide(prompt, opts, body, ctx);
-  if (guideBlock) injected += guideBlock;
+  if (guideBlock) {
+    injected += guideBlock;
+    /* 供响应层判定「注入了引导但模型没调本插件工具」——幻觉的直接证据 */
+    ctx.state.guideInjected = true;
+    ctx.state.guideTier = ctx.state.guideTier == null ? 2 : ctx.state.guideTier;
+  }
 
   if (!injected) return body;
 

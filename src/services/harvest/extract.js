@@ -6,6 +6,7 @@
  * 被依赖: src/services/harvest/harvest-pipeline.js, src/services/harvest/offline-scan.js, gateway_harvest.hooks.js, gateway_harvest.js
  */
 
+import { appliesToToScope, normalizeEnvScope } from "../../domain/env-scope.js";
 import { safeTimeoutMs } from "../../core/time.js";
 import { _diag } from "./scaffolding.js";
 import { parseExtractionJson } from "./dialog-extract.js";
@@ -23,6 +24,7 @@ export const HARVEST_SYSTEM_PROMPT = `你是一个专业的长期记忆与踩坑
 2. 偏好/约定 (preference)：用户表达的持久习惯、偏好风格或硬性约束（例如「统一使用 TypeScript」「不要使用 any」）。
 3. 架构决策 (decision)：经确认的技术选型、组件替代、接口协议约定（例如「API 网关采用 fastify 替代 express」）。
 4. 环境事实 (fact)：项目路径、可用的生效端口、确定的配置文件及生效选项、环境变量（例如「跨域必须在 config.toml 中配置 cors = true」）。
+5. 【环境限定守则】任何只在特定平台/架构/客户端成立的事实或踩坑，必须在 applies_to 里写明范围（如 Windows=/os=windows、macOS=/os=macos、arm64=/arch=arm64、仅某个agent=/agent=ishellpro）。**严禁把环境限定事实写成无修饰的普遍事实**——这类污染会直接导致其他环境执行错误操作。
 5. 真实踩坑与解法 (pitfall)：真实遇到的具体报错/异常现象，以及最终确证有效的解决办法（必须包含现象、根因、解法三要素，分别明确给出 root_cause 与 solution）。
 
 【严禁记录的内容】：
@@ -40,6 +42,7 @@ export const HARVEST_SYSTEM_PROMPT = `你是一个专业的长期记忆与踩坑
     "content": "核心事实、原则或踩坑详情（必须具体，包含关键参数或报错与解法）",
     "tags": "3~5个逗号分隔的同义检索词/别名/关键词（必须包含不同表述的检索同义词，如关于数据库密码必须包含：数据库,密码,凭据,db,credential,password 等，确保用户用不同同义词搜索时均可精准命中）",
     "related_entities": "逗号分隔的相关实体/技术栈/模块名（例如 Redis, Fastify, Docker；无特定实体时给空字符串 \"\"）",
+    "applies_to": "该条只在哪些环境成立；通用事实给空字符串 \"\"。可写自然语言（仅限 Windows）或规范串（os=windows,arch=amd64）；不确定就给空串，宁可为空不要猜",
     "confidence": 0.8到1.0之间的置信度数值,
     "root_cause": "技术根因（category 为 pitfall 时必填，说明引发报错的技术原因；非 pitfall 类可为空串 \"\"）",
     "solution": "已验证的解法（category 为 pitfall 时必填，说明确证有效的解决步骤；非 pitfall 类可为空串 \"\"）"
@@ -117,6 +120,9 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
       if (confidence < minConf) continue;
 
       const related_entities = item.related_entities ? String(item.related_entities).trim() : "";
+      /* v7.0.0 环境作用域：模型可能给规范串、也可能给人话，统一归一。
+       * 这是「平台限定事实」不再污染其他环境的唯一入口。 */
+      const env_scope = appliesToToScope(item.applies_to || item.env_scope || "");
 
       if (category === "pitfall" || category === "failure" || /踩坑|报错|error|failure/i.test(category)) {
         const root_cause = item.root_cause ? String(item.root_cause).trim() : "";
@@ -130,6 +136,7 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
           component: item.component || (tags.split(",")[0] || "general"),
           tags,
           related_entities,
+          env_scope,
           confidence,
           category: "pitfall",
         });
@@ -140,6 +147,7 @@ export async function harvestWithOnlineModel(dialogueText, options = {}) {
           content,
           tags,
           related_entities,
+          env_scope,
           confidence,
           category: VALID_CATS.includes(category) ? category : "fact",
         });

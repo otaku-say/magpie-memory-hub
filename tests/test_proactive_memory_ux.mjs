@@ -125,9 +125,19 @@ console.log("\n▶ [Test 1] memory.middleware.js 动态嗅探与意图感知引�
   console.log("  ✓ 1.2 规范与铁律意图感知验证通过");
 
   // 1.3 首轮 / 严格模式完整指引
+  /* v7.0.0 能力门控：无工具环境不再注入任何工具指引（档 0），
+   * 所以本用例必须显式带上工具，才能继续验证首轮【优先检索】文案。
+   * 「无工具 → 不注入」由 1.4 与 test_v700_capability_gate.mjs 覆盖。 */
   const bodyTurn1 = {
     model: "gpt-4o",
     messages: [{ role: "user", content: "你好，帮我开发一个新功能" }],
+    tools: [
+      { type: "function", function: { name: "mcp__magpie__memory_context" } },
+      { type: "function", function: { name: "mcp__magpie__memory_search" } },
+      { type: "function", function: { name: "mcp__magpie__pitfall_search" } },
+      { type: "function", function: { name: "mcp__magpie__memory_save" } },
+      { type: "function", function: { name: "mcp__magpie__pitfall_save" } },
+    ],
   };
   const ctxTurn1 = {
     protocol: "openai",
@@ -140,6 +150,28 @@ console.log("\n▶ [Test 1] memory.middleware.js 动态嗅探与意图感知引�
   assert.ok(text3.includes("优先检索"), "首轮指引必须包含优先检索");
   assert.ok(text3.includes("及时沉淀"), "首轮指引必须包含及时沉淀");
   console.log("  ✓ 1.3 首轮完整指引验证通过");
+
+  // 1.4 反证：无工具环境必须完全不注入工具指引（v7.0.0 能力门控档 0）
+  const bodyNoTools = {
+    model: "gpt-4o",
+    messages: [{ role: "user", content: "项目遇到报错: ECONNREFUSED 127.0.0.1:8080" }],
+  };
+  const ctxNoTools = {
+    protocol: "openai",
+    options: { inline_extract: true },
+    state: { turnNo: 2 },
+  };
+  const req4 = mwOnRequest(JSON.parse(JSON.stringify(bodyNoTools)), ctxNoTools);
+  const text4 = req4.messages[0].content;
+  assert.ok(
+    !text4.includes("[Memory Agent Guide"),
+    "反证失败：无工具环境仍然注入了工具指引，这是 ishellpro 幻觉调用的直接成因"
+  );
+  assert.ok(
+    !/magpie-memory-hub_(memory|pitfall)_/.test(text4),
+    "反证失败：无工具环境的注入文本里出现了硬编码工具名"
+  );
+  console.log("  ✓ 1.4 无工具环境零工具指引反证通过");
 }
 
 // -----------------------------------------------------------------

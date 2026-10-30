@@ -5,7 +5,7 @@
  * 被依赖：src/integration/schema.js, src/integration/mcp-client.js, src/integration/db-tools.js, tests
  */
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /** 各版本做了什么（给人看，也用于生成变更说明）。 */
 export const MIGRATIONS = {
@@ -15,6 +15,7 @@ export const MIGRATIONS = {
   4: "新增来源可追溯性字段：memories 与 pitfalls 表增加 source_session (VARCHAR 128) 与 source_turn (INT)",
   5: "新增复发与去重计数机制：memories 表增加 recurrence (INT, default 1) 字段，对齐 pitfalls 表",
   6: "规模化检索与增量扫描复合索引：memories 增加 idx_memories_lookup (project, lifecycle_status, updated_at)，pitfalls 增加 idx_pitfalls_lookup (project, updated_at)",
+  7: "环境作用域：memories 与 pitfalls 增加 env_scope (VARCHAR 256)，用于把平台/架构/客户端限定的事实挡在错误环境之外；空值 = 通用（向后兼容）",
 };
 
 /**
@@ -38,6 +39,9 @@ export const TABLES = {
       { name: "full_text", type: "TEXT", nullable: true },
       { name: "tags", type: "VARCHAR", length: 512, default: "''" },
       { name: "related_entities", type: "VARCHAR", length: 512, default: "''" },
+      /* v7.0.0 环境作用域：`k=v` 逗号分隔，空串 = 通用（向后兼容全部存量数据）。
+       * 用于把「Windows 上用 X」「arm64 上要 Y」这类平台限定事实挡在错误环境之外。 */
+      { name: "env_scope", type: "VARCHAR", length: 256, default: "''" },
       /* 指纹目前恰好是 32 位十六进制（tools.js 与 harvest.py 都 slice(0,32)）。
        * 保持 VARCHAR(64) 提供充足余量。 */
       { name: "content_fingerprint", type: "VARCHAR", length: 64, notNull: true },
@@ -92,6 +96,8 @@ export const TABLES = {
       { name: "error_type", type: "VARCHAR", length: 64, default: "''" },
       { name: "tags", type: "VARCHAR", length: 512, default: "''" },
       { name: "related_entities", type: "VARCHAR", length: 500, nullable: true },
+      // v7.0.0 环境作用域：语义同 memories.env_scope
+      { name: "env_scope", type: "VARCHAR", length: 256, default: "''" },
       { name: "content_fingerprint", type: "VARCHAR", length: 64, notNull: true },
       { name: "recurrence", type: "INT", default: "1" },
       { name: "invalid_at", type: "DATETIME", nullable: true },

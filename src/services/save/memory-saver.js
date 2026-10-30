@@ -9,6 +9,7 @@ import { markRecent, justWritten } from "../../core/state-recent.js";
 import { rowsOf, fetchAll } from "../../integration/ncb.js";
 import { freshness } from "../../domain/scoring.js";
 import { scrubSecrets } from "../../core/sanitize.js";
+import { normalizeEnvScope, mergeEnvScope, envScopeOf, envTagsOf } from "../../domain/env-scope.js";
 import {
   normalizeSemanticText,
   semanticFingerprint,
@@ -42,6 +43,10 @@ export async function saveMemory(client, cfg, m, ctx) {
     : content;
   const tags = _normalizeTagsWithHandoff(m, scrubSecrets(String(m.tags || "").trim().toLowerCase()));
   const relatedEntities = scrubSecrets(String(m.related_entities || "").trim());
+  /* 环境作用域（v7 schema）：显式参数优先，其次从 related_entities 的 env: 保留标签推导。
+   * 两条路径走同一个 normalizeEnvScope，保证入库格式唯一。
+   * 归一失败永远不会抛错：作用域是附加元数据，不该阻断一次有效保存。 */
+  const envScope = normalizeEnvScope(String(m.env_scope || "").trim() || envTagsOf(relatedEntities));
   const rawConf = typeof m.confidence === "number"
     ? m.confidence
     : (m.confidence !== undefined && m.confidence !== null && m.confidence !== "" && !isNaN(Number(m.confidence)) ? Number(m.confidence) : 1);
@@ -216,6 +221,7 @@ export async function saveMemory(client, cfg, m, ctx) {
         full_text: mergedFullText,
         tags: mergedTags || dup.tags,
         related_entities: mergedEntities || dup.related_entities,
+        env_scope: mergeEnvScope(envScopeOf(dup), envScope),
         recurrence: next,
         revision: nextRevision,
         updated_at: now,
@@ -258,6 +264,7 @@ export async function saveMemory(client, cfg, m, ctx) {
         recurrence: next,
         tags: mergedTags || dup.tags,
         related_entities: mergedEntities || dup.related_entities,
+        env_scope: mergeEnvScope(envScopeOf(dup), envScope),
         updated_at: now,
       };
       if (isCrystallized) {
@@ -325,6 +332,7 @@ export async function saveMemory(client, cfg, m, ctx) {
       recurrence: next,
       tags: mergedTags || crossDup.tags,
       related_entities: mergedEntities || crossDup.related_entities,
+      env_scope: mergeEnvScope(envScopeOf(crossDup), envScope),
       updated_at: now,
     };
     if (isNewPrinciple) {
@@ -385,6 +393,7 @@ export async function saveMemory(client, cfg, m, ctx) {
     full_text: fullText,
     tags,
     related_entities: relatedEntities,
+    env_scope: envScope,
     content_fingerprint: fp,
     confidence_score: confidence,
     lifecycle_status: "active",
@@ -448,6 +457,7 @@ export async function saveMemory(client, cfg, m, ctx) {
           recurrence: next,
           tags: mergedTags || dupRow.tags,
           related_entities: mergedEntities || dupRow.related_entities,
+          env_scope: mergeEnvScope(envScopeOf(dupRow), envScope),
           updated_at: nowSql(),
         };
         if (isCrystallized) {

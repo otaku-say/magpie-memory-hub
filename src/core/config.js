@@ -85,6 +85,17 @@ export function readOptions(options) {
       : 10,
     // v6.49.0 日志等级：off=零日志并自动清理历史日志文件；error=仅错误；info=常规事件；debug=全量（含请求与模型调用耗时）
     log_level: ["off", "error", "info", "debug"].includes(o.log_level) ? o.log_level : "off",
+    /* v7.0.0 能力门控与环境作用域（详见 docs/RESEARCH-capability-gating.md） */
+    capability_gate: (o.capability_gate === "off") ? "off" : "auto",
+    /* 带作用域的记忆是否必须正向确认环境才召回（默认 true = 安全侧） */
+    env_scope_strict: o.env_scope_strict !== false,
+    guide_on_no_tools: o.guide_on_no_tools === true,
+    /* 客户端画像：JSON 字符串或对象；解析失败一律当作空，绝不因此丢记忆 */
+    client_profiles: o.client_profiles || "",
+    /* 零工具写入通道（仿 mem0）：配置后无 MCP 的客户端也能真写入 */
+    cli_channel: o.cli_channel || "",
+    /* 幻觉遥测：检测到模型调了未通告的工具时落盘，供设置页与自愈使用 */
+    caps_telemetry: o.caps_telemetry !== false,
     search_rewrite: o.search_rewrite !== false,
     search_rerank: o.search_rerank !== false,
     // 检索可解释性调试开关（设置页「检索可解释性追踪」勾选即落盘）：

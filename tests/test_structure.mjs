@@ -21,7 +21,11 @@ const GATES = {
 };
 
 // 根目录允许存在的非门面 JS（运行时状态、测试辅助）
-const ROOT_ALLOWED_NON_GATE = ["_status.js"];
+const ROOT_ALLOWED_NON_GATE = [
+  "_status.js",
+  // v7.0.0 零工具写入通道：与 tools.js 同级的宿主契约入口（opts.cli_channel 指它）
+  "memory-cli.js",
+];
 
 // src/ 允许的一级目录
 const SRC_DIRS = ["core", "domain", "integration", "services", "tools", "middleware", "page"];

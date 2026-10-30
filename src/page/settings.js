@@ -21,6 +21,7 @@
     r2: ["r2_account_id", "r2_access_key_id", "r2_secret_access_key", "r2_bucket_name", "r2_public_url"],
     model: ["extract_model", "classify_model", "audit_model", "dedup_schedule", "dedup_time", "dedup_weekday", "dedup_day", "dedup_batch_size", "classify_endpoint", "search_rewrite", "search_rerank", "harvest_max_per_min", "harvest_max_total", "model_timeout_sec", "rerank_timeout_sec", "rerank_max_candidates"],
     log: ["log_level"],
+    caps: ["capability_gate", "guide_on_no_tools", "env_scope_strict", "client_profiles", "cli_channel", "caps_telemetry"],
     harvest: ["auto_harvest", "gatewayTimeoutMs"],
     extract: ["inline_extract", "min_confidence"],
     inject: ["inject_principles", "ccr_cards", "max_inject_count", "max_budget_chars", "max_principles", "disabled"]
@@ -30,9 +31,10 @@
     "ncb_instance", "ncb_secret", "mcp_key",
     "r2_account_id", "r2_access_key_id", "r2_secret_access_key",
     "r2_bucket_name", "r2_public_url",
-    "extract_model", "classify_model", "audit_model", "dedup_time"
+    "extract_model", "classify_model", "audit_model", "dedup_time",
+    "cli_channel", "client_profiles"
   ];
-  var SELECT = ["on_exist", "classify_endpoint", "dedup_schedule", "dedup_weekday", "log_level"];
+  var SELECT = ["on_exist", "classify_endpoint", "dedup_schedule", "dedup_weekday", "log_level", "capability_gate"];
   var NUM = {
     min_confidence: 0.6,
     max_inject_count: 5,
@@ -56,7 +58,10 @@
     "inject_principles",
     "search_rewrite",
     "search_rerank",
-    "explain_debug"
+    "explain_debug",
+    "guide_on_no_tools",
+    "env_scope_strict",
+    "caps_telemetry"
   ];
 
   var current = {};
@@ -295,7 +300,7 @@
     });
     BOOL.forEach(function (k) {
       var el = $(k); if (!el) return;
-      if (k === "inline_extract" || k === "inject_principles" || k === "search_rewrite" || k === "search_rerank") {
+      if (k === "inline_extract" || k === "inject_principles" || k === "search_rewrite" || k === "search_rerank" || k === "caps_telemetry" || k === "env_scope_strict") {
         el.checked = o[k] !== false;
         return;
       }
@@ -317,6 +322,10 @@
       }
       if (k === "dedup_weekday" && !o[k]) {
         el.value = "1";
+        return;
+      }
+      if (k === "capability_gate" && !o[k]) {
+        el.value = "auto";
         return;
       }
       if (typeof o[k] === "string" || typeof o[k] === "number") el.value = String(o[k]);
@@ -643,6 +652,8 @@
       renderDbPrefix(statusData.db);
     }
     var cardKeys = ["ncb", "r2", "model", "gateway", "inject"];
+    // v7.0.0 能力统计卡片（宿主读 caps-stats.json 后写入 _status.js）
+    if (statusData.caps) renderStatusBlock("caps_action_status", statusData.caps);
     for (var i = 0; i < cardKeys.length; i++) {
       var key = cardKeys[i];
       var cid = containerOfOp(key);
@@ -1400,10 +1411,58 @@
   }
 
   /* ---------------- 单卡片独立保存 ---------------- */
+  /* v7.0.0 一键补齐画像：把 caps-stats 里给出的降档建议并入 client_profiles。
+   * 页面不能联网也读不到文件，数据只能来自宿主写好的 window.__memhubStatus.caps。
+   * 只改文本域，不自动保存——让用户先看到即将写入的内容再点保存。 */
+  function autofillProfiles() {
+    var st = window.__memhubStatus || {};
+    var cap = st.caps || null;
+    var sug = cap && cap.detail && cap.detail.suggestions ? cap.detail.suggestions : null;
+    var names = sug ? Object.keys(sug) : [];
+    if (!names.length) {
+      cardSay("status_card_caps_autofill", "暂无降档建议：先让 agent 跑几轮并出现幻觉调用", "bad");
+      return;
+    }
+    var el = $("client_profiles");
+    if (!el) return;
+    var cur = {};
+    var raw = String(el.value || "").trim();
+    if (raw) {
+      try { cur = JSON.parse(raw); } catch (e) { cur = {}; }
+      if (!cur || typeof cur !== "object" || Array.isArray(cur)) cur = {};
+    }
+    var added = [];
+    names.forEach(function (k) {
+      var base = (cur[k] && typeof cur[k] === "object") ? cur[k] : {};
+      cur[k] = Object.assign({}, base, sug[k]);
+      added.push(k);
+    });
+    el.value = JSON.stringify(cur, null, 2);
+    cardSay("status_card_caps_autofill", "已写入 " + added.join(", ") + "，点「保存本卡片」生效", "ok");
+  }
+
   function saveCard(cardKey, btnId, statusId) {
     if (!window.magpie || !window.magpie.options) {
       cardSay(statusId, "桥接未就绪", "bad");
       return;
+    }
+    /* v7.0.0：client_profiles 是自由编辑的 JSON，非法内容一律拒绝落盘。
+     * 为什么不静默容错：用户以为画像是生效的、实际是空的，比保存失败更难排查。 */
+    if (cardKey === "caps") {
+      var cpEl = $("client_profiles");
+      if (cpEl) {
+        var cpRaw = String(cpEl.value || "").trim();
+        if (cpRaw) {
+          try {
+            var cpObj = JSON.parse(cpRaw);
+            if (!cpObj || typeof cpObj !== "object" || Array.isArray(cpObj)) throw new Error("必须是 JSON 对象");
+            cpEl.value = JSON.stringify(cpObj, null, 2);
+          } catch (e) {
+            cardSay(statusId, "client_profiles 不是合法 JSON：" + (e && e.message ? e.message : e), "bad");
+            return;
+          }
+        }
+      }
     }
     var btn = $(btnId);
     if (btn) btn.disabled = true;
@@ -1633,6 +1692,17 @@
     if (saveCardHarvestBtn) {
       saveCardHarvestBtn.addEventListener("click", function () {
         saveCard("harvest", "btn_save_card_harvest", "status_card_harvest");
+      });
+    }
+
+    var autofillBtn = $("btn_autofill_profiles");
+    if (autofillBtn) autofillBtn.addEventListener("click", autofillProfiles);
+
+    /* v7.0.0 能力门控与环境作用域卡片 */
+    var saveCardCapsBtn = $("btn_save_card_caps");
+    if (saveCardCapsBtn) {
+      saveCardCapsBtn.addEventListener("click", function () {
+        saveCard("caps", "btn_save_card_caps", "status_card_caps");
       });
     }
 

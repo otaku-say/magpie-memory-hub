@@ -2,17 +2,21 @@
 
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
-[![Version](https://img.shields.io/badge/version-v6.49.0-blue.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-98%20passed-brightgreen.svg)](tests/)
+[![Version](https://img.shields.io/badge/version-v7.0.0-blue.svg)](package.json)
+[![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen.svg)](tests/)
 [![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
 
 ---
 
-## 一、记忆工作模式与运行架构 (v6.49.0)
+## 一、记忆工作模式与运行架构 (v7.0.0)
 
 | 环节 | 运行时机制 | 协作方式与说明 |
 |---|---|---|
 | **意图感知引导** | **动态嗅探 + 意图分流** | 中间件动态嗅探客户端工具名前缀（适配 `mcp__magpie__...`），根据对话特征按需注入：排障意图（强制先查已知避坑、修完必存踩坑）、规范意图（立即沉淀 `principle` 铁律）、首轮引导（检索+沉淀指南） |
+| **能力门控** | **按通告工具分档注入** | 从本次请求的 `body.tools` / `functions` / Gemini `functionDeclarations` 提取**真实通告的工具名**，分三档：无工具→整块不注入；有工具但非本插件→只给「能力未确认」陈述（不写具体工具名）；工具就绪→用真实名并附「禁止换名重试」。无 MCP 客户端不再被命令去调不存在的工具 |
+| **环境作用域** | **`env_scope` 硬过滤** | 记忆带 `env_scope`（如 `os=windows,arch=amd64`）；召回与准则置顶都先过环境硬门，**带作用域必须正向确认才召回**（`env_scope_strict` 默认开）。客户端身份取自 `x-magpie-agent` 头或宿主 `ctx.agent`，由 `client_profiles` 映射到画像 |
+| **零工具通道** | **`memory-cli.js`** | 配置 `cli_channel` 后，没有 MCP 的客户端会用 CLI 读写记忆——可用性不再绑在「工具一定存在」这个前提上（mem0 同款思路） |
+| **幻觉遥测** | **确定性检测 + 降档建议** | 响应层直接核对模型发出的 tool_call 名是否在本次通告清单里；不是「率估算」。累计到阈值后给出 `client_profiles` 降档建议，落盘 `~/.magpie-memory-hub/caps-stats.json` |
 | **一站式召回** | **MCP `memory_context` 直连** | 一次调用同时召回当前项目的核心行为准则 (`principle`)、相关历史记忆 (`memories`) 以及 Top 3 避坑排障经验 (`pitfalls`)，支持跨项目全局穿透兜底 |
 | **深度检索与重排** | **双路改写 + 在线模型重排** | `memory_search` 与 `pitfall_search` 支持原始词 + 在线模型改写词双路分词召回，并调用在线大模型进行高精度语义相关度重排 (rerank) |
 | **安全写入与脱敏** | **自动正则脱敏 (`scrubSecrets`)** | 写入记忆或踩坑时，入库前自动将明文 API Key (`sk-...`, `ghp_...`, `Bearer ...`, 数据库密码) 脱敏为 `***REDACTED***`，杜绝密钥上云 |
@@ -115,28 +119,31 @@ grep '"version"' /config/magpie/plugins/node_modules/magpie-memory-hub/package.j
 
 ## 五、测试与质量保证
 
-全套 **98 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
+全套 **100 个自动化测试套件** 与 **红队反证靶场** 均在独立 Linux 容器中通过验证：
 
 ```bash
-node tests/test_meta.mjs             # 98 个测试文件元检查（100% 隔离合规）
+node tests/test_meta.mjs             # 100 个测试文件元检查（100% 隔离合规）
 node tests/adversarial_v629_gate.mjs # 红队 6 大核心缺陷反证靶场（6/6 GREEN）
 node tests/test_proactive_memory_ux.mjs # 主动记忆、一站式召回与脱敏专项测试
 node tests/settings_page_test.mjs    # 设置页表单与 DOM 交互测试
 node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
+node tests/test_v700_capability_gate.mjs # 能力门控 / 环境作用域 / 幻觉检测 35 项
+node tests/test_v700_env_scope.mjs      # env_scope / applies_to / 负反馈 / 遥测 12 项
+node tests/e2e/gateway-real.mjs         # 真机网关集成（真 HTTP + 真中间件 + 真子进程）
 ```
 
-**计数口径（三处数字同源，均取 `tests/` 活跃套件总数 98）**：徽章、本节正文与项目结构树声明的是同一批套件；
-`tests/test_meta.mjs` 的锁定断言 `testFiles.length === 98` 是唯一权威值，`tests/test_helpers.mjs` 是共享桩库、
+**计数口径（三处数字同源，均取 `tests/` 活跃套件总数 100）**：徽章、本节正文与项目结构树声明的是同一批套件；
+`tests/test_meta.mjs` 的锁定断言 `testFiles.length === 100` 是唯一权威值，`tests/test_helpers.mjs` 是共享桩库、
 `tests/test_meta.mjs` 自身是元检查器，二者不计入套件数。
 
-全量逐套执行入口（跳过 `test_meta.mjs` 元检查器与 `test_helpers.mjs` 共享桩库，其余 98 个套件串行全跑）实测：
-**通过 91 / 跳过 4 / 失败 0**；4 套跳过
+全量逐套执行入口（跳过 `test_meta.mjs` 元检查器与 `test_helpers.mjs` 共享桩库，其余 100 个套件串行全跑）实测：
+**通过 96 / 跳过 4 / 失败 0**；4 套跳过
 （`test_all_20_tools_e2e`、`test_backend_acceptance`、`test_mcp_only`、`test_pollution_guard`）均因容器内缺少
 真实 NoCodeBackend 凭证或宿主环境而显式 `exit 77`，属于可解释跳过而非失败。
 
 ---
 
-## 日志与诊断 (v6.49.0)
+## 日志与诊断 (v7.0.0)
 
 `log_level` 配置项（package.json options / 设置页「日志与诊断」卡片）控制插件日志：
 
@@ -169,12 +176,65 @@ node tests/check_schema_sync.mjs     # 表结构与版本号严格对齐检查
 │   │   └── harvest/    对话采集
 │   ├── tools/          MCP 工具入口
 │   └── page/           设置页面
-├── tests/              测试套件（98 套）
+├── tests/              测试套件（100 套）
 ├── docs/               架构文档与决策记录
 └── tools.js 等         仅保留宿主契约入口（tools / middleware / hooks）与运行时状态
 ```
 
 详见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+---
+
+## v7.0.0 变更清单
+
+本轮完成 v6.50 遗留的五项改造，并用真机测试挖出并修正了一个设计错误。
+调研依据见 [docs/RESEARCH-capability-gating.md](docs/RESEARCH-capability-gating.md)。
+
+**schema v7：`env_scope` 升为真列**
+
+- `memories` 与 `pitfalls` 增加 `env_scope VARCHAR(256)`，空值 = 通用（存量数据零迁移）。
+- `db_init` 幂等迁移自动补列；`related_entities` 里的 `env:os=windows` 保留标签仍然兼容。
+- 保存侧两条路径（显式参数 / 保留标签）走同一个 `normalizeEnvScope`；二次写入去重时作用域**取并集**而不是覆盖。
+
+**提炼侧治本：`applies_to`**
+
+- 提炼提示新增「环境限定守则」：平台限定事实必须写 `applies_to`，严禁写成无修饰的普遍事实。
+- `appliesToToScope()` 把「仅限 Windows」「arm64 / alpine」这类人话归一成 `os=windows` / `arch=arm64,agent=alpine`。
+
+**真机测试挖出的设计错误：fail-open → fail-closed**
+
+- 首版对「未知维度」fail-open，导致没有 os 画像的 ishellpro 依然收到 Windows 准则。
+- 现改为：**带作用域的记忆必须正向确认环境才召回**；无作用域记忆不受影响。开关 `env_scope_strict`。
+
+**能力遥测与自愈**
+
+- `response-hook.js` 对四种协议的 tool_call 做确定性核对：`unadvertised`（通告了但名字不在清单）/ `unavailable`（根本没通告工具却调）。
+- 中间件无 fs，检测结果经 `ctx.state.capsTelemetry` 交给宿主钩子落盘（`src/services/caps-stats.js`，60s 节流）。
+- 幻觉累计 ≥ 3 且几乎没用上工具时，输出 `client_profiles` 降档建议。
+
+**零工具写入通道**
+
+- 新增根目录 `memory-cli.js`：`save / pitfall / search / context / doctor`，走同一套工具实现。
+- `cli_channel` 配置后，无工具环境的提示会给出 CLI 命令（仍不给任何 MCP 工具名）。
+- 这意味着 ishellpro 从「不幻觉」升级到「真能读写」。
+
+**设置页**
+
+- 新卡片「能力门控与环境作用域」：`capability_gate` / `guide_on_no_tools` / `env_scope_strict` / `caps_telemetry` / `cli_channel` / `client_profiles`。
+- `client_profiles` 是自由编辑 JSON，**非法 JSON 拒绝保存**（静默容错会让用户误以为画像生效）。
+- 「一键补齐 client_profiles」：宿主加载时把 `caps-stats.json` 的降档建议写进 `_status.js`，
+  页面读 `caps_action_status` 后一键写入文本域（仍需手动保存，不静默改配置）。
+
+**测试**
+
+- 新增 `tests/test_v700_capability_gate.mjs`（35 项）与 `tests/test_v700_env_scope.mjs`（12 项）。
+- 新增 `tests/e2e/gateway-real.mjs`：真 HTTP 网关 + 真中间件 + 真宿主钩子 + 真子进程 CLI，四个客户端画像（ishellpro / openminis / cindy-win11 / codex）13 项断言。
+- 修了两颗原有的测试定时炸弹：`test_proactive_memory_ux` 1.3 无工具却断言注入了工具指引；`test_v634_c_docs` 把 `99` 写死当错误值。
+- 修了一处**假绿**：环境作用域的负向断言原本拿 `title` 判，而 principle 块只渲染 `content`，漏注入也照样绿；已改为 content 特征串 + 正向对照。
+
+**回滚的一个决定**
+
+- 曾给 `memory_get` 加 `feedback="unhelpful"`，与仓库已确立的「降权属于 `memory_forget`」契约冲突且功能重复（`memory_forget` 已有 `not_helpful` 降 25）。已完整回滚。
 
 ---
 

@@ -179,16 +179,18 @@ console.log("▶ [门禁 1] 校验 README.md 测试徽章与 tests/ 实际文件
     `[徽章漂移拦截] README 徽章数字 (${counts.badgeCount}) 必须与实际测试文件数动态一致（当前基准: ${functionalTestFiles.length} 或含门禁: ${testFiles.length}）`
   );
 
-  // 反证测试 1.1：故意构造滞后的徽章（如 43 或 99），必须被拦截
+  // 反证测试 1.1：故意篡改徽章数字，必须被拦截。
+  // 伪造值必须动态推导：写死 99 这类常量会在测试总数真到 99 时自行失效（本测试曾是定时炸弹）。
+  const forgedBadgeCount = functionalTestFiles.length + 13;
   const fakeTamperedBadge = readmeContent.replace(
     /tests-\d+%20passed/i,
-    "tests-99%20passed"
+    `tests-${forgedBadgeCount}%20passed`
   );
   const tamperedCounts = extractReadmeTestCounts(fakeTamperedBadge);
   assert.strictEqual(
     expectedPossibleCounts.includes(tamperedCounts.badgeCount),
     false,
-    "[反证门 1.1] 篡改徽章数字为 99 时，门禁必须判定不一致并拦截！"
+    `[反证门 1.1] 篡改徽章数字为 ${forgedBadgeCount} 时，门禁必须判定不一致并拦截！`
   );
 
   console.log(`  ✓ 徽章数字 (${counts.badgeCount}) 与测试文件数 (${testFiles.length}) 动态核对通过，反证门拦截生效\n`);

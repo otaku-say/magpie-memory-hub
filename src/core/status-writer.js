@@ -13,8 +13,8 @@ const STATUS_JS_PATH = fileURLToPath(new URL("../../_status.js", import.meta.url
 const STATUS_JSON_PATH = fileURLToPath(new URL("../../_status.json", import.meta.url));
 
 export function writeCardStatus(key, payloadOrResult, opHint, customStatusPath) {
-  if (key !== "ncb" && key !== "r2" && key !== "model" && key !== "gateway" && key !== "db" && key !== "audit" && key !== "inject") {
-    logError(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2", "model", "gateway", "audit", "db" or "inject"`);
+  if (key !== "ncb" && key !== "r2" && key !== "model" && key !== "gateway" && key !== "db" && key !== "audit" && key !== "inject" && key !== "caps") {
+    logError(`[memory-hub] writeCardStatus: invalid key "${key}", must be "ncb", "r2", "model", "gateway", "audit", "db", "inject" or "caps"`);
     return false;
   }
 

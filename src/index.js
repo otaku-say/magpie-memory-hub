@@ -11,6 +11,7 @@ import {
 import { r2List, r2Delete, r2Check } from "./integration/r2-storage.js";
 import { runPendingAction, readAction, writeCardStatus, parseDbInfo } from "./page/actions.js";
 import { harvestGateway, isTestMode, triggerBackgroundDrain } from "./services/harvest/index.js";
+import { buildCapsSummary } from "./services/caps-stats.js";
 
 import { CATEGORIES, SCOPES, SEVERITIES, readOptions } from "./core/config.js";
 import { makeClient } from "./integration/ncb.js";
@@ -49,6 +50,7 @@ const TOOLS = {
         full_text: { type: "string", description: "完整原文（可选，未提供时默认等于 content）" },
         tags: { type: "string", description: "逗号分隔的检索关键词" },
         related_entities: { type: "string", description: "关联实体，逗号分隔" },
+        env_scope: { type: "string", description: "环境作用域（v7）：k=v 逗号分隔，如 os=windows,arch=amd64,agent=ishellpro。留空 = 通用；填了之后只在匹配的客户端/环境被召回" },
         confidence: { type: "number", description: "置信度 0~1，默认 1" },
         recurrence: { type: "integer", description: "观察与复发次数，默认 1" },
         supersede_id: { type: "number", description: "要取代的旧记录 ID（显式取代走 UPDATE）" },
@@ -121,7 +123,7 @@ const TOOLS = {
         id: { type: "integer", description: "单条记录 id" },
         ids: { type: "array", items: { type: "integer" }, description: "批量读取记录 id 列表" },
         table: { type: "string", enum: ["memories", "pitfalls"], description: "目标表，支持 memories 或 pitfalls，默认 memories" },
-        feedback: { type: "string", enum: ["helpful"], description: "记忆质量正向反馈：helpful 提升置信度 10 分且累加复发度" },
+        feedback: { type: "string", enum: ["helpful"], description: "记忆质量正向反馈：helpful 提升置信度 10 分且累加复发度（降权请用 memory_forget 的 not_helpful/stale/wrong）" },
       },
     },
     run: (args, ctx) => memoryGet(ctx._client, ctx._cfg, args),
@@ -179,6 +181,7 @@ const TOOLS = {
         error_type: { type: "string", description: "错误类型标签，便于聚类" },
         tags: { type: "string", description: "检索关键词" },
         related_entities: { type: "string", description: "关联实体，逗号分隔" },
+        env_scope: { type: "string", description: "环境作用域（v7）：k=v 逗号分隔。留空 = 通用；平台/架构/客户端限定的踩坑必须填" },
         recurrence: { type: "number", description: "本次复发次数，默认 1" },
         source_session: { type: "string", description: "来源会话标识（如客户端会话 ID，可选）" },
         source_turn: { type: "integer", description: "来源会话轮次序号（从 1 起始，可选）" },
@@ -432,6 +435,13 @@ export const MagpieMemoryHub = async (input, options) => {
       // 信标执行失败绝不能让宿主加载失败
       logError("[memory-hub] 页面任务执行异常：" + String(e && e.message || e));
     }
+  }
+
+  /* ---- 能力统计卡片（v7.0.0） ----
+   * 宿主加载时读一次 caps-stats.json 写进 _status.js，供设置页的「一键补齐画像」读取。
+   * 纯本地读盘，零网络；失败一律降级为无卡片，绝不影响加载。 */
+  if (!noScheduler && cfg.caps_telemetry && !isTestMode()) {
+    try { writeCardStatus("caps", buildCapsSummary()); } catch (_) { /* 统计卡片失败不影响加载 */ }
   }
 
   /* ---- auto_init 自愈 ----

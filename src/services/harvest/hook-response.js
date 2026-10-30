@@ -12,6 +12,7 @@ import { isTestMode } from "./offline-scan.js";
 import { _hookProbe } from "./hook-request.js";
 import { isInternalHarvestRequest } from "../../domain/token-budget.js";
 import { makeClient } from "../../integration/ncb.js";
+import { recordCapsTelemetry } from "../caps-stats.js";
 
 export function computeHookBudgetMs(opts = {}) {
   if (opts.bounded_await_timeout_ms != null && !isNaN(Number(opts.bounded_await_timeout_ms)) && Number(opts.bounded_await_timeout_ms) > 0) {
@@ -29,6 +30,12 @@ export async function onResponse(reply, ctx) {
   try {
     const opts = (ctx && ctx.options) || {};
     _hookProbe("onResponse", opts);
+
+    /* v7.0.0 能力幻觉遥测：中间件在受限运行时里只能检测，不能落盘；
+     * 这里（宿主运行时，有 fs）把它固化下来。
+     * 必须放在 auto_harvest 开关判断【之前】——遥测与是否提炼无关。
+     * 任何异常一律吞掉，绝不影响主链路。 */
+    try { recordCapsTelemetry(ctx); } catch (_) {}
     // 防线一（v6.20.0 自激放大事故修复）：内部模型调用豁免——必须放在
     // auto_harvest 判断【之前】。钩子自己经 loopback 发出的判定/提炼请求
     // 会再次走 serveAgent 触发 onResponse；此处按请求体指纹识别后立即

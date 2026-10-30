@@ -332,7 +332,7 @@ async function run() {
   // =================================================================
   console.log("--- [Test 5] Schema 复合索引与结构版本断言 ---");
   {
-    assert.strictEqual(SCHEMA_VERSION, 6, "SCHEMA_VERSION 必须升级至 6");
+    assert.strictEqual(SCHEMA_VERSION, 7, "SCHEMA_VERSION 必须升级至 7（v7.0.0 新增 env_scope）");
     const memIndexes = TABLES.memories.indexes.map((x) => x.name);
     assert.ok(memIndexes.includes("idx_memories_lookup"), "memories 表必须包含 idx_memories_lookup 复合索引");
 
