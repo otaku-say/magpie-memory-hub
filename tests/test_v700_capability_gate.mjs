@@ -17,6 +17,7 @@ import {
   detectCapabilities,
   advertisedToolNames,
   isDispatcherName,
+  isListerName,
   suffixHits,
   resolveToolCall,
   parseScope,
@@ -385,11 +386,44 @@ check("画像 tools_via 让档 1.5 从猜变已知", () => {
   assert.ok(g.includes("`some_call_tool`"), "必须点出画像指定名");
 });
 
+/* ================= 12. 枚举工具（分发器的兄弟） ================= */
+console.log(NL + "▶ [12] 枚举工具点名");
+
+check("枚举工具名识别", () => {
+  assert.strictEqual(isListerName("cindy_mcp_list_tools"), true);
+  assert.strictEqual(isListerName("list_tools"), true);
+  assert.strictEqual(isListerName("tools_list"), true);
+  assert.strictEqual(isListerName("cindy_mcp_call_tool"), false);
+  assert.strictEqual(isListerName("read_file"), false);
+});
+
+check("detectCapabilities 同时暴露 dispatchers 与 listers", () => {
+  const caps = detectCapabilities({
+    tools: toolsOpenAI(["cindy_mcp_call_tool", "cindy_mcp_list_tools", "read"]),
+  });
+  assert.deepStrictEqual(caps.dispatchers, ["cindy_mcp_call_tool"]);
+  assert.deepStrictEqual(caps.listers, ["cindy_mcp_list_tools"]);
+  assert.strictEqual(caps.hasLister, true);
+});
+
+check("档 1.5 直接点名枚举工具，而不是“按分发器自身的方式”", () => {
+  const body = { messages: [], tools: toolsOpenAI(["cindy_mcp_call_tool", "cindy_mcp_list_tools"]) };
+  const g = buildAgentGuide("项目遇到报错", { inline_extract: true }, body, { state: { turnNo: 2 } });
+  assert.ok(g.includes("第一步：用 `cindy_mcp_list_tools`"), "必须点名枚举工具");
+  assert.ok(!g.includes("按分发器自身的方式枚举"), "反证：不得退回含糊说法");
+});
+
+check("没有枚举工具时仍给可执行的上位说法（不得直接崩）", () => {
+  const body = { messages: [], tools: toolsOpenAI(["some_call_tool"]) };
+  const g = buildAgentGuide("项目遇到报错", { inline_extract: true }, body, { state: { turnNo: 2 } });
+  assert.ok(g.includes("按分发器自身的方式枚举"), "无枚举工具时必须给上位说法");
+});
+
 console.log(NL + "=================================================================");
 if (fail.length) {
   console.error("❌ 失败 " + fail.length + " 项 / 通过 " + pass + " 项");
   for (const f of fail) console.error("   - " + f);
   process.exit(1);
 }
-console.log("✅ v7.0.1 能力门控 / 环境作用域 / 幻觉检测 对抗回归全部通过（" + pass + " 项）");
+console.log("✅ v7.0.2 能力门控 / 环境作用域 / 幻觉检测 对抗回归全部通过（" + pass + " 项）");
 console.log("=================================================================");

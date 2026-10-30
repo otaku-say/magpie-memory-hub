@@ -2,18 +2,18 @@
 
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
-[![Version](https://img.shields.io/badge/version-v7.0.1-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-v7.0.2-blue.svg)](package.json)
 [![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen.svg)](tests/)
 [![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
 
 ---
 
-## 一、记忆工作模式与运行架构 (v7.0.1)
+## 一、记忆工作模式与运行架构 (v7.0.2)
 
 | 环节 | 运行时机制 | 协作方式与说明 |
 |---|---|---|
 | **意图感知引导** | **动态嗅探 + 意图分流** | 中间件动态嗅探客户端工具名前缀（适配 `mcp__magpie__...`），根据对话特征按需注入：排障意图（强制先查已知避坑、修完必存踩坑）、规范意图（立即沉淀 `principle` 铁律）、首轮引导（检索+沉淀指南） |
-| **能力门控** | **按通告工具分档注入** | 从本次请求的 `body.tools` / `functions` / Gemini `functionDeclarations` 提取**真实通告的工具名**，分四档：无工具→整块不注入；有工具但非本插件且无分发器→只给「能力未确认」；**有元工具分发器（Cindy/pi 的 `cindy_mcp_call_tool`、Code Mode 的 `run_code`）→「经分发器可用」，给查找键 + 唯一入口**；工具就绪→用真实名并附「禁止换名重试」 |
+| **能力门控** | **按通告工具分档注入** | 从本次请求的 `body.tools` / `functions` / Gemini `functionDeclarations` 提取**真实通告的工具名**，分四档：无工具→整块不注入；有工具但非本插件且无分发器→只给「能力未确认」；**有元工具分发器（Cindy/pi 的 `cindy_mcp_call_tool`、Code Mode 的 `run_code`）→「经分发器可用」，点名枚举工具 + 查找键 + 唯一入口**；工具就绪→用真实名并附「禁止换名重试」 |
 | **环境作用域** | **`env_scope` 硬过滤** | 记忆带 `env_scope`（如 `os=windows,arch=amd64`）；召回与准则置顶都先过环境硬门，**带作用域必须正向确认才召回**（`env_scope_strict` 默认开）。客户端身份取自 `x-magpie-agent` 头或宿主 `ctx.agent`，由 `client_profiles` 映射到画像 |
 | **零工具通道** | **`memory-cli.js`** | 配置 `cli_channel` 后，没有 MCP 的客户端会用 CLI 读写记忆——可用性不再绑在「工具一定存在」这个前提上（mem0 同款思路） |
 | **幻觉遥测** | **确定性检测 + 降档建议** | 响应层直接核对模型发出的 tool_call 名是否在本次通告清单里；不是「率估算」。累计到阈值后给出 `client_profiles` 降档建议，落盘 `~/.magpie-memory-hub/caps-stats.json` |
@@ -182,6 +182,18 @@ node tests/e2e/gateway-real.mjs         # 真机网关集成（真 HTTP + 真中
 ```
 
 详见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+---
+
+## v7.0.2 变更清单
+
+把 v7.0.1 档 1.5 里那句含糊的「先按分发器自身的方式枚举」补实。
+
+- 新增枚举工具识别：`list_tools` / `tools_list` / `list_servers` / `list_mcp`（带边界）。
+- 档 1.5 直接点名它：`第一步：用 `cindy_mcp_list_tools` 枚举可用的 server 与 tool…`。
+  枚举工具本来就在 `body.tools` 里，点名零风险；探索成本从「猜怎么枚举」降为「调一次」。
+- 没有枚举工具时回落上位说法，不降档、不报错。
+- 记忆工具的**带前缀全名**仍不写死——它只是分发器的参数，写死会诱发绕过分发器直调。
 
 ---
 

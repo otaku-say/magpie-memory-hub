@@ -191,12 +191,20 @@ function buildDispatcherGuide(caps, opts) {
   var list = (caps && caps.dispatchers) || [];
   var shown = [];
   for (var i = 0; i < list.length && i < 2; i++) shown.push("`" + list[i] + "`");
-  var lines = [
-    "- 本会话未直接通告记忆工具，但存在通用工具分发器 " + shown.join("、") + "：记忆工具很可能包在它后面。",
-    "- 查找键：检索类工具名形如 memory_context / memory_search / pitfall_search，写入类形如 memory_save / pitfall_save，展开单条形如 memory_get。先按分发器自身的方式枚举，确认清单里确实含有这些名字再动手。",
-    "- 唯一入口：一旦确认，必须**经分发器**调用；不得把这些名字当普通工具直接调（大多数客户端会直接报工具不存在）。",
-    "- 若枚举后发现没有本插件的工具，直接以上面的上下文作答，禁止猜名字、禁止声称已保存。"
-  ];
+  var lines = [];
+  lines.push("- 本会话未直接通告记忆工具，但存在通用工具分发器 " + shown.join("、") + "：记忆工具很可能包在它后面。");
+  /* 枚举哪一步必须点名具体工具：只说“按分发器自身的方式枚举”，
+   * 等于把“怎么枚举”又交回给模型猜——那跟不写差别不大。
+   * 枚举工具是随请求通告的真实名，点名它零风险，且把探索成本从“猜”降到“调一次”。 */
+  var lister = (caps && caps.listers && caps.listers[0]) || "";
+  if (lister) {
+    lines.push("- 第一步：用 `" + lister + "` 枚举可用的 server 与 tool（若它要求先给 server，先不带参数列全部），确认清单里出现下列名字再动手。");
+  } else {
+    lines.push("- 第一步：按分发器自身的方式枚举，确认清单里出现下列名字再动手。");
+  }
+  lines.push("- 查找键：检索类工具名形如 memory_context / memory_search / pitfall_search，写入类形如 memory_save / pitfall_save，展开单条形如 memory_get。");
+  lines.push("- 唯一入口：一旦确认，必须**经分发器**调用；不得把这些名字当普通工具直接调（大多数客户端会直接报工具不存在）。");
+  lines.push("- 若枚举后发现没有本插件的工具，直接以上面的上下文作答，禁止猜名字、禁止声称已保存。");
   var via = String((opts && opts._toolsVia) || "").trim();
   if (via) lines.push("- 已按客户端画像确认分发器为 `" + via + "`，直接用它。");
   lines.push("- 保存必须是真的：分发器未返回成功前，不得声称「已记住」，也不得编造返回的 id。");

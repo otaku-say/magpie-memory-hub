@@ -272,6 +272,7 @@ await guard("降为档 1.5：给查找键与唯一入口，不写死全名", asy
   assert(p.includes("经分发器可用"), "必须走档 1.5，而不是档 1 的“能力未确认”");
   assert(p.includes("cindy_mcp_call_tool"), "必须点出分发器名");
   assert(p.includes("唯一入口"), "必须写明只能经分发器调");
+  assert(p.includes("cindy_mcp_list_tools"), "必须点名枚举工具，不能让模型自己猜怎么枚举");
   assert(!p.includes("magpie-memory-hub_memory"), "反证：不得写死带前缀的全名");
   assert(p.includes("Docker 端口冲突"), "通用记忆仍必须被召回");
 });
@@ -354,5 +355,5 @@ if (fail.length) {
   for (const f of fail) console.error("   - " + f);
   process.exit(1);
 }
-console.log("✅ v7.0.1 真机网关集成测试全部通过（" + pass + " 项）");
+console.log("✅ v7.0.2 真机网关集成测试全部通过（" + pass + " 项）");
 console.log("=================================================================");

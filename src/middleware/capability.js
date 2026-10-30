@@ -103,8 +103,17 @@ function logicalKeyOf(name) {
  */
 var DISPATCHER_RE = /(?:^|[_\-.])(call_?tool|invoke_?tool|execute_?tool|run_?code|code_?run|mcp_?call|tool_?call)$/i;
 
+/* 枚举工具：分发器通常有个兄弟（cindy_mcp_list_tools / tools_list）。
+ * 单独检测它是因为：档 1.5 说“先枚举”时，如果不点名枚举工具，
+ * 模型只能自己猜怎么枚举——那跟没写差不多。 */
+var LISTER_RE = /(?:^|[_\-.])(list_?tools|tools_?list|list_?servers|list_?mcp)$/i;
+
 function isDispatcherName(name) {
   return DISPATCHER_RE.test(String(name || ""));
+}
+
+function isListerName(name) {
+  return LISTER_RE.test(String(name || ""));
 }
 
 /* ================= 能力对象 ================= */
@@ -113,12 +122,14 @@ function detectCapabilities(body) {
   var matched = {};
   var advSet = {};
   var dispatchers = [];
+  var listers = [];
   for (var k = 0; k < MEMORY_TOOL_KEYS.length; k++) matched[MEMORY_TOOL_KEYS[k]] = null;
 
   for (var i = 0; i < names.length; i++) {
     var n = names[i];
     advSet[n] = 1;
     if (isDispatcherName(n)) dispatchers.push(n);
+    if (isListerName(n)) listers.push(n);
     var key = logicalKeyOf(n);
     if (key && !matched[key]) matched[key] = n;
   }
@@ -131,6 +142,8 @@ function detectCapabilities(body) {
     advertisedSet: advSet,
     dispatchers: dispatchers,
     hasDispatcher: dispatchers.length > 0,
+    listers: listers,
+    hasLister: listers.length > 0,
     matched: matched,
     readOk: readOk,
     writeOk: writeOk,
@@ -281,7 +294,9 @@ export {
   MEMORY_TOOL_KEYS,
   advertisedToolNames,
   isDispatcherName,
+  isListerName,
   DISPATCHER_RE,
+  LISTER_RE,
   suffixHits,
   logicalKeyOf,
   resolveToolCall,
