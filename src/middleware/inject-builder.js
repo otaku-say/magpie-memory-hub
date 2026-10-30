@@ -135,7 +135,8 @@ function usableNames(caps) {
     pitSearch: ok(matched.pitfall_search) ? matched.pitfall_search : "",
     get: ok(matched.memory_get) ? matched.memory_get : "",
     save: ok(matched.memory_save) ? matched.memory_save : "",
-    pitSave: ok(matched.pitfall_save) ? matched.pitfall_save : ""
+    pitSave: ok(matched.pitfall_save) ? matched.pitfall_save : "",
+    via: String((caps && caps.toolsVia) || "")
   };
 }
 
@@ -180,6 +181,26 @@ function buildNoToolGuide(opts) {
     lines = lines.concat(cli);
   }
   return "\n\n[Memory Agent Guide —— 无工具环境]\n" + lines.join("\n");
+}
+
+/* 档 1.5：有元工具分发器，但工具名没被直标。
+ * 这是 Cindy / pi 这类宿主的真实形态：MCP 工具包在 cindy_mcp_call_tool 后面。
+ * 完全不写名字不行（模型不知道去找什么），写死全名也不行（它会绕过分发器直接调）。
+ * 因此：给出【查找键】+【唯一入口】两条约束。 */
+function buildDispatcherGuide(caps, opts) {
+  var list = (caps && caps.dispatchers) || [];
+  var shown = [];
+  for (var i = 0; i < list.length && i < 2; i++) shown.push("`" + list[i] + "`");
+  var lines = [
+    "- 本会话未直接通告记忆工具，但存在通用工具分发器 " + shown.join("、") + "：记忆工具很可能包在它后面。",
+    "- 查找键：检索类工具名形如 memory_context / memory_search / pitfall_search，写入类形如 memory_save / pitfall_save，展开单条形如 memory_get。先按分发器自身的方式枚举，确认清单里确实含有这些名字再动手。",
+    "- 唯一入口：一旦确认，必须**经分发器**调用；不得把这些名字当普通工具直接调（大多数客户端会直接报工具不存在）。",
+    "- 若枚举后发现没有本插件的工具，直接以上面的上下文作答，禁止猜名字、禁止声称已保存。"
+  ];
+  var via = String((opts && opts._toolsVia) || "").trim();
+  if (via) lines.push("- 已按客户端画像确认分发器为 `" + via + "`，直接用它。");
+  lines.push("- 保存必须是真的：分发器未返回成功前，不得声称「已记住」，也不得编造返回的 id。");
+  return "\n\n[Memory Agent Guide —— 经分发器可用]\n" + lines.join("\n");
 }
 
 /* 档 1：有工具但未能确认本插件。不写具体工具名——写死名字就是幻觉的源头。 */
@@ -301,6 +322,12 @@ function buildAgentGuide(prompt, opts, body, ctx) {
   var u = usableNames(caps);
   var reads = readToolList(u);
   var writes = writeToolList(u);
+
+  /* 档 1.5：有分发器 → 不写死名字，但给查找键与唯一入口 */
+  if (!reads.length && !writes.length && caps.hasDispatcher) {
+    st.guideTier = 1.5;
+    return buildDispatcherGuide(caps, Object.assign({}, opts, { _toolsVia: u.via }));
+  }
 
   /* 档 1：有工具，但本插件工具要么没通告、要么被画像禁完 */
   if (!reads.length && !writes.length) { st.guideTier = 1; return buildUnknownToolGuide(opts); }

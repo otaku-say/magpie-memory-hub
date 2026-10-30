@@ -91,16 +91,34 @@ function logicalKeyOf(name) {
   return null;
 }
 
+/* ================= 元工具分发器 =================
+ * 为什么需要这层（v7.0.1 线上回归挖出来的）：
+ * Cindy / pi 这类宿主**不把 MCP 工具直标在 body.tools 里**，而是包在一个
+ * 通用分发器后面（cindy_mcp_call_tool / run_code 等），真正的工具名只是
+ * 分发器的一个参数。于是 v7.0.0 对它们全部降到了档 1「能力未确认」，
+ * 而它们其实完全能调——这是把“保守”当成了“正确”。
+ *
+ * 分档因此多一档 1.5：有分发器不说“没工具”，也不写死工具名，
+ * 而是告诉模型“先枚举、再经分发器调”。
+ */
+var DISPATCHER_RE = /(?:^|[_\-.])(call_?tool|invoke_?tool|execute_?tool|run_?code|code_?run|mcp_?call|tool_?call)$/i;
+
+function isDispatcherName(name) {
+  return DISPATCHER_RE.test(String(name || ""));
+}
+
 /* ================= 能力对象 ================= */
 function detectCapabilities(body) {
   var names = advertisedToolNames(body);
   var matched = {};
   var advSet = {};
+  var dispatchers = [];
   for (var k = 0; k < MEMORY_TOOL_KEYS.length; k++) matched[MEMORY_TOOL_KEYS[k]] = null;
 
   for (var i = 0; i < names.length; i++) {
     var n = names[i];
     advSet[n] = 1;
+    if (isDispatcherName(n)) dispatchers.push(n);
     var key = logicalKeyOf(n);
     if (key && !matched[key]) matched[key] = n;
   }
@@ -111,6 +129,8 @@ function detectCapabilities(body) {
     hasTools: names.length > 0,
     advertised: names,
     advertisedSet: advSet,
+    dispatchers: dispatchers,
+    hasDispatcher: dispatchers.length > 0,
     matched: matched,
     readOk: readOk,
     writeOk: writeOk,
@@ -240,7 +260,7 @@ function buildEnv(body, ctx, opts) {
     var keys = Object.keys(profile);
     for (var i = 0; i < keys.length; i++) {
       var k = keys[i];
-      if (k === "forbid_tools") continue;
+      if (k === "forbid_tools" || k === "tools_via") continue;
       /* 画像里的 env/mcp 不能覆盖真实探测结果 */
       if (k.toLowerCase() === "mcp") continue;
       if (profile[k] == null || profile[k] === "") continue;
@@ -251,6 +271,8 @@ function buildEnv(body, ctx, opts) {
   env.mcp = caps.present ? "yes" : "no";
 
   caps.forbidTools = (profile && Array.isArray(profile.forbid_tools)) ? profile.forbid_tools : [];
+  /* tools_via：显式指定分发器名，让档 1.5 从『猜』变成『已知』 */
+  caps.toolsVia = (profile && typeof profile.tools_via === "string") ? profile.tools_via.trim() : "";
   caps.agentKey = agentKey || "";
   return { caps: caps, env: env, profiles: profiles, agentKey: agentKey || "" };
 }
@@ -258,6 +280,8 @@ function buildEnv(body, ctx, opts) {
 export {
   MEMORY_TOOL_KEYS,
   advertisedToolNames,
+  isDispatcherName,
+  DISPATCHER_RE,
   suffixHits,
   logicalKeyOf,
   resolveToolCall,

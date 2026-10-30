@@ -33,22 +33,35 @@ const ALLOWED_DRIFT = new Map([
   [
     "readOptions",
     {
-      delta: 18,
+      delta: 29,
       reason:
-        "v6.47.0(c4286fc)+v6.46 纯增量：新增 model_timeout_sec / rerank_timeout_sec / rerank_max_candidates " +
-        "三个超时与候选上限配置的归一化赋值（3×3 行）+ explain_debug 调试开关（1 行注释组 + 1 行字段）；" +
-        "既有字段的取值逻辑与顺序零改动",
+        "v6.47.0(c4286fc)+v6.46 纯增量：model_timeout_sec / rerank_timeout_sec / rerank_max_candidates " +
+        "三个超时与候选上限归一化 + explain_debug 调试开关（基线 18 行）；" +
+        "v7.0.0 再纯增 11 行：capability_gate / env_scope_strict / client_profiles / cli_channel / " +
+        "caps_telemetry 五项配置归一化（含解释注释）。既有字段的取值逻辑与顺序零改动",
       file: "src/core/config.js",
     },
   ],
   [
     "saveMemory",
     {
-      delta: 14,
+      delta: 23,
       reason:
-        "v6.48.0：候选集改用 fetchAll 分页拉全量、唯一索引兜底查询补 lifecycle_status 与排序、" +
-        "tags/related_entities 并集统一裁剪到 512 字符；仅新增取值与裁剪，既有分支顺序零改动",
+        "v6.48.0（基线 14 行）：fetchAll 分页拉全量、唯一索引兜底查询补 lifecycle_status 与排序、" +
+        "tags/related_entities 并集裁剪到 512 字符；" +
+        "v7.0.0 再纯增 9 行：env_scope 归一（显式参数 + env: 保留标签双路径）与三处去重分支的作用域并集合并。" +
+        "既有分支顺序零改动",
       file: "src/services/save/memory-saver.js",
+    },
+  ],
+  [
+    "pitfallSave",
+    {
+      delta: 7,
+      reason:
+        "v7.0.0 纯增量：创建 payload 增加 env_scope 列，并在去重分支合并作用域；" +
+        "既有分支顺序零改动",
+      file: "src/tools/pitfall-save.js",
     },
   ],
 ]);

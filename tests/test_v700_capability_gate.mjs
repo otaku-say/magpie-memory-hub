@@ -16,6 +16,7 @@ import { onResponse } from "../memory.middleware.js";
 import {
   detectCapabilities,
   advertisedToolNames,
+  isDispatcherName,
   suffixHits,
   resolveToolCall,
   parseScope,
@@ -124,7 +125,9 @@ check("cli_channel 配置后给命令，仍不给 MCP 工具名", () => {
 console.log(NL + "▶ [5] 档 1 能力未确认 / 档 2 使用真实名");
 
 check("有无关工具时不得写死默认名", () => {
-  const body = { messages: [], tools: toolsOpenAI(["read_file", "run_code"]) };
+  /* 不能用 run_code：它属于元工具分发器，会（正确地）降到档 1.5。
+   * 档 1 的前提是“有工具、没分发器、也没有本插件工具”。 */
+  const body = { messages: [], tools: toolsOpenAI(["read_file", "write_file"]) };
   const g = buildAgentGuide("项目遇到报错", { inline_extract: true }, body, { state: { turnNo: 2 } });
   assert.ok(g.includes("能力未确认"));
   assert.ok(!g.includes(LEGACY));
@@ -330,11 +333,63 @@ check("无 header 时回落首个身份候选且不丢能力", () => {
   assert.ok(out.messages[0].content.includes("[Memory Agent Guide"));
 });
 
+/* ================= 11. 元工具分发器（Cindy / pi 形态） ================= */
+console.log(NL + "▶ [11] 元工具分发器档 1.5");
+
+check("分发器名识别", () => {
+  assert.strictEqual(isDispatcherName("cindy_mcp_call_tool"), true);
+  assert.strictEqual(isDispatcherName("call_tool"), true);
+  assert.strictEqual(isDispatcherName("run_code"), true);
+  assert.strictEqual(isDispatcherName("mcp__magpie__call_tool"), true);
+  assert.strictEqual(isDispatcherName("cindy_mcp_list_tools"), false);
+  assert.strictEqual(isDispatcherName("read_file"), false);
+});
+
+check("detectCapabilities 暴露 dispatchers", () => {
+  const caps = detectCapabilities({ tools: toolsOpenAI(["cindy_mcp_call_tool", "read_file"]) });
+  assert.strictEqual(caps.hasTools, true);
+  assert.strictEqual(caps.present, false);
+  assert.strictEqual(caps.hasDispatcher, true);
+  assert.deepStrictEqual(caps.dispatchers, ["cindy_mcp_call_tool"]);
+});
+
+check("有分发器时降为档 1.5（不是档 1，也不写死全名）", () => {
+  const body = { messages: [], tools: toolsOpenAI(["cindy_mcp_call_tool", "cindy_mcp_list_tools", "read"]) };
+  const st = { turnNo: 2 };
+  const g = buildAgentGuide("项目遇到报错", { inline_extract: true }, body, { state: st });
+  assert.ok(g.includes("经分发器可用"), "必须给出档 1.5 标题");
+  assert.strictEqual(st.guideTier, 1.5, "档位必须记为 1.5");
+  assert.ok(g.includes("cindy_mcp_call_tool"), "必须点出分发器名");
+  assert.ok(g.includes("查找键"), "必须给查找键");
+  assert.ok(g.includes("唯一入口"), "必须写明只能经分发器调");
+  assert.ok(g.includes("保存必须是真的"), "必须带不可声称已保存条款");
+  assert.ok(!g.includes("magpie-memory-hub_memory"), "反证：不得写死带前缀的全名，否则模型会绕过分发器");
+});
+
+check("分发器 + 本插件工具仍在时保持档 2", () => {
+  const body = {
+    messages: [],
+    tools: toolsOpenAI(["cindy_mcp_call_tool", "mcp__magpie__memory_context"]),
+  };
+  const g = buildAgentGuide("项目遇到报错", { inline_extract: true }, body, { state: { turnNo: 2 } });
+  assert.ok(g.includes("mcp__magpie__memory_context"), "有真名时必须优先用真名");
+  assert.ok(!g.includes("经分发器可用"), "反证：不应降为 1.5");
+});
+
+check("画像 tools_via 让档 1.5 从猜变已知", () => {
+  const body = { messages: [], tools: toolsOpenAI(["some_call_tool"]) };
+  const caps = detectCapabilities(body);
+  caps.toolsVia = "some_call_tool";
+  const g = buildAgentGuide("项目遇到报错", { inline_extract: true }, body, { state: { turnNo: 2, caps } });
+  assert.ok(g.includes("已按客户端画像确认分发器"), "必须识别 tools_via");
+  assert.ok(g.includes("`some_call_tool`"), "必须点出画像指定名");
+});
+
 console.log(NL + "=================================================================");
 if (fail.length) {
   console.error("❌ 失败 " + fail.length + " 项 / 通过 " + pass + " 项");
   for (const f of fail) console.error("   - " + f);
   process.exit(1);
 }
-console.log("✅ v7.0.0 能力门控 / 环境作用域 / 幻觉检测 对抗回归全部通过（" + pass + " 项）");
+console.log("✅ v7.0.1 能力门控 / 环境作用域 / 幻觉检测 对抗回归全部通过（" + pass + " 项）");
 console.log("=================================================================");

@@ -2,18 +2,18 @@
 
 Magpie 的**透明记忆网关**。把流经 Magpie 的对话沉淀为长期记忆，在后续提问时自动注入相关经验，并通过 MCP 向所有智能体提供结构化记忆工具。
 
-[![Version](https://img.shields.io/badge/version-v7.0.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-v7.0.1-blue.svg)](package.json)
 [![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen.svg)](tests/)
 [![Adversarial Gate](https://img.shields.io/badge/adversarial--gate-6%2F6%20green-success.svg)](tests/adversarial_v629_gate.mjs)
 
 ---
 
-## 一、记忆工作模式与运行架构 (v7.0.0)
+## 一、记忆工作模式与运行架构 (v7.0.1)
 
 | 环节 | 运行时机制 | 协作方式与说明 |
 |---|---|---|
 | **意图感知引导** | **动态嗅探 + 意图分流** | 中间件动态嗅探客户端工具名前缀（适配 `mcp__magpie__...`），根据对话特征按需注入：排障意图（强制先查已知避坑、修完必存踩坑）、规范意图（立即沉淀 `principle` 铁律）、首轮引导（检索+沉淀指南） |
-| **能力门控** | **按通告工具分档注入** | 从本次请求的 `body.tools` / `functions` / Gemini `functionDeclarations` 提取**真实通告的工具名**，分三档：无工具→整块不注入；有工具但非本插件→只给「能力未确认」陈述（不写具体工具名）；工具就绪→用真实名并附「禁止换名重试」。无 MCP 客户端不再被命令去调不存在的工具 |
+| **能力门控** | **按通告工具分档注入** | 从本次请求的 `body.tools` / `functions` / Gemini `functionDeclarations` 提取**真实通告的工具名**，分四档：无工具→整块不注入；有工具但非本插件且无分发器→只给「能力未确认」；**有元工具分发器（Cindy/pi 的 `cindy_mcp_call_tool`、Code Mode 的 `run_code`）→「经分发器可用」，给查找键 + 唯一入口**；工具就绪→用真实名并附「禁止换名重试」 |
 | **环境作用域** | **`env_scope` 硬过滤** | 记忆带 `env_scope`（如 `os=windows,arch=amd64`）；召回与准则置顶都先过环境硬门，**带作用域必须正向确认才召回**（`env_scope_strict` 默认开）。客户端身份取自 `x-magpie-agent` 头或宿主 `ctx.agent`，由 `client_profiles` 映射到画像 |
 | **零工具通道** | **`memory-cli.js`** | 配置 `cli_channel` 后，没有 MCP 的客户端会用 CLI 读写记忆——可用性不再绑在「工具一定存在」这个前提上（mem0 同款思路） |
 | **幻觉遥测** | **确定性检测 + 降档建议** | 响应层直接核对模型发出的 tool_call 名是否在本次通告清单里；不是「率估算」。累计到阈值后给出 `client_profiles` 降档建议，落盘 `~/.magpie-memory-hub/caps-stats.json` |
@@ -182,6 +182,21 @@ node tests/e2e/gateway-real.mjs         # 真机网关集成（真 HTTP + 真中
 ```
 
 详见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+---
+
+## v7.0.1 变更清单
+
+修复 v7.0.0 的一个真实回归：**Cindy 自己收到了「能力未确认」**。
+
+- 根因：Cindy / pi 不把 MCP 工具直标在 `body.tools`，而是包在 `cindy_mcp_call_tool` 这类元工具后面，
+  于是 `detectCapabilities()` 看不到工具名，整片客户端被降到档 1。
+- 新增 **档 1.5「经分发器可用」**：给【查找键】（memory_context / memory_save 这类名字）+【唯一入口】
+  （必须经分发器调，不得直接把查找键当工具名）。两个约束缺一不可：少前者等于什么都不做，少后者就是在复现幻觉。
+- 分发器识别：`call_tool` / `invoke_tool` / `execute_tool` / `run_code` / `code_run` / `mcp_call` / `tool_call`
+  （带 `_ - .` 边界），`cindy_mcp_list_tools`、`read_file` 不会误命中。
+- `client_profiles` 支持 `tools_via`，把档 1.5 从「猜」变成「已知」。
+- 连带发现：`run_code` 属于 Code Mode 分发器，原有两个「档 1」用例的工具集其实应当走 1.5，已改成真正的无分发器工具集。
 
 ---
 

@@ -43,7 +43,8 @@ const NL = String.fromCharCode(10);
 
 /* ================= 客户端画像与工具清单 ================= */
 const MANIFESTS = {
-  ishellpro: { tools: ["read_file", "run_code"], headers: { "x-magpie-agent": "ishellpro" } },
+  /* ishellpro：既无 MCP 也无元工具分发器——用户实测就是这种形态下它去幻觉调 MCP */
+  ishellpro: { tools: ["read_file", "write_file"], headers: { "x-magpie-agent": "ishellpro" } },
   openminis: {
     tools: ["mcp__magpie__memory_context", "mcp__magpie__memory_search", "mcp__magpie__memory_save"],
     headers: { "x-magpie-agent": "openminis" },
@@ -54,6 +55,11 @@ const MANIFESTS = {
       "mcp__magpie__memory_save", "mcp__magpie__pitfall_save", "mcp__magpie__memory_get",
     ],
     headers: { "x-magpie-agent": "cindy-win11" },
+  },
+  /* Cindy / pi 的真实形态：MCP 工具包在元工具后面，工具名不进 tools 清单 */
+  "cindy-dispatched": {
+    tools: ["cindy_mcp_call_tool", "cindy_mcp_list_tools", "read"],
+    headers: { "x-magpie-agent": "cindy" },
   },
   codex: {
     tools: ["magpie-memory-hub_memory_context", "magpie-memory-hub_memory_save"],
@@ -257,6 +263,18 @@ await guard("按真实前缀生成引导，不混入魔改默认名", async () =
   assert(p.includes("magpie-memory-hub_memory_save"), "必须用真实写入名");
 });
 
+/* ================= 4.5 cindy-dispatched（元工具分发器） ================= */
+console.log(NL + "▶ [4.5] cindy-dispatched（元工具分发器）");
+
+await guard("降为档 1.5：给查找键与唯一入口，不写死全名", async () => {
+  await call("cindy-dispatched", "项目遇到报错: Docker 端口冲突");
+  const p = seen["cindy-dispatched"].promptText;
+  assert(p.includes("经分发器可用"), "必须走档 1.5，而不是档 1 的“能力未确认”");
+  assert(p.includes("cindy_mcp_call_tool"), "必须点出分发器名");
+  assert(p.includes("唯一入口"), "必须写明只能经分发器调");
+  assert(!p.includes("magpie-memory-hub_memory"), "反证：不得写死带前缀的全名");
+  assert(p.includes("Docker 端口冲突"), "通用记忆仍必须被召回");
+});
 /* ================= 5. 遥测落盘 + 降档建议 ================= */
 console.log(NL + "▶ [5] 幻觉遥测落盘与降档建议");
 
@@ -336,5 +354,5 @@ if (fail.length) {
   for (const f of fail) console.error("   - " + f);
   process.exit(1);
 }
-console.log("✅ v7.0.0 真机网关集成测试全部通过（" + pass + " 项）");
+console.log("✅ v7.0.1 真机网关集成测试全部通过（" + pass + " 项）");
 console.log("=================================================================");
