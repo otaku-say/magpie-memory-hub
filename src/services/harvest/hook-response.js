@@ -13,6 +13,7 @@ import { _hookProbe } from "./hook-request.js";
 import { isInternalHarvestRequest } from "../../domain/token-budget.js";
 import { makeClient } from "../../integration/ncb.js";
 import { recordCapsTelemetry } from "../caps-stats.js";
+import { finalizeFromStream } from "../../middleware/capability.js";
 
 export function computeHookBudgetMs(opts = {}) {
   if (opts.bounded_await_timeout_ms != null && !isNaN(Number(opts.bounded_await_timeout_ms)) && Number(opts.bounded_await_timeout_ms) > 0) {
@@ -35,6 +36,9 @@ export async function onResponse(reply, ctx) {
      * 这里（宿主运行时，有 fs）把它固化下来。
      * 必须放在 auto_harvest 开关判断【之前】——遥测与是否提炼无关。
      * 任何异常一律吞掉，绝不影响主链路。 */
+    /* 流式请求的遥测在中间件 onEvent 里累加，这里收口后落盘。
+     * capability.js 是纯函数叶子模块（无 fs / 无网络），在宿主运行时引用安全。 */
+    try { finalizeFromStream(ctx && ctx.state); } catch (_) {}
     try { recordCapsTelemetry(ctx); } catch (_) {}
     // 防线一（v6.20.0 自激放大事故修复）：内部模型调用豁免——必须放在
     // auto_harvest 判断【之前】。钩子自己经 loopback 发出的判定/提炼请求

@@ -29,7 +29,7 @@ fs.mkdirSync(TMP_HOME, { recursive: true });
 process.env.HOME = TMP_HOME;
 process.env.MEMHUB_GATEWAY_CONV_DIR = path.join(TMP_HOME, "conv");
 
-const { onRequest, onResponse } = await import(HOME + "/memory.middleware.js");
+const { onRequest, onResponse, onEvent } = await import(HOME + "/memory.middleware.js");
 const hooks = await import(HOME + "/gateway_harvest.hooks.js");
 const capsStats = await import(HOME + "/src/services/caps-stats.js");
 
@@ -122,12 +122,19 @@ function baseOptions() {
 
 /* ================= 网关 + 假模型 ================= */
 const seen = {};
+/** 流式请求的遥测快照（SSE 无法把诊断信息带回给测试，靠 /diag 读） */
+let lastStreamTelemetry = null;
 
 function handler(req, res) {
   let raw = "";
   req.on("data", (c) => { raw += c; });
   req.on("end", async () => {
     try {
+      if (req.method === "GET" && req.url === "/diag") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ lastStreamTelemetry }));
+        return;
+      }
       const body = JSON.parse(raw || "{}");
       const clientKey = String(body._client || "unknown");
       const mode = String(body._mode || "obedient");
@@ -146,6 +153,35 @@ function handler(req, res) {
       seen[clientKey] = { promptText, ctx };
 
       const out = fakeAgent(mode, manifest, promptText);
+
+      /* v7.1.0：真流式分支——逐 chunk 走真 onEvent，工具名故意切开成碎片，
+       * 验证累加与收口在真实 HTTP/SSE 上也成立。 */
+      if (body._stream === true) {
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+        const name = out.toolCalls.length ? out.toolCalls[0].function.name : "";
+        const head = name.slice(0, 8);
+        const tail = name.slice(8);
+        const events = name
+          ? [
+              { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: head } }] } }] },
+              { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: tail } }] } }] },
+              { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+            ]
+          : [
+              { choices: [{ delta: { content: out.content || "ok" } }] },
+              { choices: [{ delta: {}, finish_reason: "stop" }] },
+            ];
+        for (const ev of events) {
+          onEvent(ev, ctx);
+          res.write("data: " + JSON.stringify(ev) + "\n\n");
+        }
+        res.write("data: [DONE]\n\n");
+        res.end();
+        try { await hooks.onResponse({ streamed: true }, ctx); } catch (_) { /* 钩子失败不影响流 */ }
+        lastStreamTelemetry = ctx.state.capsTelemetry || null;
+        return;
+      }
+
       const reply = {
         id: "chatcmpl-e2e",
         choices: [{ index: 0, message: { role: "assistant", content: out.content, tool_calls: out.toolCalls.length ? out.toolCalls : undefined }, finish_reason: "stop" }],
@@ -276,6 +312,33 @@ await guard("降为档 1.5：给查找键与唯一入口，不写死全名", asy
   assert(!p.includes("magpie-memory-hub_memory"), "反证：不得写死带前缀的全名");
   assert(p.includes("Docker 端口冲突"), "通用记忆仍必须被召回");
 });
+/* ================= 4.6 真流式 SSE ================= */
+console.log(NL + "▶ [4.6] 真流式 SSE 遥测");
+
+await guard("碎片化工具名经真 HTTP/SSE 能被累加并判定为幻觉", async () => {
+  const payload = {
+    model: "gpt-4o",
+    _client: "ishellpro",
+    _mode: "hallucinating",
+    _stream: true,
+    messages: [{ role: "user", content: "项目遇到报错，再试一次" }],
+    tools: MANIFESTS.ishellpro.tools.map((n) => ({ type: "function", function: { name: n } })),
+  };
+  const res = await fetch(BASE + "/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  assert(text.includes("data: [DONE]"), "必须真的走 SSE 且正常结束");
+  assert(text.includes("tool_calls"), "流里必须真的带工具调用块");
+  const diag = await (await fetch(BASE + "/diag")).json();
+  const t = diag.lastStreamTelemetry;
+  assert(t, "流式请求必须产出遥测（v7.0.x 这里是空的）");
+  assert(t.toolCalls >= 1, "必须计入工具调用，实际 " + JSON.stringify(t));
+  assert(t.hallucinatedCount >= 1, "必须判定为幻觉调用");
+  assert(t.hallucinated[0].kind === "unadvertised", "分类必须是 unadvertised");
+});
 /* ================= 5. 遥测落盘 + 降档建议 ================= */
 console.log(NL + "▶ [5] 幻觉遥测落盘与降档建议");
 
@@ -355,5 +418,5 @@ if (fail.length) {
   for (const f of fail) console.error("   - " + f);
   process.exit(1);
 }
-console.log("✅ v7.0.3 真机网关集成测试全部通过（" + pass + " 项）");
+console.log("✅ v7.1.0 真机网关集成测试全部通过（" + pass + " 项）");
 console.log("=================================================================");

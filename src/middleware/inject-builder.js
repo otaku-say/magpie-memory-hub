@@ -198,7 +198,7 @@ function buildDispatcherGuide(caps, opts) {
    * 枚举工具是随请求通告的真实名，点名它零风险，且把探索成本从“猜”降到“调一次”。 */
   var lister = (caps && caps.listers && caps.listers[0]) || "";
   if (lister) {
-    lines.push("- 第一步：用 `" + lister + "` 枚举可用的 server 与 tool（若它要求先给 server，先不带参数列全部），确认清单里出现下列名字再动手。");
+    lines.push("- 第一步：用 `" + lister + "` 枚举可用的 server 与 tool（若它要求先给 server，先不带参数列全部）；**若你已从系统提示或工具清单里确知这些名字，可跳过这一步直接进入经分发器调用**。");
   } else {
     lines.push("- 第一步：按分发器自身的方式枚举，确认清单里出现下列名字再动手。");
   }

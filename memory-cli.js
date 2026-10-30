@@ -21,13 +21,17 @@
  * 退出码：0 成功；1 参数或执行失败；2 配置不可用。
  */
 import { MagpieMemoryHub } from "./tools.js";
+import { readOptions } from "./src/core/config.js";
+import { makeClient, fetchAll } from "./src/integration/ncb.js";
+import { suggestEnvScope } from "./src/domain/env-hints.js";
+import { envScopeOf } from "./src/domain/env-scope.js";
 
 const VALUE_FLAGS = new Set([
   "project", "category", "env-scope", "env_scope", "tags", "title", "content",
   "symptom", "solution", "component", "root-cause", "root_cause", "query",
-  "limit", "severity", "client", "scope-level", "scope_level"
+  "limit", "severity", "client", "scope-level", "scope_level", "table"
 ]);
-const BOOL_FLAGS = new Set(["help", "json"]);
+const BOOL_FLAGS = new Set(["help", "json", "apply", "dry-run"]);
 
 function parseArgv(argv) {
   const out = { _: [] };
@@ -74,9 +78,55 @@ const HELP = `magpie-memory-hub memory-cli —— 零工具记忆通道
   search   --query <关键词> [--project p] [--limit 5]
   context  --query <关键词> [--project p]
   doctor   打印当前配置来源（不输出任何密钥）
+  audit-env  存量环境作用域审计：扫描 env_scope 为空的记录并给出建议
+             [--apply 落库 | --limit N | --table memories|pitfalls|both]
 
 退出码：0 成功 / 1 执行失败 / 2 配置不可用
 `;
+
+/**
+ * 存量回填审计。默认只出报告（dry-run），--apply 才真正改库。
+ * 为什么默认不写：这是改用户真实数据。误标的代价比漏标大——
+ * 一条通用事实被标成 os=windows 后，它在其他环境就永远召不回来了。
+ */
+async function auditEnv(input, argv) {
+  const cfg = readOptions(input);
+  const client = makeClient(cfg);
+  const tableArg = String(argv.table || "both").toLowerCase();
+  const tables = tableArg === "memories" ? ["memories"] : (tableArg === "pitfalls" ? ["pitfalls"] : ["memories", "pitfalls"]);
+  const limit = Math.max(1, Math.min(Number(argv.limit) || 500, 2000));
+  const apply = argv.apply === true && argv["dry-run"] !== true;
+  const project = argv.project || input.project || "";
+
+  const report = { ok: true, apply: apply, project: project || "(all)", scanned: 0, candidates: [], ambiguous: [], applied: 0, failed: [] };
+  for (const table of tables) {
+    const params = { lifecycle_status: "active", order_by: "updated_at DESC" };
+    if (project) params.project = project;
+    let rows = [];
+    try { rows = await fetchAll(client, table, params); } catch (e) { report.failed.push({ table: table, error: String((e && e.message) || e) }); continue; }
+    if (rows.length > limit) rows = rows.slice(0, limit);
+    for (const row of rows) {
+      if (!row) continue;
+      report.scanned++;
+      if (envScopeOf(row)) continue;   // 已有作用域的不动
+      const text = [row.title, row.content, row.symptom, row.root_cause, row.solution, row.tags].filter(Boolean).join(" \n ");
+      const hint = suggestEnvScope(text);
+      if (hint.ambiguous) { report.ambiguous.push({ table: table, id: row.id, reason: hint.reason }); continue; }
+      if (!hint.scope) continue;
+      const item = { table: table, id: row.id, title: String(row.title || row.symptom || "").slice(0, 60), suggested: hint.scope, reason: hint.reason };
+      report.candidates.push(item);
+      if (apply) {
+        try {
+          await client.update(table, row.id, { env_scope: hint.scope });
+          report.applied++;
+        } catch (e) {
+          report.failed.push({ table: table, id: row.id, error: String((e && e.message) || e) });
+        }
+      }
+    }
+  }
+  return report;
+}
 
 async function main() {
   const argv = parseArgv(process.argv.slice(2));
@@ -91,6 +141,12 @@ async function main() {
   if (process.env.MEMHUB_NCB_SECRET) input.ncb_secret = process.env.MEMHUB_NCB_SECRET;
   if (process.env.MEMHUB_MCP_KEY) input.mcp_key = process.env.MEMHUB_MCP_KEY;
   if (process.env.MEMHUB_PROJECT) input.project = process.env.MEMHUB_PROJECT;
+
+  /* audit-env 不需要 MCP 工具树，直接用底层 client，也避免建 hub 的副作用 */
+  if (cmd === "audit-env" || cmd === "audit_env") {
+    try { emit(await auditEnv(input, argv)); } catch (e) { fail('[memory-cli] audit-env 失败：' + String((e && e.message) || e), 1); }
+    return;
+  }
 
   let hub;
   try {

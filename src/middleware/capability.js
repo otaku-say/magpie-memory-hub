@@ -259,6 +259,49 @@ function isToolForbidden(name, patterns) {
   return false;
 }
 
+/* ================= 遥测收口 =================
+ * 把“本次调了哪些工具”变成给 caps-stats 用的一条记录。
+ * 非流式由响应体提供名字，流式由 onEvent 累加到 st._toolCallNames，
+ * 两条路径归到同一个函数，避免两套判定逐渐跑偏。
+ */
+function buildCapsTelemetry(caps, names, st) {
+  var list = Array.isArray(names) ? names : [];
+  var memCalls = 0;
+  var halluc = [];
+  for (var i = 0; i < list.length; i++) {
+    var r = resolveToolCall(list[i], caps);
+    if (r.logical) memCalls++;
+    if (r.kind === "unadvertised" || r.kind === "unavailable") {
+      halluc.push({ name: String(list[i]).slice(0, 120), kind: r.kind, logical: r.logical });
+    }
+  }
+  var injected = !!(st && st.guideInjected === true);
+  if (!halluc.length && !injected && !list.length) return null;
+  return {
+    at: (typeof Date !== "undefined" && Date.now) ? Date.now() : 0,
+    agent: String((st && st.envAgent) || "").slice(0, 64),
+    tier: (st && st.guideTier == null) ? null : st.guideTier,
+    injected: injected,
+    hasTools: !!(caps && caps.hasTools),
+    present: !!(caps && caps.present),
+    toolCalls: list.length,
+    memoryToolCalls: memCalls,
+    hallucinated: halluc.slice(0, 5),
+    hallucinatedCount: halluc.length
+  };
+}
+
+/* 流式路径的收口：只有累到了工具名才生成遥测（零工具名的流不写任何东西）。 */
+function finalizeFromStream(st) {
+  if (!st || typeof st !== "object") return null;
+  if (st.capsTelemetry) return st.capsTelemetry;
+  var names = st._toolCallNames || [];
+  if (!names.length) return null;
+  var t = buildCapsTelemetry(st.caps || null, names, st);
+  if (t) st.capsTelemetry = t;
+  return t;
+}
+
 /* ================= 合成：能力 + 环境 ================= */
 /* 返回 { caps, env, profiles, agentKey }。
  * 关键不变量：env.mcp 永远以真实通告工具为准，画像只能**收窄**不能放宽。 */
@@ -300,6 +343,8 @@ export {
   suffixHits,
   logicalKeyOf,
   resolveToolCall,
+  buildCapsTelemetry,
+  finalizeFromStream,
   detectCapabilities,
   parseProfiles,
   resolveAgentKey,

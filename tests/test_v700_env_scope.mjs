@@ -309,5 +309,5 @@ if (fail.length) {
   for (const f of fail) console.error("   - " + f);
   process.exit(1);
 }
-console.log("✅ v7.0.3 env_scope / applies_to / 负反馈 / 能力遥测 对抗回归全部通过（" + pass + " 项）");
+console.log("✅ v7.1.0 env_scope / applies_to / 负反馈 / 能力遥测 对抗回归全部通过（" + pass + " 项）");
 console.log("=================================================================");

@@ -425,5 +425,5 @@ if (fail.length) {
   for (const f of fail) console.error("   - " + f);
   process.exit(1);
 }
-console.log("✅ v7.0.3 能力门控 / 环境作用域 / 幻觉检测 对抗回归全部通过（" + pass + " 项）");
+console.log("✅ v7.1.0 能力门控 / 环境作用域 / 幻觉检测 对抗回归全部通过（" + pass + " 项）");
 console.log("=================================================================");

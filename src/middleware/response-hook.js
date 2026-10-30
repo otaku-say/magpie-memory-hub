@@ -11,104 +11,28 @@
  * 统计写到 ctx.state.capsTelemetry，由宿主侧钩子落盘（中间件运行时无 fs）。
  */
 import { pickText, stripMemoryBlock, _mwFailOpen } from "./stream-utils.js";
-import { detectCapabilities, resolveToolCall } from "./capability.js";
+import { detectCapabilities, buildCapsTelemetry } from "./capability.js";
+import { extractToolCalls } from "../domain/tool-calls.js";
 
-/* 把四种协议里的 tool_call 名全部拉出来。取不到就返回空数组，绝不抛。 */
+/* 四协议 tool_call 提取已下沉到 src/domain/tool-calls.js（流式与非流式共用）。
+ * 这里保留同名薄包装，因为已有测试与调用方按这个名字断言。 */
 function collectToolCalls(body) {
+  var items = extractToolCalls(body);
   var out = [];
-  if (!body || typeof body !== "object") return out;
-
-  // OpenAI chat / 兼容形态
-  var choices = body.choices;
-  if (Array.isArray(choices)) {
-    for (var i = 0; i < choices.length; i++) {
-      var msg = choices[i] && choices[i].message;
-      if (!msg) continue;
-      var tcs = msg.tool_calls || msg.toolCalls;
-      if (Array.isArray(tcs)) {
-        for (var j = 0; j < tcs.length; j++) {
-          var t = tcs[j];
-          var n = (t && t.function && t.function.name) || (t && t.name) || "";
-          if (typeof n === "string" && n) out.push(n);
-        }
-      }
-      if (msg.function_call && typeof msg.function_call.name === "string") out.push(msg.function_call.name);
-    }
-  }
-
-  // Anthropic / 通用 block 形态
-  if (Array.isArray(body.content)) {
-    for (var k = 0; k < body.content.length; k++) {
-      var blk = body.content[k];
-      if (blk && blk.type === "tool_use" && typeof blk.name === "string") out.push(blk.name);
-    }
-  }
-
-  // OpenAI responses
-  if (Array.isArray(body.output)) {
-    for (var o = 0; o < body.output.length; o++) {
-      var item = body.output[o];
-      if (!item || typeof item !== "object") continue;
-      if ((item.type === "function_call" || item.type === "tool_call") && typeof item.name === "string") out.push(item.name);
-      if (Array.isArray(item.content)) {
-        for (var c = 0; c < item.content.length; c++) {
-          var cp = item.content[c];
-          if (cp && cp.type === "tool_use" && typeof cp.name === "string") out.push(cp.name);
-        }
-      }
-    }
-  }
-
-  // Gemini
-  if (Array.isArray(body.candidates)) {
-    for (var g = 0; g < body.candidates.length; g++) {
-      var cand = body.candidates[g];
-      var parts = cand && cand.content && cand.content.parts;
-      if (!Array.isArray(parts)) continue;
-      for (var p = 0; p < parts.length; p++) {
-        var part = parts[p];
-        if (part && part.functionCall && typeof part.functionCall.name === "string") out.push(part.functionCall.name);
-      }
-    }
-  }
-
+  for (var i = 0; i < items.length; i++) out.push(items[i].name);
   return out;
 }
-
 /* 把检测结果写回 ctx.state，供宿主侧钩子落盘。
- * 只在「确实发生了幻觉」或「注入了引导」时记录，绝不给每条正常响应都加一个对象。 */
+ * 流式请求的工具名由 onEvent 累加在 st._toolCallNames 上，优先级高于本次响应体
+ * （流式时 onResponse 可能拿到的是拼装体，也可能根本不被调用）。 */
 function recordTelemetry(body, ctx) {
   var st = (ctx && ctx.state) || {};
   var caps = st.caps || detectCapabilities((ctx && (ctx.request || st.requestBody)) || null);
-  var names = collectToolCalls(body);
-
-  var memCalls = 0;
-  var halluc = [];
-  for (var i = 0; i < names.length; i++) {
-    var r = resolveToolCall(names[i], caps);
-    if (r.logical) memCalls++;
-    if (r.kind === "unadvertised" || r.kind === "unavailable") {
-      halluc.push({ name: String(names[i]).slice(0, 120), kind: r.kind, logical: r.logical });
-    }
-  }
-
-  var injected = st.guideInjected === true;
-  if (!halluc.length && !injected && !names.length) return;
-
-  st.capsTelemetry = {
-    at: (typeof Date !== "undefined" && Date.now) ? Date.now() : 0,
-    agent: String(st.envAgent || (ctx && ctx.agent) || "").slice(0, 64),
-    tier: st.guideTier == null ? null : st.guideTier,
-    injected: injected,
-    hasTools: !!caps.hasTools,
-    present: !!caps.present,
-    toolCalls: names.length,
-    memoryToolCalls: memCalls,
-    hallucinated: halluc.slice(0, 5),
-    hallucinatedCount: halluc.length
-  };
+  var streamed = Array.isArray(st._toolCallNames) ? st._toolCallNames : [];
+  var names = streamed.length ? streamed : collectToolCalls(body);
+  var t = buildCapsTelemetry(caps, names, st);
+  if (t) st.capsTelemetry = t;
 }
-
 /* ================= onResponse：非流式 ================= */
 function onResponseInner(body, ctx) {
   if (!body) return body;
